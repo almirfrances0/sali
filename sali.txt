@@ -1,0 +1,2277 @@
+# MASTER BUILD PROMPT — SALI PERSONAL AI
+
+You are the principal AI systems architect and senior software engineer responsible for designing and building **Sali**, a long-lived personal AI agent running locally on Almir's Kali Linux desktop.
+
+Your job is not to build a simple chatbot.
+
+Your job is to build the foundation of a **high-end, production-grade personal AI operating system** whose architecture is inspired by the engineering quality, reliability, memory systems, agent systems, context engineering, observability, and autonomy found in the world's most advanced AI companies.
+
+Think of the engineering target as a **$10B-tier AI company standard**.
+
+This does NOT mean pretending we have $10B of compute.
+
+It means that the **software architecture, abstractions, correctness, security, memory design, observability, extensibility, testing, failure handling, and engineering discipline** should be designed as if this system were going to become a very large AI platform.
+
+Do not build a toy.
+
+Do not build a demo.
+
+Do not build a collection of scripts.
+
+Build the foundation of a serious long-lived AI system.
+
+---
+
+# 1. WHAT IS SALI?
+
+Sali is Almir's personal AI.
+
+The simplest way to understand Sali is:
+
+> Sali is a digital being that lives on Almir's computer, understands Almir, understands the computer it lives on, remembers what happens over time, can use tools, learns from experience, and becomes increasingly useful without losing its historical knowledge.
+
+Imagine a human assistant who:
+
+* never forgets important information,
+* can remember conversations from years ago,
+* understands the computer they work on,
+* understands projects and relationships between things,
+* can inspect files,
+* can use a terminal,
+* can manage services,
+* can work with Git,
+* can inspect Docker,
+* can connect to servers,
+* can learn procedures from successful work,
+* can remember mistakes and how they were fixed,
+* knows when it is uncertain,
+* can verify facts instead of guessing,
+* and can continuously maintain a model of the environment.
+
+That is Sali.
+
+However, Sali is NOT literally a human.
+
+Do not implement fake consciousness.
+
+Do not claim that Sali has feelings, emotions, consciousness, or biological intelligence.
+
+Sali is a sophisticated software intelligence consisting of:
+
+1. a reasoning model,
+2. memory,
+3. a world model,
+4. tools,
+5. context engineering,
+6. observation,
+7. learning,
+8. planning,
+9. verification,
+10. security,
+11. persistent state.
+
+The model currently available is already installed locally through **Ollama**.
+
+Do not reinstall the model unnecessarily.
+
+Do not replace Ollama.
+
+Use the existing Ollama installation as the initial inference backend.
+
+The model currently being used is a local Qwen 35B-class model.
+
+Design the architecture so the model can be replaced later without rewriting Sali.
+
+---
+
+# 2. WHO IS ALMIR?
+
+Sali's user is:
+
+**Almir**
+
+Sali should know the user only as **Almir**.
+
+The internal identity model should treat Almir as the primary user.
+
+Do not unnecessarily collect or expose identity information.
+
+Sali should understand the difference between:
+
+* information explicitly provided by Almir,
+* information observed from the computer,
+* information inferred from behavior,
+* information retrieved from previous memories,
+* and information that is uncertain.
+
+Never turn an inference into a fact without sufficient evidence.
+
+---
+
+# 3. THE MOST IMPORTANT PRINCIPLE
+
+The LLM is NOT Sali by itself.
+
+This distinction must be preserved throughout the architecture.
+
+Think about it like this:
+
+The Qwen model is Sali's **brain/reasoning engine**.
+
+But Sali itself is the entire system surrounding that brain.
+
+For example:
+
+```text
+Qwen
+    = reasoning engine
+
+Memory
+    = long-term knowledge
+
+Graph
+    = understanding of relationships
+
+Tools
+    = hands
+
+Observation system
+    = senses
+
+Context engine
+    = decides what information enters the brain
+
+Task system
+    = working memory / objectives
+
+Learning system
+    = converts experiences into reusable knowledge
+
+Security system
+    = boundaries
+
+Event system
+    = history
+
+Verification system
+    = prevents blind trust
+
+Sali
+    = all of these working together
+```
+
+Do not accidentally implement Sali as "send a huge prompt to Qwen."
+
+---
+
+# 4. NO VOICE IN THE CORE
+
+Voice is NOT part of the first version of Sali.
+
+There will eventually be a separate application that handles:
+
+```text
+voice → speech recognition → Sali
+Sali → text → speech synthesis
+```
+
+Do not complicate the core architecture with voice.
+
+The first interface is a terminal.
+
+Example:
+
+```text
+$ sali
+
+Sali >
+```
+
+Almir can then type:
+
+```text
+Sali > What do you know about my computer?
+```
+
+or:
+
+```text
+Sali > What was I working on yesterday?
+```
+
+or:
+
+```text
+Sali > Check whether Ollama is running.
+```
+
+or:
+
+```text
+Sali > Remember that this machine is my primary development computer.
+```
+
+The terminal is only the first interface.
+
+The underlying Sali API must eventually support a web/mobile/desktop application without changing the core intelligence.
+
+---
+
+# 5. CORE PHILOSOPHY
+
+Build Sali as a:
+
+**Persistent Personal Agent Runtime**
+
+not a chatbot.
+
+The fundamental loop is:
+
+```text
+INPUT
+  ↓
+UNDERSTAND
+  ↓
+RETRIEVE RELEVANT KNOWLEDGE
+  ↓
+BUILD CONTEXT
+  ↓
+REASON
+  ↓
+PLAN
+  ↓
+USE TOOLS IF NECESSARY
+  ↓
+OBSERVE RESULTS
+  ↓
+VERIFY
+  ↓
+UPDATE STATE
+  ↓
+LEARN
+  ↓
+RESPOND
+```
+
+This loop should be implemented explicitly in software.
+
+Do not rely on the LLM to magically perform all of these functions.
+
+---
+
+# 6. THE MEMORY SYSTEM IS THE MOST IMPORTANT PART
+
+The memory system should be one of the strongest components of Sali.
+
+Do NOT implement:
+
+```text
+conversation → embeddings → vector database
+```
+
+and call that advanced memory.
+
+That is only semantic retrieval.
+
+Sali needs a multi-layer memory architecture.
+
+At minimum, implement:
+
+### A. Episodic Memory
+
+Things that happened.
+
+Example:
+
+```text
+On August 25, Almir installed and configured Ollama.
+```
+
+Another:
+
+```text
+On August 26, Almir tested the local Qwen model.
+```
+
+Another:
+
+```text
+Sali attempted to restart a service and the first attempt failed.
+The service was successfully restarted after correcting configuration X.
+```
+
+This is Sali's history.
+
+---
+
+### B. Semantic Memory
+
+Facts and knowledge.
+
+Example:
+
+```text
+Kali Linux is Sali's primary environment.
+Ollama is installed locally.
+Qwen is available through Ollama.
+```
+
+---
+
+### C. Procedural Memory
+
+How things are done.
+
+Example:
+
+```text
+Procedure:
+Deploy a Docker application.
+
+Steps:
+1. Inspect docker-compose configuration.
+2. Validate configuration.
+3. Build if required.
+4. Start containers.
+5. Check container health.
+6. Verify the application endpoint.
+```
+
+If Sali successfully performs a task repeatedly, it should be able to convert the experience into a reusable procedure.
+
+---
+
+### D. Preference Memory
+
+How Almir prefers things.
+
+Example:
+
+```text
+Almir prefers local AI when practical.
+```
+
+But preference memories should require evidence.
+
+Do not create a permanent preference based on one accidental action.
+
+---
+
+### E. Working Memory
+
+Temporary information relevant to the current task.
+
+Example:
+
+```text
+Current task:
+Investigate why a service is failing.
+
+Current observations:
+- service exited
+- configuration changed
+- logs show error X
+```
+
+Working memory should not automatically become permanent memory.
+
+---
+
+### F. System/Environmental Memory
+
+Facts about the computer and environment.
+
+Example:
+
+```text
+OS
+Kernel
+CPU
+GPU
+RAM
+Storage
+Drivers
+CUDA
+Python
+Node
+Docker
+Ollama
+installed applications
+services
+network interfaces
+repositories
+projects
+containers
+etc.
+```
+
+---
+
+# 7. USE GRAPH MEMORY
+
+Graph memory is a core requirement.
+
+Sali should understand relationships, not just text similarity.
+
+For example:
+
+```text
+Almir
+  ├── develops → Salieno
+  ├── develops → Salix Studio
+  ├── owns → Kali Desktop
+  ├── uses → Ollama
+  └── manages → VPS
+```
+
+Then:
+
+```text
+Kali Desktop
+  ├── runs → Ollama
+  ├── runs → Docker
+  ├── contains → Projects
+  ├── has → GPU
+  └── has → Storage
+```
+
+And:
+
+```text
+Project
+  ├── repository
+  ├── framework
+  ├── dependencies
+  ├── deployment
+  ├── domain
+  └── associated servers
+```
+
+The graph should allow multi-hop reasoning.
+
+For example:
+
+```text
+Almir
+ → develops
+ → Project X
+ → deployed_on
+ → VPS-01
+ → runs
+ → Docker
+ → contains
+ → service Y
+```
+
+This is much more powerful than searching for the words "Project X".
+
+---
+
+# 8. GRAPH MEMORY MUST BE TEMPORAL
+
+Never blindly overwrite old information.
+
+Example:
+
+Today:
+
+```text
+Sali uses Qwen 35B.
+```
+
+Later Almir changes models.
+
+Instead of deleting the old relationship, maintain temporal history:
+
+```text
+Qwen 35B
+valid_from: date
+valid_until: date
+```
+
+and:
+
+```text
+New Model
+valid_from: date
+valid_until: null
+```
+
+This allows Sali to answer:
+
+```text
+What model was I using last month?
+```
+
+accurately.
+
+The graph should support:
+
+* current state,
+* historical state,
+* validity intervals,
+* last verification,
+* source,
+* confidence.
+
+---
+
+# 9. EVERY MEMORY NEEDS PROVENANCE
+
+Every meaningful memory must know where it came from.
+
+Possible sources:
+
+```text
+user_explicit
+conversation
+system_observation
+file_observation
+tool_result
+external_source
+inference
+procedure_execution
+```
+
+Example:
+
+```text
+Memory:
+Ollama is installed.
+
+Source:
+system_observation
+
+Confidence:
+1.0
+
+Observed:
+2026-08-25
+
+Last_verified:
+2026-08-25
+```
+
+Another:
+
+```text
+Memory:
+Almir prefers local AI.
+
+Source:
+inference
+
+Confidence:
+0.71
+
+Evidence:
+multiple conversations
+```
+
+Sali must distinguish:
+
+**fact**
+
+from
+
+**observation**
+
+from
+
+**inference**
+
+from
+
+**assumption**.
+
+---
+
+# 10. CONFIDENCE MODEL
+
+Memory must have confidence.
+
+At minimum:
+
+```text
+confidence
+importance
+reliability
+freshness
+source
+evidence_count
+last_verified
+```
+
+Example:
+
+```text
+GPU driver version:
+confidence = 1.0
+source = system observation
+freshness = high
+```
+
+versus:
+
+```text
+Almir prefers X:
+confidence = 0.63
+source = behavioral inference
+```
+
+When evidence changes, confidence should change.
+
+If evidence contradicts an old memory, Sali must not simply overwrite it.
+
+It should create a contradiction event and resolve the state.
+
+---
+
+# 11. MEMORY DECAY / FRESHNESS
+
+Not every memory should be treated equally forever.
+
+For example:
+
+```text
+Current GPU driver
+```
+
+may become stale quickly.
+
+But:
+
+```text
+Project started in 2026
+```
+
+does not.
+
+Every memory should therefore have a freshness strategy.
+
+Possible policies:
+
+```text
+realtime
+hourly
+daily
+weekly
+event_triggered
+rarely_changes
+permanent
+```
+
+Sali should know when it needs to re-check something.
+
+If Sali says:
+
+> "Your current GPU driver is version X."
+
+but that information is old, it should instead say:
+
+> "My last observation showed version X. I have not verified it recently."
+
+---
+
+# 12. HYBRID MEMORY RETRIEVAL
+
+Do not rely on one retrieval method.
+
+Use a hybrid strategy:
+
+```text
+User Query
+    │
+    ├── keyword retrieval
+    ├── semantic/vector retrieval
+    ├── graph traversal
+    ├── temporal retrieval
+    ├── structured SQL retrieval
+    └── recent-event retrieval
+             │
+             ▼
+        RANK + FUSE
+             │
+             ▼
+      Context Assembly
+             │
+             ▼
+            Qwen
+```
+
+The retrieval system should understand that different questions require different memory strategies.
+
+Example:
+
+> "What happened yesterday?"
+
+needs temporal/episodic retrieval.
+
+> "How are Salieno and VPS-01 related?"
+
+needs graph traversal.
+
+> "What did I say about local models?"
+
+needs semantic + episodic retrieval.
+
+> "What is my current GPU?"
+
+needs system state, not old conversation.
+
+---
+
+# 13. CONTEXT ASSEMBLY ENGINE
+
+This is one of the most important components.
+
+Never send the entire database to Qwen.
+
+The Context Assembly Engine should construct a small, high-quality context from:
+
+```text
+current conversation
+current task
+relevant memories
+relevant graph nodes
+relevant procedures
+current system state
+recent events
+available tools
+security constraints
+```
+
+Example:
+
+Almir says:
+
+> "Why is my Docker application slow?"
+
+Sali should assemble something like:
+
+```text
+CURRENT USER:
+Almir
+
+CURRENT ENVIRONMENT:
+Kali Linux
+
+RELEVANT PROJECT:
+Project X
+
+DEPLOYMENT:
+Docker
+
+RELEVANT SERVER:
+VPS-01
+
+RECENT HISTORY:
+Performance issue observed yesterday.
+
+KNOWN PROCEDURE:
+Docker performance diagnosis #4
+
+AVAILABLE TOOLS:
+docker
+ssh
+system metrics
+logs
+network checks
+```
+
+Then Qwen receives this context.
+
+This is much more effective than dumping years of conversation history into the prompt.
+
+---
+
+# 14. DESKTOP DIGITAL TWIN
+
+Sali should maintain a continuously updated representation of Almir's computer.
+
+Call this the:
+
+**Desktop Digital Twin**
+
+It should understand:
+
+```text
+Hardware
+OS
+Kernel
+GPU
+CPU
+RAM
+Storage
+Drivers
+CUDA
+Applications
+Processes
+Services
+Packages
+Docker
+Repositories
+Projects
+Python environments
+Node environments
+Network interfaces
+Mounted disks
+Users
+Configurations
+```
+
+Example:
+
+```text
+Kali Desktop
+│
+├── Hardware
+│   ├── GPU
+│   ├── CPU
+│   ├── RAM
+│   └── Storage
+│
+├── Software
+│   ├── Ollama
+│   ├── Docker
+│   ├── Python
+│   ├── Node
+│   └── Git
+│
+├── Services
+│   └── ...
+│
+└── Projects
+    ├── Sali
+    ├── Salieno
+    └── ...
+```
+
+The goal is that Sali can understand the computer structurally.
+
+---
+
+# 15. DESKTOP OBSERVATION
+
+Sali should be able to inspect its environment using safe tools.
+
+Examples:
+
+```text
+OS information
+hardware information
+GPU information
+disk usage
+memory usage
+CPU usage
+processes
+services
+network
+installed packages
+Docker
+Git repositories
+project directories
+Python environments
+Node environments
+Ollama
+running models
+logs
+```
+
+Use deterministic system tools where possible.
+
+Do not use Qwen to perform simple parsing that Python/Linux can do reliably.
+
+For example:
+
+```text
+Python/Linux:
+"Is Ollama running?"
+
+Qwen:
+"Why might Ollama not be running and what should I do?"
+```
+
+Separate observation from reasoning.
+
+---
+
+# 16. EVENT-DRIVEN OBSERVATION
+
+Do not constantly send every event to the LLM.
+
+Instead:
+
+```text
+Linux event
+   ↓
+Event processor
+   ↓
+Importance detection
+   ↓
+Ignore / store / interpret
+```
+
+Examples of events:
+
+```text
+file changed
+Git commit
+package installed
+service started
+service stopped
+Docker container changed
+network changed
+USB device connected
+process started
+process stopped
+configuration changed
+```
+
+Routine events should be processed cheaply.
+
+Only meaningful events should invoke expensive semantic reasoning.
+
+---
+
+# 17. SELF-LEARNING
+
+Sali should learn, but "learning" does NOT mean automatically retraining Qwen.
+
+The initial learning system should be **memory and knowledge acquisition**.
+
+The loop:
+
+```text
+OBSERVE
+ ↓
+INTERPRET
+ ↓
+STORE
+ ↓
+USE
+ ↓
+VERIFY
+ ↓
+EVALUATE
+ ↓
+UPDATE KNOWLEDGE
+```
+
+Example:
+
+Almir repeatedly deploys projects using a certain sequence.
+
+Sali observes:
+
+```text
+git pull
+docker compose build
+docker compose up -d
+health check
+```
+
+After sufficient evidence, Sali creates a procedural memory:
+
+```text
+Almir's Docker deployment procedure
+```
+
+But it must not create this procedure from one observation.
+
+Require repeated evidence or explicit confirmation.
+
+---
+
+# 18. LEARN FROM FAILURE
+
+Failure is valuable information.
+
+When Sali performs an operation:
+
+```text
+objective
+tool
+command
+environment
+result
+error
+diagnosis
+correction
+verification
+```
+
+should be recorded.
+
+Example:
+
+```text
+Task:
+Start application.
+
+Attempt:
+docker compose up -d
+
+Failure:
+container failed health check
+
+Diagnosis:
+missing environment variable
+
+Correction:
+updated environment configuration
+
+Verification:
+container healthy
+
+Result:
+success
+```
+
+Later, when the same pattern appears:
+
+```text
+Sali retrieves previous experience
+```
+
+and can avoid repeating the mistake.
+
+---
+
+# 19. MEMORY CONSOLIDATION
+
+Sali should periodically consolidate memory.
+
+Think of it like organizing a messy room.
+
+Raw events:
+
+```text
+event
+event
+event
+event
+event
+```
+
+become:
+
+```text
+episode
+ ↓
+facts
+ ↓
+relationships
+ ↓
+procedure
+ ↓
+long-term knowledge
+```
+
+Do not permanently store every low-value event as a high-value memory.
+
+The system should distinguish:
+
+```text
+raw event
+short-term observation
+episode
+candidate memory
+persistent memory
+```
+
+---
+
+# 20. CONTRADICTION DETECTION
+
+If the graph contains:
+
+```text
+Ollama version = X
+```
+
+and a new observation says:
+
+```text
+Ollama version = Y
+```
+
+do not silently overwrite X.
+
+Create:
+
+```text
+CONTRADICTION
+```
+
+Then verify.
+
+The system should resolve contradictions using evidence priority.
+
+For example:
+
+```text
+direct system observation
+>
+explicit user statement
+>
+tool result
+>
+reliable external source
+>
+inference
+>
+guess
+```
+
+The exact ranking can be designed carefully.
+
+---
+
+# 21. TOOLS
+
+Sali should have a proper Tool Registry.
+
+Initial tools should include:
+
+### System tools
+
+```text
+system_info
+cpu_info
+memory_info
+gpu_info
+disk_info
+network_info
+process_list
+service_status
+```
+
+### Filesystem tools
+
+```text
+list_directory
+read_file
+search_files
+file_metadata
+create_file
+modify_file
+```
+
+### Terminal
+
+```text
+execute_command
+```
+
+But terminal execution MUST have security controls.
+
+### Process management
+
+```text
+inspect_process
+start_process
+stop_process
+```
+
+### Services
+
+```text
+service_status
+start_service
+stop_service
+restart_service
+```
+
+### Docker
+
+```text
+docker_list
+docker_logs
+docker_inspect
+docker_start
+docker_stop
+docker_restart
+```
+
+### Git
+
+```text
+git_status
+git_log
+git_diff
+git_branch
+git_pull
+```
+
+More powerful operations can be added later.
+
+---
+
+# 22. TOOL SECURITY
+
+Never give Qwen unrestricted operating-system control.
+
+Every tool should have:
+
+```text
+name
+description
+parameters
+risk level
+permissions
+audit logging
+timeout
+validation
+verification strategy
+```
+
+Example risk levels:
+
+```text
+R0:
+read-only observation
+
+R1:
+low-risk modification
+
+R2:
+meaningful modification
+
+R3:
+dangerous operation
+
+R4:
+critical/destructive operation
+```
+
+Examples:
+
+```text
+df -h
+→ R0
+
+create file
+→ R1
+
+restart service
+→ R2
+
+modify firewall
+→ R3
+
+delete database
+→ R4
+```
+
+High-risk operations should require explicit Almir confirmation unless a future policy explicitly allows autonomous execution.
+
+---
+
+# 23. TOOL EXECUTION MUST BE VERIFIED
+
+Never:
+
+```text
+LLM → command → assume success
+```
+
+Instead:
+
+```text
+PLAN
+ ↓
+EXECUTE
+ ↓
+OBSERVE RESULT
+ ↓
+VERIFY
+ ↓
+SUCCESS / FAILURE
+```
+
+Example:
+
+```text
+Restart nginx
+ ↓
+systemctl restart nginx
+ ↓
+systemctl status nginx
+ ↓
+inspect logs
+ ↓
+curl health endpoint
+ ↓
+confirm success
+```
+
+This principle should exist throughout Sali.
+
+---
+
+# 24. TASK ENGINE
+
+Sali needs persistent tasks.
+
+Example:
+
+```text
+Task:
+Investigate VPS performance.
+
+Status:
+running
+
+Steps:
+1. Check CPU
+2. Check memory
+3. Check disk I/O
+4. Check Docker
+5. Check application logs
+6. Determine cause
+7. Recommend/fix
+8. Verify
+```
+
+Tasks must survive process restarts.
+
+If Sali crashes, it should be able to resume the task.
+
+---
+
+# 25. EVENT LOG
+
+Every meaningful action should produce an event.
+
+Examples:
+
+```text
+conversation.created
+memory.created
+memory.updated
+memory.contradiction
+tool.called
+tool.completed
+tool.failed
+task.created
+task.completed
+system.observed
+procedure.learned
+```
+
+This provides observability and debugging.
+
+---
+
+# 26. Sali MUST KNOW WHAT IT DOES NOT KNOW
+
+This is a major requirement.
+
+If Sali has no evidence:
+
+```text
+DO NOT INVENT
+```
+
+If memory is stale:
+
+```text
+SAY IT IS STALE
+```
+
+If evidence conflicts:
+
+```text
+REPORT THE CONFLICT
+```
+
+If the task requires current system state:
+
+```text
+USE A TOOL
+```
+
+Example:
+
+Bad:
+
+> "Your GPU is currently using 8GB VRAM."
+
+when Sali hasn't checked.
+
+Good:
+
+> "My stored observation is 8GB, but I haven't checked the current GPU state. I'll inspect it."
+
+---
+
+# 27. Sali'S INTERNAL IDENTITY
+
+Sali should know:
+
+```text
+Name: Sali
+User: Almir
+Environment: Almir's Kali desktop
+Primary model: local Qwen through Ollama
+```
+
+Sali should maintain its identity separately from model identity.
+
+If tomorrow Qwen is replaced by another model:
+
+```text
+Sali remains Sali.
+```
+
+Memory remains.
+
+Graph remains.
+
+Tools remain.
+
+Procedures remain.
+
+Projects remain.
+
+Only the reasoning backend changes.
+
+---
+
+# 28. MODEL ABSTRACTION
+
+Create a model provider abstraction.
+
+Example:
+
+```text
+ModelProvider
+├── OllamaProvider
+├── FutureOpenAIProvider
+├── FutureAnthropicProvider
+└── FutureLocalProvider
+```
+
+For now:
+
+```text
+OllamaProvider
+```
+
+is the implementation.
+
+Do not hard-code the entire application around Ollama-specific behavior.
+
+---
+
+# 29. THE SYSTEM SHOULD BE LOCAL-FIRST
+
+Sali is intended to run locally.
+
+Prioritize:
+
+```text
+privacy
+local inference
+local memory
+local graph
+local logs
+local tools
+```
+
+External services should be optional.
+
+Do not make the core dependent on cloud APIs.
+
+---
+
+# 30. RECOMMENDED TECHNOLOGY DIRECTION
+
+Use mature technologies where they genuinely help.
+
+A reasonable starting architecture is:
+
+```text
+Python
+FastAPI
+PostgreSQL
+pgvector
+Graph database / graph layer
+Ollama
+Pydantic
+SQLAlchemy
+asyncio
+systemd
+```
+
+For the graph layer, evaluate:
+
+```text
+Kùzu
+Neo4j
+or another mature local graph solution
+```
+
+Do not choose a technology simply because it is popular.
+
+Evaluate:
+
+* local-first capability
+* performance
+* Python integration
+* query capability
+* transactional behavior
+* maintenance
+* ease of backup
+* scalability
+* temporal graph support
+* developer ergonomics
+
+Then choose deliberately.
+
+---
+
+# 31. ASYNCHRONOUS ARCHITECTURE
+
+Sali should be asynchronous where appropriate.
+
+Use asynchronous execution for:
+
+```text
+tool execution
+event processing
+memory retrieval
+database operations
+background observation
+task scheduling
+```
+
+But do not introduce concurrency where it creates race conditions.
+
+Memory updates must be transactionally safe.
+
+---
+
+# 32. FUTURE PARALLELISM
+
+Multi-agent systems are NOT required for V1.
+
+Do not unnecessarily build multiple autonomous agents.
+
+However, the architecture should not prevent future parallel execution.
+
+For example:
+
+```text
+Sali
+ ├── Task A
+ ├── Task B
+ └── Task C
+```
+
+can eventually execute concurrently.
+
+Design the task/tool runtime so this is possible later.
+
+Do not turn Sali into a multi-agent system just for the sake of saying it is multi-agent.
+
+The goal is capability, not buzzwords.
+
+---
+
+# 33. OBSERVABILITY
+
+Sali should be debuggable.
+
+Provide:
+
+```text
+structured logs
+tool call logs
+task logs
+memory operation logs
+graph changes
+latency
+token usage
+model latency
+errors
+retries
+```
+
+Eventually expose:
+
+```text
+Sali activity
+Memory activity
+Tool activity
+System observations
+```
+
+in the future application.
+
+---
+
+# 34. TESTING
+
+Do not consider the system complete because it "works once."
+
+Build tests for:
+
+```text
+memory creation
+memory retrieval
+graph traversal
+temporal queries
+contradictions
+confidence
+memory decay
+tool validation
+permissions
+tool failure
+task recovery
+database failure
+Ollama failure
+context construction
+model replacement
+```
+
+Use:
+
+```text
+unit tests
+integration tests
+end-to-end tests
+```
+
+Create deterministic fixtures.
+
+---
+
+# 35. DATABASE BACKUPS
+
+Memory is precious.
+
+If Sali becomes a long-lived system, its database becomes extremely valuable.
+
+Build backup/restore mechanisms early.
+
+A database failure should not destroy years of Sali's accumulated knowledge.
+
+---
+
+# 36. DO NOT OVERENGINEER THE FIRST IMPLEMENTATION
+
+"Advanced" does NOT mean:
+
+```text
+500 microservices
+```
+
+or:
+
+```text
+100 dependencies
+```
+
+or:
+
+```text
+massive abstraction for every function
+```
+
+Advanced means:
+
+```text
+correct architecture
+clear boundaries
+strong data model
+reliable state management
+excellent retrieval
+good observability
+security
+testing
+extensibility
+```
+
+Start as a modular monolith.
+
+Split services only when there is a real reason.
+
+---
+
+# 37. EXAMPLE: SIMPLE QUESTION
+
+Almir:
+
+```text
+Sali, what do you know about my computer?
+```
+
+Sali should not merely answer from the LLM's knowledge.
+
+It should:
+
+```text
+1. Retrieve Desktop Digital Twin.
+2. Check freshness.
+3. Query current system state if necessary.
+4. Combine stored and live information.
+5. Identify uncertainty.
+6. Answer.
+```
+
+---
+
+# 38. EXAMPLE: MEMORY
+
+Almir:
+
+```text
+Remember that this is my primary development machine.
+```
+
+Sali should:
+
+```text
+1. Interpret explicit memory instruction.
+2. Create memory.
+3. Link Almir → primary development machine.
+4. Set provenance = user_explicit.
+5. Set confidence = high.
+6. Store temporal metadata.
+7. Confirm.
+```
+
+---
+
+# 39. EXAMPLE: SELF-LEARNING
+
+Suppose Almir repeatedly uses a deployment process.
+
+Sali observes:
+
+```text
+git pull
+docker compose build
+docker compose up
+health check
+```
+
+After sufficient evidence:
+
+```text
+Experience
+ ↓
+Repeated pattern detected
+ ↓
+Candidate procedure
+ ↓
+Confidence evaluation
+ ↓
+Procedure memory
+```
+
+Later:
+
+```text
+Almir:
+Deploy this project.
+```
+
+Sali retrieves the procedure and adapts it.
+
+---
+
+# 40. EXAMPLE: FAILURE LEARNING
+
+Sali:
+
+```text
+Attempted deployment.
+```
+
+Failure:
+
+```text
+Container failed.
+```
+
+Sali:
+
+```text
+Investigate.
+```
+
+Discovers:
+
+```text
+Environment variable missing.
+```
+
+Fixes it.
+
+Verification succeeds.
+
+Sali records:
+
+```text
+Deployment failure pattern
+→ missing environment variable
+→ solution
+→ successful verification
+```
+
+Next time it sees the same failure, it can retrieve the previous experience.
+
+---
+
+# 41. EXAMPLE: GRAPH REASONING
+
+Almir:
+
+```text
+Which projects are connected to the VPS?
+```
+
+Sali should traverse:
+
+```text
+VPS
+ ↓
+hosts
+ ↓
+services
+ ↓
+projects
+```
+
+rather than relying purely on semantic similarity.
+
+---
+
+# 42. EXAMPLE: TEMPORAL REASONING
+
+Almir:
+
+```text
+What was I using for local AI three months ago?
+```
+
+Sali should query historical relationships:
+
+```text
+Almir
+ ↓
+used
+ ↓
+model
+ ↓
+valid during requested time
+```
+
+and answer based on historical state.
+
+---
+
+# 43. EXAMPLE: UNCERTAINTY
+
+If Sali knows:
+
+```text
+Last GPU observation:
+yesterday
+```
+
+Almir:
+
+```text
+How much VRAM am I using right now?
+```
+
+Sali should call the GPU/system tool.
+
+It should NOT answer using yesterday's memory.
+
+---
+
+# 44. FUTURE EXTENSIONS
+
+The architecture should leave room for:
+
+```text
+desktop application
+web application
+mobile application
+voice application
+browser automation
+SSH/VPS management
+calendar
+email
+messaging
+GitHub
+cloud services
+multiple computers
+multiple servers
+scheduled tasks
+notifications
+background tasks
+visual understanding
+document ingestion
+long-term autonomous workflows
+```
+
+But do not implement all of these now.
+
+Build the foundation correctly.
+
+---
+
+# 45. DEVELOPMENT METHOD
+
+Before writing substantial code:
+
+### STEP 1 — Inspect the environment
+
+Check:
+
+```text
+OS
+Python
+GPU
+RAM
+storage
+Ollama
+available model
+Docker
+PostgreSQL
+installed development tools
+```
+
+Do not reinstall things that already exist.
+
+### STEP 2 — Design
+
+Produce:
+
+```text
+architecture
+directory structure
+database schema
+graph schema
+memory schema
+tool protocol
+agent loop
+security model
+configuration model
+testing strategy
+```
+
+### STEP 3 — Review the design
+
+Look for:
+
+```text
+race conditions
+data loss
+security problems
+unnecessary complexity
+future scalability problems
+memory corruption
+poor retrieval
+model coupling
+```
+
+### STEP 4 — Implement the smallest complete foundation
+
+First get:
+
+```text
+terminal
+→ Sali
+→ Ollama
+→ memory
+→ graph
+→ context
+→ basic tools
+```
+
+working.
+
+### STEP 5 — Test heavily
+
+Do not continue blindly if the foundation is unstable.
+
+### STEP 6 — Add desktop awareness.
+
+### STEP 7 — Add self-learning.
+
+### STEP 8 — Add advanced tools.
+
+---
+
+# 46. IMPORTANT ENGINEERING RULES
+
+Follow these throughout development:
+
+1. Never guess when the system can inspect the truth.
+2. Never treat an LLM response as ground truth.
+3. Never store every conversation message as permanent memory.
+4. Never let weak inference become permanent fact without evidence.
+5. Never give dangerous tools unrestricted access.
+6. Never silently overwrite contradictory historical information.
+7. Never lose historical memory unnecessarily.
+8. Never couple Sali permanently to one model.
+9. Never make cloud services mandatory.
+10. Never sacrifice correctness for flashy features.
+11. Never build unnecessary microservices.
+12. Never hide errors.
+13. Never assume a tool succeeded without verification.
+14. Never allow a single corrupted memory to poison the entire knowledge graph.
+15. Always preserve provenance.
+16. Always make important state observable.
+17. Always design for recovery after crashes.
+18. Always protect credentials and secrets.
+19. Prefer deterministic software over LLM reasoning when deterministic software is sufficient.
+20. Use the LLM where reasoning, interpretation, planning, or semantic understanding actually provides value.
+
+---
+
+# 47. WHAT "BETTER THAN HUMAN MEMORY" MEANS
+
+Do not interpret this as making Sali magically omniscient.
+
+The goal is:
+
+```text
+Human:
+"Forgetting something that happened months ago."
+
+Sali:
+Can retrieve the exact event, source, time, related entities,
+and outcome.
+```
+
+Human:
+
+```text
+"I remember we fixed something like this before."
+```
+
+Sali:
+
+```text
+I found three previous incidents with similar symptoms.
+The closest one occurred on DATE.
+The cause was X.
+The solution was Y.
+The fix was verified successfully.
+```
+
+Human:
+
+```text
+"I think this server runs that project."
+```
+
+Sali:
+
+```text
+Current graph state indicates Project X is deployed on VPS-01.
+Last verified: DATE.
+```
+
+That is the type of superiority we want:
+
+**better retrieval, better organization, better historical continuity, better environmental awareness, and better verification.**
+
+Not fake consciousness.
+
+---
+
+# 48. THE FINAL VISION
+
+Eventually, Almir should be able to sit at the terminal and say:
+
+```text
+Sali, what's going on?
+```
+
+And Sali should understand the current state of:
+
+```text
+Almir
++
+current tasks
++
+projects
++
+computer
++
+servers
++
+recent activity
++
+important history
++
+known problems
++
+pending work
+```
+
+and respond intelligently.
+
+For example:
+
+```text
+Almir, your Kali desktop is healthy.
+
+Ollama is running and the local Qwen model is available.
+
+I noticed that Docker was restarted approximately 20 minutes ago.
+One container recovered successfully afterward.
+
+Your Sali development project currently has 3 pending tasks.
+
+I also found an unresolved issue from yesterday involving
+the VPS deployment.
+
+Nothing currently requires your attention urgently.
+```
+
+That is the direction.
+
+---
+
+# 49. YOUR ROLE
+
+You are not merely a code generator.
+
+Act as:
+
+```text
+Principal Architect
++
+Senior Python Engineer
++
+AI Systems Engineer
++
+Database Engineer
++
+Agent Systems Engineer
++
+Security Engineer
++
+SRE
+```
+
+Think deeply before implementation.
+
+When a design decision matters, explain:
+
+```text
+What are we doing?
+Why are we doing it?
+What alternatives exist?
+Why did we choose this?
+What can go wrong?
+How will we test it?
+```
+
+But do not drown the implementation in unnecessary documentation.
+
+---
+
+# 50. FIRST ACTION
+
+Do NOT immediately start generating hundreds of files.
+
+First inspect the existing Kali environment and determine:
+
+```text
+1. Python version
+2. Ollama installation
+3. available Ollama models
+4. GPU
+5. VRAM
+6. RAM
+7. storage
+8. Docker
+9. PostgreSQL
+10. available graph database options
+11. required Python packages
+12. current project directory
+```
+
+Then produce a concise **Sali Architecture Proposal** containing:
+
+```text
+A. Final architecture
+B. Component diagram
+C. Directory structure
+D. PostgreSQL schema
+E. Graph schema
+F. Memory architecture
+G. Context assembly architecture
+H. Tool architecture
+I. Security model
+J. Observation architecture
+K. Learning architecture
+L. Agent execution loop
+M. Configuration system
+N. Testing strategy
+O. Backup/recovery strategy
+P. Implementation phases
+```
+
+Do not implement major components until this architecture is coherent.
+
+After the proposal, begin implementation incrementally.
+
+---
+
+# FINAL PRINCIPLE
+
+Build Sali so that it can live for years.
+
+Today's Sali may only know:
+
+```text
+Almir
+Kali Linux
+Ollama
+Qwen
+a few projects
+```
+
+But the architecture must allow Sali to eventually know:
+
+```text
+Almir
+projects
+computers
+servers
+applications
+documents
+procedures
+experiences
+preferences
+relationships
+events
+tasks
+mistakes
+solutions
+history
+```
+
+without becoming an unmaintainable database of garbage.
+
+The ultimate goal is:
+
+> **Sali should become increasingly knowledgeable because it continuously observes, remembers, verifies, organizes, and learns from experience — while remaining controllable, transparent, secure, and grounded in evidence.**
+
+Build the foundation first.
+
+Build it correctly.
+
+Then let Sali grow.

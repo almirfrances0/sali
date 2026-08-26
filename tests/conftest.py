@@ -1,0 +1,103 @@
+"""Test fixtures.
+
+Database tests run against the ephemeral ``sali_test`` database on the live cluster with
+rollback-per-test isolation, and are auto-skipped when Postgres is unreachable (so
+``make ci`` stays green before the one-time bootstrap). No test ever touches Ollama.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator, Iterator
+from typing import Any
+
+import asyncpg
+import pytest
+
+from sali.config.settings import DbSettings, ModelSettings, Settings
+from sali.provider.fake import FakeModelProvider
+
+TEST_DB = "sali_test"
+
+
+@pytest.fixture(scope="session")
+def test_settings() -> Settings:
+    return Settings(db=DbSettings(name=TEST_DB), model=ModelSettings(provider="fake"))
+
+
+async def _reachable(settings: Settings) -> bool:
+    try:
+        conn = await asyncpg.connect(
+            host=settings.db.host, user=settings.db.user, database=settings.db.name
+        )
+        await conn.close()
+        return True
+    except Exception:  # noqa: BLE001 - unreachable DB just means "skip db tests"
+        return False
+
+
+@pytest.fixture(scope="session")
+def db_available(test_settings: Settings) -> bool:
+    return asyncio.run(_reachable(test_settings))
+
+
+@pytest.fixture
+async def db_conn(test_settings: Settings, db_available: bool) -> AsyncIterator[Any]:
+    if not db_available:
+        pytest.skip("Postgres not reachable (run scripts/bootstrap_db.sh)")
+    from sali.db.migrations.runner import apply_migrations
+    from sali.db.pool import init_connection
+
+    conn = await asyncpg.connect(
+        host=test_settings.db.host,
+        user=test_settings.db.user,
+        database=test_settings.db.name,
+        server_settings={"search_path": "sali, public"},
+    )
+    await init_connection(conn)  # jsonb codec
+    await apply_migrations(conn)  # idempotent; commits schema once
+    tx = conn.transaction()
+    await tx.start()
+    try:
+        yield conn
+    finally:
+        await tx.rollback()  # discard all test writes
+        await conn.close()
+
+
+@pytest.fixture
+def fake_provider() -> Iterator[FakeModelProvider]:
+    yield FakeModelProvider()
+
+
+_LOOP_TABLES = (
+    "tool_audit, tool_execution, run_events, agent_runs, message, conversation, "
+    "memory_evidence, memory, stm_observation, event, graph_edge, graph_node, contradiction"
+)
+
+
+@pytest.fixture
+async def live_pool(test_settings: Settings, db_available: bool) -> AsyncIterator[Any]:
+    """A real pool to sali_test (committed writes) for tests that span multiple connections,
+    e.g. the agent loop. Truncates the runtime/memory tables before and after."""
+    if not db_available:
+        pytest.skip("Postgres not reachable (run scripts/bootstrap_db.sh)")
+    from sali.db.migrations.runner import apply_migrations
+    from sali.db.pool import connect, create_pool
+
+    conn = await connect(test_settings)
+    await apply_migrations(conn)
+    await conn.close()
+
+    pool = await create_pool(test_settings)
+
+    async def _clean() -> None:
+        async with pool.acquire() as c:
+            await c.execute(f"TRUNCATE {_LOOP_TABLES} RESTART IDENTITY CASCADE")
+
+    await _clean()
+    try:
+        yield pool
+    finally:
+        await _clean()
+        await pool.close()

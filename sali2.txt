@@ -1,0 +1,1483 @@
+# CRITICAL ARCHITECTURE AMENDMENT — SALI LIVES INSIDE THE DESKTOP
+
+This section is mandatory and overrides any weaker interpretation of the previous specification.
+
+Sali does not merely run ON Almir's Kali Linux desktop.
+
+**Sali lives in the desktop environment.**
+
+The computer is Sali's primary physical environment.
+
+Therefore, Sali must progressively build a deep, continuously updated understanding of the machine, its operating system, its software, its filesystem, its development environments, its network, its tools, its configuration, and the ways those components interact.
+
+The long-term objective is:
+
+> **Sali should understand Almir's computer at a level deeper than Almir does, while always being honest about what it knows, what it has observed, what it inferred, and what it has not yet verified.**
+
+This should be treated as one of the central design goals of the entire system.
+
+---
+
+# 1. THE DESKTOP IS SALI'S ENVIRONMENT
+
+Think of Sali as a digital entity living inside a physical computer.
+
+For a human:
+
+```text
+Human
+ ├── body
+ ├── senses
+ ├── environment
+ ├── memory
+ ├── knowledge
+ ├── skills
+ └── experience
+```
+
+For Sali:
+
+```text
+Sali
+ ├── reasoning model
+ ├── memory
+ ├── environment model
+ ├── observation system
+ ├── tools
+ ├── learned procedures
+ ├── experience
+ └── online knowledge
+```
+
+The Kali desktop is therefore not just a machine that Sali can occasionally control.
+
+It is Sali's **home environment**.
+
+---
+
+# 2. ENVIRONMENTAL KNOWLEDGE
+
+Sali should continuously learn about:
+
+```text
+Operating system
+Kernel
+Boot system
+Hardware
+CPU
+GPU
+RAM
+Storage
+Partitions
+Filesystems
+Drivers
+CUDA
+Networking
+DNS
+Firewall
+Users
+Groups
+Permissions
+Processes
+Services
+Systemd
+APT
+Repositories
+Installed packages
+Python
+Node.js
+npm
+pip
+Git
+Docker
+Ollama
+Shell
+Environment variables
+Configuration files
+Logs
+Cron
+SSH
+Desktop applications
+Development tools
+Editors
+Browsers
+Projects
+Virtual environments
+Containers
+Mounted devices
+USB devices
+Network interfaces
+```
+
+This is not a static configuration file.
+
+It is a **living environment model**.
+
+---
+
+# 3. SALI MUST DISCOVER THE MACHINE
+
+When Sali is first started, it should perform an initial environment discovery.
+
+For example:
+
+```text
+Sali starts
+      ↓
+Environment discovery
+      ↓
+Hardware discovery
+      ↓
+OS discovery
+      ↓
+Software discovery
+      ↓
+Service discovery
+      ↓
+Development environment discovery
+      ↓
+Network discovery
+      ↓
+Project discovery
+      ↓
+Tool discovery
+      ↓
+Knowledge graph construction
+```
+
+The discovery process should be intelligent and incremental.
+
+Do not run dangerous commands.
+
+Do not modify the system during discovery.
+
+Discovery should primarily be read-only.
+
+---
+
+# 4. BUILD A DESKTOP DIGITAL TWIN
+
+Create a dedicated concept called:
+
+**Desktop Digital Twin**
+
+The digital twin represents the known state of Sali's environment.
+
+Example:
+
+```text
+Kali Desktop
+│
+├── Hardware
+│   ├── CPU
+│   ├── GPU
+│   ├── RAM
+│   ├── Storage
+│   └── Devices
+│
+├── Operating System
+│   ├── Distribution
+│   ├── Kernel
+│   ├── Boot
+│   └── Package Manager
+│
+├── Drivers
+│   ├── NVIDIA
+│   ├── CUDA
+│   └── Other Drivers
+│
+├── Software
+│   ├── Ollama
+│   ├── Docker
+│   ├── Git
+│   ├── Python
+│   ├── Node
+│   └── Applications
+│
+├── Services
+│   ├── systemd services
+│   ├── Docker services
+│   └── user services
+│
+├── Network
+│   ├── interfaces
+│   ├── routes
+│   ├── DNS
+│   └── connections
+│
+└── Projects
+    ├── Project A
+    ├── Project B
+    └── Sali
+```
+
+Each object should have:
+
+```text
+identity
+type
+state
+relationships
+source
+confidence
+first_seen
+last_seen
+last_verified
+```
+
+---
+
+# 5. Sali MUST LEARN HOW TO USE THE ENVIRONMENT
+
+This is different from simply knowing that a program exists.
+
+Suppose Sali discovers:
+
+```text
+Docker installed.
+```
+
+That is basic knowledge.
+
+Sali should progressively learn:
+
+```text
+Docker version
+Docker configuration
+Docker daemon
+Docker containers
+Docker networks
+Docker volumes
+Docker Compose
+Docker logs
+Docker health checks
+Docker images
+Docker resource usage
+Docker troubleshooting
+```
+
+And eventually learn procedures such as:
+
+```text
+How to inspect a container
+How to restart a container
+How to diagnose a failed container
+How to inspect container networking
+How to clean unused images safely
+How to troubleshoot Docker daemon problems
+```
+
+The same concept applies to every important tool.
+
+---
+
+# 6. TOOL KNOWLEDGE GRAPH
+
+Sali should maintain a knowledge graph describing tools installed on the system.
+
+For example:
+
+```text
+Docker
+│
+├── installed_at
+├── version
+├── executable
+├── configuration
+├── daemon
+├── commands
+├── capabilities
+├── dependencies
+├── projects_using_it
+├── known_procedures
+└── known_failures
+```
+
+Another example:
+
+```text
+Git
+│
+├── version
+├── executable
+├── configuration
+├── repositories
+├── branches
+├── remotes
+├── credentials configuration
+├── common procedures
+└── learned troubleshooting
+```
+
+Another:
+
+```text
+Ollama
+│
+├── executable
+├── service
+├── API
+├── models
+├── configuration
+├── GPU usage
+├── running processes
+└── known procedures
+```
+
+---
+
+# 7. LEARN LINUX AS A SKILL
+
+Sali should progressively build a deep operational knowledge base for Linux.
+
+This includes:
+
+```text
+shell
+bash
+zsh
+coreutils
+grep
+sed
+awk
+find
+xargs
+jq
+curl
+wget
+tar
+rsync
+ssh
+scp
+systemctl
+journalctl
+ss
+ip
+nmcli
+dig
+nslookup
+lsof
+ps
+top
+htop
+df
+du
+mount
+lsblk
+blkid
+chmod
+chown
+setfacl
+find
+apt
+dpkg
+systemd
+cron
+environment variables
+process management
+signals
+permissions
+users
+groups
+networking
+firewalls
+logs
+kernel information
+hardware diagnostics
+```
+
+But do NOT hard-code thousands of commands into the system.
+
+Instead, create a **Tool Knowledge System**.
+
+Sali should be able to:
+
+```text
+discover
+→ understand
+→ document
+→ test safely
+→ remember
+→ reuse
+→ improve
+```
+
+---
+
+# 8. LINUX KNOWLEDGE SHOULD BE BOTH INTERNAL AND ONLINE
+
+Sali should combine:
+
+```text
+local system knowledge
++
+learned procedural knowledge
++
+online documentation
++
+live internet research
+```
+
+For example:
+
+Almir asks:
+
+```text
+Sali, how can I diagnose this Linux networking problem?
+```
+
+Sali should potentially:
+
+```text
+1. Inspect the actual network state.
+2. Check relevant local configuration.
+3. Search its memory for previous incidents.
+4. Search online documentation if needed.
+5. Compare the external information with the actual machine.
+6. Form a diagnosis.
+7. Suggest or execute safe diagnostics.
+8. Verify the result.
+9. Store the experience.
+```
+
+The important principle is:
+
+> **Do not use the internet when the local machine already contains the answer.**
+
+But:
+
+> **Use the internet by default when external/current knowledge would improve the answer.**
+
+---
+
+# 9. ONLINE ACCESS IS ENABLED BY DEFAULT
+
+Sali should have online access available as a normal capability.
+
+The architecture must support an **Internet Research / Web Tool Layer**.
+
+This should allow Sali to:
+
+```text
+search the web
+retrieve web pages
+read documentation
+inspect official documentation
+search GitHub
+research technical problems
+retrieve current information
+compare documentation
+verify software versions
+research package changes
+research CVEs
+research Linux issues
+research APIs
+```
+
+Do not make internet access synonymous with unrestricted shell networking.
+
+Internet access should happen through explicit tools.
+
+For example:
+
+```text
+web_search
+web_fetch
+documentation_search
+github_search
+```
+
+The model should decide when these tools are useful.
+
+---
+
+# 10. INTERNET KNOWLEDGE MUST HAVE PROVENANCE
+
+If Sali learns something from the internet, record:
+
+```text
+source URL
+domain
+title
+retrieval time
+relevant content
+source reliability
+```
+
+Example:
+
+```text
+Knowledge:
+systemd command behaves X.
+
+Source:
+official systemd documentation
+
+Retrieved:
+DATE
+
+Confidence:
+0.96
+```
+
+Do not store online information as if Sali personally observed it.
+
+Distinguish:
+
+```text
+LOCAL OBSERVATION
+ONLINE INFORMATION
+USER STATEMENT
+INFERENCE
+```
+
+---
+
+# 11. LIVE INFORMATION MUST NOT BECOME PERMANENT MEMORY AUTOMATICALLY
+
+Suppose Sali searches:
+
+```text
+latest Ollama version
+```
+
+The result is current at that moment.
+
+Do not blindly convert:
+
+```text
+latest version = X
+```
+
+into a permanent fact.
+
+Instead:
+
+```text
+External observation:
+Ollama version X was reported by source Y
+at time Z.
+```
+
+Then Sali can later verify it.
+
+This prevents stale web knowledge from contaminating the permanent memory system.
+
+---
+
+# 12. ONLINE RESEARCH SHOULD IMPROVE LOCAL UNDERSTANDING
+
+This is important.
+
+Sali shouldn't merely browse the web and repeat what it finds.
+
+Example:
+
+Internet says:
+
+```text
+Tool X uses configuration file Y.
+```
+
+Sali should then be able to inspect the local machine:
+
+```text
+Does X exist?
+Which version?
+Where is Y?
+Does Y exist?
+What configuration is actually being used?
+```
+
+Then combine:
+
+```text
+Internet knowledge
++
+local observation
+=
+grounded understanding
+```
+
+---
+
+# 13. Sali SHOULD LEARN TO USE TOOLS THROUGH EXPERIENCE
+
+Suppose Sali discovers a tool:
+
+```text
+nvidia-smi
+```
+
+It learns:
+
+```text
+Purpose:
+GPU diagnostics.
+
+Inputs:
+command options.
+
+Outputs:
+GPU state.
+
+Safe operations:
+mostly read-only.
+
+Useful information:
+VRAM
+GPU utilization
+temperature
+processes
+driver version
+```
+
+Then later it can associate:
+
+```text
+GPU problem
+→ nvidia-smi
+```
+
+This becomes procedural knowledge.
+
+---
+
+# 14. TOOL LEARNING
+
+Create a Tool Learning Pipeline:
+
+```text
+Tool discovered
+      ↓
+Tool metadata extracted
+      ↓
+Documentation retrieved
+      ↓
+Capabilities understood
+      ↓
+Risk classified
+      ↓
+Safe examples generated
+      ↓
+Optional sandbox testing
+      ↓
+Knowledge stored
+      ↓
+Procedure created
+```
+
+Sali should NOT blindly execute unknown commands.
+
+Unknown tools should initially be treated as:
+
+```text
+unknown capability
+```
+
+until understood.
+
+---
+
+# 15. LEARN FROM MANUAL COMMANDS
+
+Sali should eventually be able to observe commands Almir runs in the terminal, subject to privacy and security rules.
+
+For example:
+
+Almir runs:
+
+```bash
+docker compose up -d
+```
+
+Sali can learn:
+
+```text
+Almir uses Docker Compose for project X.
+```
+
+If the same workflow occurs repeatedly:
+
+```text
+git pull
+docker compose build
+docker compose up -d
+```
+
+Sali can identify a pattern.
+
+But do not immediately assume every command represents a preferred procedure.
+
+Use:
+
+```text
+repetition
+context
+success
+project relationship
+explicit user confirmation
+```
+
+to increase confidence.
+
+---
+
+# 16. ENVIRONMENT LEARNING MUST BE CONTINUOUS
+
+Sali should not perform discovery once and forget about the machine.
+
+Use:
+
+```text
+initial discovery
++
+scheduled discovery
++
+event-driven observation
++
+on-demand verification
+```
+
+Example:
+
+```text
+Sali starts
+ ↓
+baseline scan
+
+Every appropriate interval
+ ↓
+refresh selected state
+
+When important system event occurs
+ ↓
+update relevant graph nodes
+
+When Almir asks about something
+ ↓
+verify live state if necessary
+```
+
+---
+
+# 17. LEARN THE MACHINE'S NORMAL STATE
+
+Sali should eventually learn what "normal" means for this specific computer.
+
+For example:
+
+```text
+normal GPU temperature
+normal RAM usage
+normal disk usage
+normal services
+normal Docker containers
+normal network interfaces
+normal Ollama behavior
+normal CPU load
+```
+
+This enables anomaly detection.
+
+Example:
+
+```text
+Sali notices:
+Disk usage is significantly higher than normal.
+```
+
+It can then investigate:
+
+```text
+Which directory changed?
+Which process created the files?
+When did the increase happen?
+Is this expected?
+```
+
+Do not make automatic destructive corrections.
+
+Detection first.
+
+Verification second.
+
+Action according to permissions.
+
+---
+
+# 18. ENVIRONMENT TIMELINE
+
+Sali should maintain a timeline of meaningful changes.
+
+Example:
+
+```text
+August 25
+ ├── Ollama installed
+ ├── Qwen model downloaded
+ └── Sali initialized
+
+August 26
+ ├── PostgreSQL configured
+ ├── Sali memory database created
+ └── Docker configuration changed
+
+August 27
+ └── NVIDIA driver updated
+```
+
+This allows questions like:
+
+```text
+What changed recently?
+
+What changed before this problem started?
+
+When did Docker start behaving differently?
+
+What did I install last week?
+
+Which configuration changed yesterday?
+```
+
+---
+
+# 19. CAUSAL INVESTIGATION
+
+Eventually Sali should be able to correlate:
+
+```text
+event A
+ ↓
+configuration change
+ ↓
+event B
+ ↓
+failure
+```
+
+For example:
+
+```text
+NVIDIA driver updated
+        ↓
+reboot
+        ↓
+CUDA behavior changed
+        ↓
+Ollama performance changed
+```
+
+Sali should not automatically declare causality.
+
+It should say something like:
+
+> "The driver update occurred 8 minutes before the first observed Ollama performance change. This is a possible causal relationship, but it has not been confirmed."
+
+This distinction is critical.
+
+---
+
+# 20. LOCAL + ONLINE + MEMORY CONTEXT
+
+The context engine should eventually have three major knowledge sources:
+
+```text
+PERSONAL MEMORY
+       +
+ENVIRONMENT STATE
+       +
+EXTERNAL KNOWLEDGE
+```
+
+Example:
+
+```text
+Almir asks:
+"Why isn't this package working?"
+```
+
+Sali should reason from:
+
+```text
+1. What Almir has done before.
+2. What the machine currently looks like.
+3. What the project requires.
+4. What the package documentation says.
+5. What current online information says.
+```
+
+Then produce a grounded answer.
+
+---
+
+# 21. SALI'S ENVIRONMENTAL KNOWLEDGE SHOULD GROW ORGANICALLY
+
+Do not attempt to teach Sali every Linux command manually.
+
+The system should be designed so that knowledge grows naturally.
+
+For example:
+
+```text
+Sali discovers command
+       ↓
+reads documentation
+       ↓
+understands purpose
+       ↓
+classifies risk
+       ↓
+uses safely
+       ↓
+observes result
+       ↓
+stores experience
+       ↓
+improves procedure
+```
+
+This creates an expanding operational knowledge base.
+
+---
+
+# 22. ONLINE ACCESS + TOOL ACCESS + MEMORY
+
+These three systems should form a feedback loop:
+
+```text
+                ┌───────────────┐
+                │    INTERNET   │
+                └───────┬───────┘
+                        │
+                        ▼
+                External Knowledge
+                        │
+                        ▼
+┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+│   MEMORY     │◄──│     SALI     │──►│    TOOLS     │
+└──────────────┘   └──────────────┘   └──────┬───────┘
+       ▲                                      │
+       │                                      ▼
+       │                              Desktop Environment
+       │                                      │
+       └────────────── observations ──────────┘
+```
+
+Sali therefore:
+
+```text
+learns
+→ acts
+→ observes
+→ verifies
+→ remembers
+→ improves
+```
+
+---
+
+# 23. IMPORTANT: Sali SHOULD NOT BE FULLY AUTONOMOUS BY DEFAULT
+
+Sali should be capable of autonomy, but autonomy should be governed by permissions.
+
+Create policies such as:
+
+```text
+READ
+WRITE
+EXECUTE
+NETWORK
+SYSTEM
+DESTRUCTIVE
+```
+
+Example:
+
+```text
+Read CPU information
+→ automatic
+
+Search the web
+→ automatic
+
+Read project source code
+→ automatic if permitted
+
+Restart development service
+→ potentially automatic depending on policy
+
+Delete files
+→ confirmation required
+
+Modify firewall
+→ confirmation required
+
+Delete database
+→ explicit confirmation required
+```
+
+The exact policy system should be configurable.
+
+---
+
+# 24. INTERNET ACCESS SHOULD ALSO BE AUDITABLE
+
+Record:
+
+```text
+which tool
+which query
+which URL
+when
+why
+what was retrieved
+what knowledge was created
+```
+
+This is important for debugging Sali's reasoning.
+
+---
+
+# 25. SALI SHOULD KNOW ITS OWN ENVIRONMENTAL BLIND SPOTS
+
+Example:
+
+```text
+Sali knows:
+Docker exists.
+
+Sali does not know:
+Docker Compose project X's deployment procedure.
+```
+
+It should be able to represent:
+
+```text
+known
+partially known
+unknown
+stale
+uncertain
+```
+
+This allows Sali to intentionally explore its environment.
+
+---
+
+# 26. ENVIRONMENT EXPLORATION
+
+Create a concept called:
+
+**Knowledge Exploration**
+
+When Sali identifies an important unknown, it can investigate.
+
+Example:
+
+```text
+Unknown:
+What services are running?
+
+        ↓
+
+systemctl/system APIs
+
+        ↓
+
+discover services
+
+        ↓
+
+inspect important services
+
+        ↓
+
+identify relationships
+
+        ↓
+
+store knowledge
+```
+
+Another:
+
+```text
+Unknown:
+How does this project deploy?
+
+        ↓
+
+inspect repository
+
+        ↓
+
+find Dockerfile
+find compose file
+find scripts
+find CI configuration
+
+        ↓
+
+construct deployment model
+```
+
+This is how Sali gradually learns the machine.
+
+---
+
+# 27. THE MACHINE SHOULD BECOME A GRAPH
+
+Eventually the graph should look conceptually like:
+
+```text
+                       ALMIR
+                         │
+                    owns/uses
+                         │
+                         ▼
+                    KALI DESKTOP
+                         │
+        ┌────────────────┼────────────────┐
+        │                │                │
+        ▼                ▼                ▼
+     HARDWARE         SOFTWARE         NETWORK
+        │                │                │
+        ▼                ▼                ▼
+      NVIDIA           Ollama          Interface
+        │                │
+        ▼                ▼
+       GPU             Qwen
+                         │
+                         ▼
+                       SALI
+                         │
+              ┌──────────┼──────────┐
+              ▼          ▼          ▼
+           Memory      Tools      Tasks
+              │
+              ▼
+           Projects
+              │
+              ▼
+            VPS
+```
+
+This graph should become increasingly detailed as Sali learns.
+
+---
+
+# 28. ONLINE ACCESS SHOULD BE A FIRST-CLASS TOOL CATEGORY
+
+The Tool Registry should eventually contain categories such as:
+
+```text
+SYSTEM
+FILESYSTEM
+PROCESS
+SERVICES
+NETWORK
+DOCKER
+GIT
+OLLAMA
+PYTHON
+NODE
+DATABASE
+WEB
+DOCUMENTATION
+GITHUB
+SSH
+```
+
+The exact tools can grow over time.
+
+---
+
+# 29. Sali SHOULD KNOW WHICH TOOL TO USE
+
+Do not hard-code every decision.
+
+Example:
+
+User:
+
+```text
+Why is my GPU memory high?
+```
+
+Sali should reason:
+
+```text
+Need current GPU state
+→ GPU/system tool
+```
+
+User:
+
+```text
+What does this NVIDIA error mean?
+```
+
+Sali should reason:
+
+```text
+Need current logs
++
+possibly web research
+```
+
+User:
+
+```text
+How did we fix this before?
+```
+
+Sali should reason:
+
+```text
+Need episodic memory
++
+past tool results
+```
+
+User:
+
+```text
+What does the latest documentation say?
+```
+
+Sali should reason:
+
+```text
+Need online research
+```
+
+The agent should dynamically select the correct source of truth.
+
+---
+
+# 30. FINAL ENVIRONMENTAL GOAL
+
+After months of operation, Sali should have learned a substantial model of the environment.
+
+It should be able to answer questions such as:
+
+```text
+What is installed?
+
+What services are running?
+
+What projects exist?
+
+Which projects use Docker?
+
+Which projects use Python?
+
+Which project uses this port?
+
+Which service depends on this database?
+
+What changed yesterday?
+
+What caused this service to fail last time?
+
+How do I normally deploy this project?
+
+Which commands do I usually use?
+
+What tools are available?
+
+Which tool is appropriate for this problem?
+
+What is the current GPU state?
+
+What is the current storage situation?
+
+Which process is consuming resources?
+
+What external documentation applies?
+
+What have we already tried?
+
+What worked?
+
+What failed?
+
+What did we learn?
+```
+
+And importantly:
+
+```text
+Sali should be able to discover answers rather than merely remember them.
+```
+
+---
+
+# 31. THE ULTIMATE LOOP
+
+The long-term Sali architecture should implement this loop:
+
+```text
+                ┌─────────────────────┐
+                │      OBSERVE        │
+                └──────────┬──────────┘
+                           ↓
+                ┌─────────────────────┐
+                │      UNDERSTAND     │
+                └──────────┬──────────┘
+                           ↓
+                ┌─────────────────────┐
+                │       REMEMBER      │
+                └──────────┬──────────┘
+                           ↓
+                ┌─────────────────────┐
+                │        LEARN        │
+                └──────────┬──────────┘
+                           ↓
+                ┌─────────────────────┐
+                │        PLAN         │
+                └──────────┬──────────┘
+                           ↓
+                ┌─────────────────────┐
+                │         ACT         │
+                └──────────┬──────────┘
+                           ↓
+                ┌─────────────────────┐
+                │       VERIFY        │
+                └──────────┬──────────┘
+                           │
+                           └──────────────► OBSERVE
+```
+
+This is the core philosophy of Sali.
+
+Sali should not simply become a model with a memory database.
+
+Sali should become a **persistent learning agent with a continuously maintained model of its environment.**
+
+---
+
+# 32. THE MOST IMPORTANT SENTENCE
+
+Build the system around this principle:
+
+> **Sali should never need to know everything on day one. Sali needs to be exceptionally good at discovering, understanding, verifying, remembering, connecting, and learning new things about its environment.**
+
+That is how Sali can eventually know the machine better than its owner.
+
+Not because someone manually programmed every fact into it.
+
+But because the architecture allows it to continuously learn its environment.
+
+---
+
+# 33. IMPLEMENTATION REQUIREMENT
+
+When designing the architecture, explicitly include:
+
+```text
+Environment Discovery Engine
+Desktop Digital Twin
+Tool Discovery Engine
+Tool Knowledge Graph
+Linux Knowledge System
+Online Research Layer
+Environment Observation Engine
+Event Stream
+Environment Timeline
+Knowledge Exploration Engine
+Memory Consolidation
+Procedural Learning
+Failure Learning
+Hybrid Retrieval
+Context Assembly
+Tool Registry
+Permission System
+Verification Engine
+```
+
+These are not optional conceptual ideas.
+
+They are architectural capabilities that the system should be designed to support.
+
+Implement them incrementally rather than trying to build everything at once.
+
+---
+
+# 34. FIRST BOOT BEHAVIOR
+
+When Sali runs for the first time, the experience should eventually resemble:
+
+```text
+$ sali
+
+Initializing Sali...
+
+[✓] Reasoning engine
+[✓] Memory system
+[✓] Graph system
+[✓] Tool registry
+[✓] Environment observer
+[✓] Internet tools
+[✓] Security policy
+
+Discovering environment...
+
+[✓] Operating system
+[✓] Hardware
+[✓] GPU
+[✓] Storage
+[✓] Network
+[✓] Applications
+[✓] Services
+[✓] Development environments
+[✓] Projects
+[✓] Containers
+[✓] Ollama
+[✓] Available models
+
+Environment model initialized.
+
+I am Sali.
+
+I know you as Almir.
+
+I am currently learning this computer and will continue
+maintaining an updated model of the environment.
+
+Sali >
+```
+
+This should be the beginning of a long-lived system, not a one-time setup script.
+
+---
+
+# FINAL REQUIREMENT
+
+Do not interpret "Sali should know the computer better than Almir" as permission to constantly scan, execute, modify, or exfiltrate everything.
+
+The goal is:
+
+**deep knowledge + continuous learning + strong observation + verification + controlled action + privacy + security.**
+
+Sali should become extremely capable while remaining transparent and controllable.
+
+The desktop is Sali's home.
+
+The memory is Sali's history.
+
+The graph is Sali's understanding of relationships.
+
+The tools are Sali's hands.
+
+The observation engine is Sali's awareness of its environment.
+
+The internet is Sali's external source of current knowledge.
+
+The reasoning model is Sali's reasoning engine.
+
+The learning system is how Sali improves over time.
+
+Together, these systems form **Sali**.

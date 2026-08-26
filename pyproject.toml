@@ -1,0 +1,106 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sali"
+version = "0.0.0"
+description = "Sali — a local-first, long-lived personal AI agent that lives on the machine."
+requires-python = ">=3.14"
+readme = "README.md"
+authors = [{ name = "Almir" }]
+dependencies = [
+    "asyncpg>=0.30",
+    "pydantic>=2.11",
+    "pydantic-settings>=2.6",
+    "structlog>=25.0",
+    "typer>=0.15",
+    "rich>=14.0",
+    "tenacity>=9.0",
+    "httpx>=0.28",
+    "ollama>=0.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5",
+    "ruff>=0.7",
+    "mypy>=1.13",
+    "import-linter>=2.0",
+]
+
+[project.scripts]
+sali = "sali.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sali"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
+ignore = ["E501"]  # line length handled by formatter; long SQL/strings tolerated
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "db: test requires a reachable Postgres (auto-skipped if unavailable)",
+    "live: test hits real Ollama (opt-in, excluded from `make ci`)",
+]
+filterwarnings = ["error::DeprecationWarning"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+warn_unused_configs = true
+plugins = ["pydantic.mypy"]
+files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["asyncpg.*", "ollama.*"]
+ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["sali"]
+branch = true
+
+[tool.coverage.report]
+exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError", "\\.\\.\\."]
+
+# Enforce the layered architecture (§A): higher layers may import lower, never the reverse,
+# and concrete model backends are wired only at the edges (model-agnosticism, rule 10).
+[tool.importlinter]
+root_package = "sali"
+
+[[tool.importlinter.contracts]]
+name = "Layered architecture (inward dependencies only)"
+type = "layers"
+layers = [
+    "sali.cli",
+    "sali.runtime",
+    "sali.context",
+    "sali.retrieval",
+    "sali.memory | sali.graph",
+    "sali.security | sali.verify",
+    "sali.tools",
+    "sali.provider",
+    "sali.db",
+    "sali.obs",
+    "sali.config",
+    "sali.core",
+]
+
+[[tool.importlinter.contracts]]
+name = "Concrete model backends are wired only at the edges"
+type = "forbidden"
+source_modules = [
+    "sali.memory", "sali.graph", "sali.retrieval", "sali.context",
+    "sali.runtime", "sali.tools", "sali.security", "sali.verify",
+]
+forbidden_modules = ["sali.provider.ollama", "sali.provider.fake"]
