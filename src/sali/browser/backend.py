@@ -39,7 +39,7 @@ class PlaywrightFirefox:
         if self._page is not None:
             return
         try:
-            from playwright.async_api import async_playwright  # type: ignore[import-not-found]
+            from playwright.async_api import async_playwright
         except ImportError as exc:
             raise BrowserUnavailable(f"browser needs Playwright — run: {_INSTALL}") from exc
         self._pw = await async_playwright().start()

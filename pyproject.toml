@@ -73,7 +73,12 @@ plugins = ["pydantic.mypy"]
 files = ["src", "tests"]
 
 [[tool.mypy.overrides]]
-module = ["asyncpg.*", "ollama.*", "jsonschema.*", "uvicorn.*", "websockets.*"]
+# Third-party without type info, and the OPTIONAL §44 extras (pypdf/icalendar/playwright/keyring):
+# treated as untyped so type-checking passes whether or not the extra is installed.
+module = [
+    "asyncpg.*", "ollama.*", "jsonschema.*", "uvicorn.*", "websockets.*",
+    "pypdf.*", "icalendar.*", "playwright.*", "keyring.*",
+]
 ignore_missing_imports = true
 
 [tool.coverage.run]

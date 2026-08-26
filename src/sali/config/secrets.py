@@ -104,7 +104,7 @@ class SecretStore:
 
     def _from_keyring(self, ref: str) -> str | None:
         try:
-            import keyring  # type: ignore[import-not-found]  # optional third tier
+            import keyring  # optional third tier
         except ImportError:
             return None
         try:

@@ -31,7 +31,7 @@ def extract_text(path: Path) -> tuple[str, str]:
 
 def _extract_pdf(path: Path) -> tuple[str, str]:
     try:
-        import pypdf  # type: ignore[import-not-found]  # optional — [optional-dependencies].pdf
+        import pypdf  # optional — [optional-dependencies].pdf
     except ImportError:
         return "", "needs_pypdf"
     try:

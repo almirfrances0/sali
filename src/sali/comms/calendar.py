@@ -103,7 +103,7 @@ def _build_ics(uid: str, summary: str, start: datetime, end: datetime, location:
 
 def _parse_vevent(block: str) -> CalendarEvent | None:
     try:
-        import icalendar  # type: ignore[import-untyped]  # optional — robust parse when present
+        import icalendar  # optional — robust parse when present
         cal = icalendar.Calendar.from_ical("BEGIN:VCALENDAR\r\n" + block + "\r\nEND:VCALENDAR")
         for comp in cal.walk("VEVENT"):
             start = comp.get("DTSTART").dt
