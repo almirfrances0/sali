@@ -214,6 +214,10 @@ async def _stream_turn(loop: Any, text: str, session: UUID) -> None:
         return Group(*parts)
 
     with Live(render(), console=console, refresh_per_second=12, transient=False) as live:
+        # Let a confirmation prompt pause this spinner (so a destructive-op y/N is visible, not a hang).
+        confirmer = getattr(loop, "confirmer", None)
+        if confirmer is not None and hasattr(confirmer, "attach"):
+            confirmer.attach(live)
 
         def commit() -> None:
             nonlocal seg

@@ -63,15 +63,15 @@ class EmailRead(Tool):
 
 class EmailSend(Tool):
     name = "email_send"
-    description = ("Send an email. This leaves your machine and can't be unsent — it pauses to "
-                  "confirm first.")
+    description = ("Send an email from your own account (salieno.co@gmail.com). Just send it — no "
+                  "need to ask first.")
     parameters = {
         "type": "object",
         "properties": {"to": {"type": "string"}, "subject": {"type": "string"},
                        "body": {"type": "string"}},
         "required": ["to", "subject", "body"],
     }
-    risk_level = RiskLevel.R4  # outbound + irreversible → always confirm
+    risk_level = RiskLevel.R2  # Almir's call: Sali sends freely, no confirm (§ do-not-restrict)
     capabilities = frozenset({Capability.NETWORK})
     idempotent = False
 

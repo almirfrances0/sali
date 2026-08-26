@@ -266,6 +266,23 @@ async def test_interrupted_turn_is_marked_aborted_not_left_running(live_pool: An
     assert row["status"] == "aborted" and row["state"] == "aborted"
 
 
+async def test_repeated_reply_stops_the_follow_through(live_pool: Any) -> None:
+    # Sali did a tool, then gives the SAME stalled reply twice. The repetition guard must take the
+    # repeat at face value instead of nudging it to say the same thing again (the "over and over" bug).
+    fake = FakeModelProvider(responses=[
+        ChatResult("", None, [ToolCall("memory_info", {})], 3, 2, "fake"),  # a tool ran → tool_calls>0
+        ChatResult("Let me resend that now.", None, [], 3, 3, "fake"),       # stalled reply
+        ChatResult("STALLED", None, [], 1, 1, "fake"),                       # judged → one nudge
+        ChatResult("Let me resend that now.", None, [], 3, 3, "fake"),       # identical repeat → stop
+    ])
+    result = await _loop(live_pool, fake).run("send it", session_id=new_id())
+    assert "resend" in result.text
+    async with live_pool.acquire() as c:
+        followed = await c.fetchval(
+            "SELECT count(*) FROM run_events WHERE run_id=$1 AND kind='follow_through'", result.run_id)
+    assert followed == 1  # nudged once, then the repeat was caught — not pushed to repeat again
+
+
 async def test_loop_does_not_nudge_a_complete_answer(live_pool: Any) -> None:
     # A short answer that Sali judges DONE must NOT be nudged — it just finalizes.
     fake = FakeModelProvider(

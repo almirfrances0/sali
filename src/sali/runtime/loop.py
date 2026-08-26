@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import difflib
 import json
 import re
 from collections.abc import AsyncIterator
@@ -118,6 +119,15 @@ _JSON_RECOVERY_NUDGE = (
 _LEAKED_TOOL_JSON = re.compile(
     r'^\s*[\[{].*"(name|tool_name|function|arguments|parameters)"\s*:', re.IGNORECASE | re.DOTALL
 )
+
+
+def _too_similar(current: str, previous: str) -> bool:
+    """Is this reply essentially a repeat of the last one? Used to stop Sali saying the same thing
+    over and over when it's stuck (e.g. a tool keeps failing and it keeps narrating 'let me retry')."""
+    if not current or not previous:
+        return False
+    a, b = " ".join(current.lower().split()), " ".join(previous.lower().split())
+    return a == b or difflib.SequenceMatcher(None, a, b).ratio() > 0.85
 
 
 def _looks_like_leaked_tool_call(text: str) -> bool:
@@ -400,6 +410,7 @@ class AgentLoop:
                 final_text = ""
                 iteration = 0
                 follow_through = 0
+                last_reply = ""  # the previous tool-less reply, to catch Sali repeating itself
                 json_recovery = 0
                 tool_sigs: dict[str, int] = {}  # signatures of tool calls seen this turn (loop guard)
                 failed_sigs: dict[str, tuple[int, str]] = {}  # sig -> (failures, last redacted error)
@@ -467,7 +478,11 @@ class AgentLoop:
                         # gate on tool_calls > 0 — a purely conversational reply (a greeting, a
                         # recall answered from memory) is taken at face value and never pays for the
                         # extra self-judge inference. Bounded so it can never spin; model judges itself.
-                        if (tool_calls > 0 and follow_through < _MAX_FOLLOW_THROUGH
+                        # If this reply just repeats the last one, Sali is stuck spinning — take it as
+                        # final instead of nudging it to say the same thing yet again.
+                        repeating = _too_similar(res.content, last_reply)
+                        last_reply = res.content
+                        if (tool_calls > 0 and follow_through < _MAX_FOLLOW_THROUGH and not repeating
                                 and await self._stalled(user_input, res.content, journal)):
                             follow_through += 1
                             messages.append(ChatMessage(role="assistant", content=res.content))

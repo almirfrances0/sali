@@ -98,8 +98,9 @@ async def test_email_tool_reports_not_configured_clearly() -> None:
     assert not res.ok and "set up" in (res.error or "")
 
 
-def test_outbound_actions_are_r4() -> None:
-    # Sending mail / creating an event leaves the machine and is irreversible → always confirm.
-    assert EmailSend.risk_level is RiskLevel.R4
-    assert CalendarAdd.risk_level is RiskLevel.R4
-    assert EmailSearch.risk_level is RiskLevel.R1  # reading is free
+def test_outbound_risk_levels() -> None:
+    # Almir's call: email sends immediately, no confirm (do-not-restrict). Creating a calendar event
+    # on a shared calendar still confirms. Reading is always free.
+    assert EmailSend.risk_level is RiskLevel.R2  # sends freely, no confirm
+    assert CalendarAdd.risk_level is RiskLevel.R4  # still confirms
+    assert EmailSearch.risk_level is RiskLevel.R1

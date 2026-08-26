@@ -47,6 +47,18 @@ async def consolidate_stm(
         return 0
     if not episode:
         return 0
+    # The model can distill the same summary twice (identical STM → identical episode). Skip if that
+    # exact episode is already current — otherwise the insert trips ux_memory_current and aborts the
+    # whole consolidation pass. Clear the folded raw either way so it doesn't pile up forever.
+    already = await conn.fetchval(
+        "SELECT 1 FROM memory WHERE layer='episodic'::memory_layer "
+        "AND content_hash = digest($1, 'sha256') AND valid_until IS NULL LIMIT 1",
+        episode,
+    )
+    if already:
+        await conn.execute(
+            "DELETE FROM stm_observation WHERE id = ANY($1::uuid[])", [r["id"] for r in rows])
+        return 0
     await memory_writer.remember(
         conn, layer=MemoryLayer.EPISODIC, content=episode,
         source=MemorySource.CONVERSATION, importance=0.4, obs_conf=0.7,
