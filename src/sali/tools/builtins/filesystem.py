@@ -7,7 +7,6 @@ can escape those roots because every path is realpath-resolved before the check.
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -169,14 +168,10 @@ class CreateFile(Tool):
 
 class ModifyFile(Tool):
     name = "modify_file"
-    description = "Overwrite an existing file's content (optimistic-locked on its current sha256)."
+    description = "Overwrite an existing file with new text content."
     parameters = {
         "type": "object",
-        "properties": {
-            "path": {"type": "string"},
-            "content": {"type": "string"},
-            "expected_sha256": {"type": "string"},
-        },
+        "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
         "required": ["path", "content"],
     }
     risk_level = RiskLevel.R1  # base; assess() escalates writes outside Sali's home
@@ -187,17 +182,15 @@ class ModifyFile(Tool):
         return RiskLevel.R1 if _in_free_zone(args.get("path", "")) else RiskLevel.R4
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        # No sha256 optimistic lock: the model can't compute a real hash of the file bytes, so it
+        # guessed one and every edit was rejected as "stale". Sali is the only writer here — it just
+        # writes. (Create makes parent dirs; modify simply replaces content.)
         try:
             path = ctx.paths.check_write(args["path"])
         except PathViolation as exc:
             return ToolResult(ok=False, display="denied", error=str(exc))
         if not path.is_file():
             return ToolResult(ok=False, display="not a file", error=f"{path} is not an existing file")
-        expected = args.get("expected_sha256")
-        if expected:
-            current = hashlib.sha256(path.read_bytes()).hexdigest()
-            if current != expected:
-                return ToolResult(ok=False, display="stale", error="file changed since it was read")
         content = str(args["content"])
         path.write_text(content, encoding="utf-8")
         return ToolResult(ok=True, output={"path": str(path), "bytes": len(content.encode())},
