@@ -40,6 +40,12 @@ from sali.tools.registry import ToolRegistry
 _VOICE: dict[str, Any] = {
     "temperature": 0.7, "top_k": 40, "top_p": 0.95, "presence_penalty": 0.3, "repeat_penalty": 1.1,
 }
+_SUMMARIZE: dict[str, Any] = {"temperature": 0.3, "top_k": 40, "top_p": 0.9}
+
+# Fold older turns into a running summary once this many uncompacted messages accumulate,
+# always keeping the most recent few verbatim.
+_COMPACT_AFTER = 24
+_KEEP_RECENT = 6
 
 
 @dataclass(slots=True)
@@ -209,6 +215,7 @@ class AgentLoop:
                 yield LoopEvent("final", final_text, {
                     "run_id": str(journal.run_id), "iterations": iteration, "tool_calls": tool_calls,
                 })
+                await self._maybe_compact(conn, session_id)  # keep the one session from ever breaking
             except Exception as exc:
                 self.log.error("run_failed", run_id=str(journal.run_id), error=str(exc))
                 await journal.event("run.error", {"error": str(exc)})
@@ -381,11 +388,60 @@ class AgentLoop:
         await conn.execute("UPDATE conversation SET last_active=now() WHERE id=$1", session_id)
 
     async def _load_history(self, conn: Any, session_id: UUID) -> list[tuple[str, str]]:
+        """Prior turns: the running summary (if any) plus the recent verbatim messages."""
+        conv = await conn.fetchrow(
+            "SELECT summary, summary_through_seq FROM conversation WHERE id=$1", session_id
+        )
+        summary = conv["summary"] if conv else None
+        through = conv["summary_through_seq"] if conv else 0
         rows = await conn.fetch(
-            "SELECT role, content FROM message WHERE conversation_id=$1 ORDER BY seq DESC LIMIT 6",
+            "SELECT role, content FROM message WHERE conversation_id=$1 AND seq > $2 "
+            "ORDER BY seq DESC LIMIT 8",
+            session_id, through,
+        )
+        history: list[tuple[str, str]] = [(r["role"], r["content"]) for r in reversed(rows)]
+        if summary:
+            history.insert(0, ("earlier", summary))
+        return history
+
+    async def _maybe_compact(self, conn: Any, session_id: UUID) -> None:
+        """When the conversation grows long, summarize older turns so the session never breaks."""
+        row = await conn.fetchrow(
+            "SELECT summary, summary_through_seq, "
+            "  (SELECT max(seq) FROM message WHERE conversation_id=$1) AS max_seq, "
+            "  (SELECT count(*) FROM message WHERE conversation_id=$1 "
+            "     AND seq > summary_through_seq) AS uncompacted "
+            "FROM conversation WHERE id=$1",
             session_id,
         )
-        return [(r["role"], r["content"]) for r in reversed(rows)]
+        if row is None or (row["uncompacted"] or 0) < _COMPACT_AFTER:
+            return
+        cutoff = int(row["max_seq"]) - _KEEP_RECENT
+        if cutoff <= int(row["summary_through_seq"]):
+            return
+        older = await conn.fetch(
+            "SELECT role, content FROM message WHERE conversation_id=$1 AND seq > $2 AND seq <= $3 "
+            "ORDER BY seq",
+            session_id, row["summary_through_seq"], cutoff,
+        )
+        transcript = "\n".join(f"{m['role']}: {m['content']}" for m in older)
+        prompt = [
+            ChatMessage(role="system", content=(
+                "You are Sali. Fold this earlier stretch of conversation into a tight running "
+                "memory you'll carry forward — the facts about Almir, decisions made, tasks in "
+                "progress, and where things stand. First person, compact, merge with the prior "
+                "summary. Just the memory, nothing else."
+            )),
+            ChatMessage(role="user", content=f"Prior summary:\n{row['summary'] or '(none)'}\n\n"
+                                             f"Earlier turns:\n{transcript}"),
+        ]
+        result = await self.provider.chat(prompt, options=_SUMMARIZE)
+        await conn.execute(
+            "UPDATE conversation SET summary=$1, summary_through_seq=$2 WHERE id=$3",
+            result.content.strip(), cutoff, session_id,
+        )
+        await self._emit(conn, "conversation.compacted", session_id,
+                         {"through_seq": cutoff}, subject_type="conversation")
 
     async def _emit(
         self,

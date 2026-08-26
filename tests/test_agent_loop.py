@@ -146,3 +146,26 @@ async def test_astream_emits_tool_events(live_pool: Any) -> None:
         if e.kind == "tool" and e.data.get("phase") == "start"
     ]
     assert len(starts) == 1 and starts[0].data["name"] == "memory_info"
+
+
+async def test_conversation_compacts_when_long(db_conn: Any) -> None:
+    from sali.runtime.session import persistent_session_id  # noqa: F401 (import-shape check)
+
+    session = new_id()
+    await db_conn.execute("INSERT INTO conversation (id) VALUES ($1)", session)
+    for i in range(30):
+        await db_conn.execute(
+            "INSERT INTO message (conversation_id, seq, role, content) VALUES ($1,$2,$3,$4)",
+            session, i + 1, "user" if i % 2 == 0 else "assistant", f"turn number {i}",
+        )
+    loop = _loop(None, FakeModelProvider())  # pool unused by _maybe_compact / _load_history
+    await loop._maybe_compact(db_conn, session)
+
+    conv = await db_conn.fetchrow(
+        "SELECT summary, summary_through_seq FROM conversation WHERE id=$1", session
+    )
+    assert conv["summary"] is not None
+    assert conv["summary_through_seq"] == 30 - 6  # kept the last 6 verbatim
+    history = await loop._load_history(db_conn, session)
+    assert history[0][0] == "earlier"  # the running summary leads the history
+    assert len(history) <= 9  # summary + at most 8 recent
