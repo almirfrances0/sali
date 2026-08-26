@@ -934,7 +934,6 @@ def service(
     `sudo systemctl start sali` (and it's enabled at boot). Needs sudo, which Sali can't do itself."""
     import os
     import sys
-    import tempfile
 
     sali_bin = Path(sys.executable).parent / "sali"
     workdir = Path(__file__).resolve().parents[3]
@@ -962,7 +961,9 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 """
-    unit_path = Path(tempfile.gettempdir()) / "sali.service"
+    # A STABLE path (not /tmp, which gets cleared) so the install command always finds the unit.
+    unit_path = Path.home() / ".config" / "sali" / "sali.service"
+    unit_path.parent.mkdir(parents=True, exist_ok=True)
     unit_path.write_text(unit, encoding="utf-8")
 
     # Put `sali` on PATH WITHOUT sudo — ~/.local/bin is already on PATH. Only the service needs sudo.
@@ -973,13 +974,12 @@ WantedBy=multi-user.target
     console.print(f"[green]✓ `sali` is on your PATH[/] ({link} → the venv). Open a new terminal "
                   "(or run `hash -r`) and `sali agent` works anywhere.\n")
 
-    console.print("[bold]To run Sali as a system service, run these (they need sudo):[/]\n")
-    console.print(f"  sudo cp {unit_path} /etc/systemd/system/sali.service")
-    console.print("  sudo systemctl daemon-reload")
-    console.print("  sudo systemctl enable --now sali              [dim]# start now + at boot[/]\n")
-    console.print("[dim]Then: sudo systemctl start/stop sali  ·  status: sudo systemctl status sali "
-                  " ·  logs: journalctl -u sali -f[/]")
-    console.print("[dim]If you had the old user watcher, retire it: "
+    console.print("[bold]To run Sali as a system service, paste this ONE line (it needs sudo):[/]\n")
+    console.print(f"  sudo cp {unit_path} /etc/systemd/system/sali.service && "
+                  "sudo systemctl daemon-reload && sudo systemctl enable --now sali\n")
+    console.print("[dim]Then control it with: sudo systemctl start/stop sali  ·  status: "
+                  "systemctl status sali  ·  logs: journalctl -u sali -f[/]")
+    console.print("[dim]Retire the old watcher if present: "
                   "systemctl --user disable --now sali-observe.service[/]")
 
 
