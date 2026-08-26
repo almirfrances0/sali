@@ -132,6 +132,24 @@ class OllamaProvider:
             ),
         )
 
+    async def describe_image(self, prompt: str, image: bytes) -> str:
+        # Local vision: the screenshot goes ONLY to the local model (sali3 §24-25). Bypass _build
+        # to attach the image to the message; low temperature for a faithful description.
+        import base64
+
+        try:
+            resp = await self._client.chat(
+                model=self.s.chat_model,
+                messages=[{"role": "user", "content": prompt,
+                           "images": [base64.b64encode(image).decode()]}],
+                options={"temperature": 0.2, "top_p": 0.9,
+                         "num_ctx": min(self.s.ctx_default, self.s.ctx_max)},
+                think=False, stream=False, keep_alive=self.s.keep_alive,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced as a typed provider error
+            raise ProviderError(f"ollama vision failed: {exc}") from exc
+        return str(resp.message.content or "")
+
     async def embed(self, texts: list[str]) -> list[list[float]]:
         try:
             resp = await self._client.embed(

@@ -60,6 +60,9 @@ class FakeModelProvider:
     async def embed(self, texts: list[str]) -> list[list[float]]:
         return [self._vector(t) for t in texts]
 
+    async def describe_image(self, prompt: str, image: bytes) -> str:
+        return f"[fake vision of {len(image)} bytes] {prompt}"
+
     def _vector(self, text: str) -> list[float]:
         seed = int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:8], "big")
         rng = random.Random(seed)

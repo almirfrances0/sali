@@ -204,6 +204,17 @@ class _MemorySink:
         await self._service.embed_pending()
 
 
+class _VisionSink:
+    """Bridges the see_screen tool to the LOCAL vision model. The screenshot bytes go only to the
+    provider (local Ollama) and are never stored — the tools layer never imports the provider."""
+
+    def __init__(self, provider: Any) -> None:  # ModelProvider
+        self._provider = provider
+
+    async def look(self, prompt: str, image: bytes) -> str:
+        return str(await self._provider.describe_image(prompt, image))
+
+
 @dataclass(slots=True)
 class AgentResult:
     run_id: UUID
@@ -255,6 +266,7 @@ class AgentLoop:
         self._remote = build_remote_runner(settings.ssh)  # remote hosts over ssh (§44)
         self._comms = CommsService(settings.comms, SecretStore())  # email + calendar (§44)
         self._browser = build_browser(settings.browser)  # Sali's own Firefox (§44); launched lazily
+        self._vision = _VisionSink(provider)  # look at the screen locally (sali3 §33-35)
         self._consolidating: asyncio.Task[Any] | None = None
         self._last_consolidate: Any = None
 
@@ -641,7 +653,7 @@ class AgentLoop:
         ctx = ToolContext(settings=self.settings, clock=self.clock, pool=self.pool,
                           memory=self._memory_sink, graph=self._graph, tasks=self._tasks,
                           schedules=self._schedules, documents=self._documents, remote=self._remote,
-                          comms=self._comms, browser=self._browser)
+                          comms=self._comms, browser=self._browser, vision=self._vision)
         result = await dispatch.run_tool(tool, call.arguments, ctx)
 
         await journal.set_state(RunState.OBSERVE)

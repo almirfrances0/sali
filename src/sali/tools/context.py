@@ -89,6 +89,14 @@ class BrowserSink(Protocol):
     async def screenshot(self, path: str) -> str: ...
 
 
+class VisionSink(Protocol):
+    """How a tool has Sali LOOK at an image (a screenshot) and reason over it (sali3 §33-35). The
+    concrete impl (over the local vision model) is injected by the runtime; the image goes only to
+    the local model and is never stored/logged — the tools layer never imports the provider."""
+
+    async def look(self, prompt: str, image: bytes) -> str: ...
+
+
 @dataclass(slots=True)
 class ToolContext:
     settings: Settings
@@ -103,6 +111,7 @@ class ToolContext:
     remote: RemoteRunner | None = None  # injected by the loop; lets a tool run on a remote host
     comms: CommsSink | None = None  # injected by the loop; lets a tool read/send email + calendar
     browser: BrowserSink | None = None  # injected by the loop; lets a tool drive Sali's browser
+    vision: VisionSink | None = None  # injected by the loop; lets a tool look at the screen locally
 
     @property
     def paths(self) -> PathGuard:
