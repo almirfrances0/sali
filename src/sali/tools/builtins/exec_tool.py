@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from sali.core.enums import Capability, RiskLevel
@@ -67,7 +70,10 @@ class ExecuteCommand(Tool):
     name = "execute_command"
     description = (
         "Run any shell command on your own machine — check things, install tools, whatever you "
-        "need. Pass sandbox=true to run it in a throwaway isolated environment for risky tests."
+        "need. For a LONG-RUNNING process (a dev/web server like `python3 -m http.server`, a "
+        "watcher) pass background=true so it starts and keeps running WITHOUT blocking you — its "
+        "output goes to a log file you can read later. (A foreground server would just time out.) "
+        "Pass sandbox=true to run in a throwaway isolated environment for risky tests."
     )
     parameters = {
         "type": "object",
@@ -76,6 +82,8 @@ class ExecuteCommand(Tool):
                 "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
                 "description": "A shell command string, or an argv list.",
             },
+            "background": {"type": "boolean",
+                           "description": "Start detached and return at once (servers, watchers)."},
             "sandbox": {"type": "boolean", "description": "Run isolated (learning experiments)."},
         },
         "required": ["command"],
@@ -99,6 +107,13 @@ class ExecuteCommand(Tool):
 
         perms = ctx.settings.permissions
         sandbox = bool(args.get("sandbox"))
+
+        if bool(args.get("background")):
+            # A long-running process (server, watcher): launch it detached in its own session so it
+            # keeps running after this call returns, with output tee'd to a log Sali can read. This
+            # is what stops `python3 -m http.server` from blocking and timing out forever.
+            return _run_background(argv, cwd=str(Path(perms.exec_cwd).expanduser()))
+
         if sandbox:
             if not (perms.jail_learning and jail.available()):
                 return ToolResult(ok=False, display="no sandbox",
@@ -121,6 +136,26 @@ class ExecuteCommand(Tool):
             display=f"exit {rc}" + (" (sandboxed)" if sandbox else ""),
             error=None if rc == 0 else (err.strip()[:300] or f"exit {rc}"),
         )
+
+
+def _run_background(argv: list[str], *, cwd: str) -> ToolResult:
+    """Start a detached process (own session, output → a log file) and return immediately."""
+    logdir = Path.home() / ".local" / "share" / "sali" / "bg"
+    try:
+        logdir.mkdir(parents=True, exist_ok=True)
+        fd, log_path = tempfile.mkstemp(prefix="bg-", suffix=".log", dir=str(logdir))
+        with os.fdopen(fd, "wb") as log:
+            proc = subprocess.Popen(  # noqa: S603 - Sali runs freely on its own machine
+                argv, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                start_new_session=True, env=_safe_env(), cwd=cwd,
+            )
+    except (OSError, ValueError) as exc:
+        return ToolResult(ok=False, display="couldn't start", error=str(exc)[:200])
+    return ToolResult(
+        ok=True,
+        output={"pid": proc.pid, "log": log_path, "background": True},
+        display=f"started in background (pid {proc.pid}); output → {log_path}",
+    )
 
 
 def register_builtins(registry: ToolRegistry) -> None:
