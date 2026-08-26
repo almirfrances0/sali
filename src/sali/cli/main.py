@@ -73,6 +73,23 @@ def secrets_rm(ref: str) -> None:
     console.print(f"[green]removed[/] {ref}" if removed else f"[yellow]not in the vault:[/] {ref}")
 
 
+@app.command("ssh-pass")
+def ssh_pass(host: str) -> None:
+    """Store a password for a VPS/host (user@host or a ~/.ssh alias) in the encrypted vault, so Sali
+    can ssh into a key-less box. You can also just tell Sali the password once and it saves it."""
+    from sali.config.secrets import SecretStore
+    from sali.config.vault import VaultError
+    from sali.tools.remote import password_ref
+
+    ref = password_ref(host)
+    value = typer.prompt(f"ssh password for {host}", hide_input=True)
+    try:
+        SecretStore().set(ref, value)
+    except VaultError as exc:
+        raise typer.BadParameter(f"vault refused the write (no secret was lost): {exc}") from exc
+    console.print(f"[green]stored[/] {ref} [dim](encrypted; Sali will use it for {host})[/]")
+
+
 @secrets_cli.command("migrate")
 def secrets_migrate() -> None:
     """Move legacy plaintext secrets (~/.config/sali/secrets.toml) into the encrypted vault."""

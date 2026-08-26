@@ -102,6 +102,16 @@ _ANTI_LOOP_NUDGE = (
     "make the change or fix directly NOW, or if you're genuinely stuck, stop and tell Almir plainly "
     "what you found and what's blocking you. Don't read or list anything you've already looked at.)"
 )
+# When the model ends a turn with NOTHING to say (e.g. it gave up after failing tool attempts), never
+# leave Almir staring at a blank reply — make it say, in its own voice, what happened or what blocked it.
+_EMPTY_WRAP_NUDGE = (
+    "(You just returned an empty reply — Almir would see nothing. Tell him plainly, in your own words, "
+    "what you found, what you did, or exactly what blocked you and why. Don't call any tools.)"
+)
+_EMPTY_FALLBACK = (
+    "I couldn't finish that — I hit a wall and don't have a clear result to give you. "
+    "Want me to try a different way?"
+)
 # The SAME (tool, args) call failing identically this many times → stop dispatching it and hand the
 # failure back as a factual result, so a wrong call (e.g. a hallucinated path) can't be retried forever.
 _MAX_TOOL_FAILURES = 2
@@ -264,7 +274,7 @@ class AgentLoop:
         self._tasks = TaskStore(pool)  # persistent multi-step tasks (§24), resumed across restarts
         self._schedules = ScheduleStore(pool, self.clock)  # recurring work (§44)
         self._documents = IngestService(pool, provider)  # document ingestion → memory (§44)
-        self._remote = build_remote_runner(settings.ssh)  # remote hosts over ssh (§44)
+        self._remote = build_remote_runner(settings.ssh, SecretStore())  # ssh; vault-backed passwords
         self._comms = CommsService(settings.comms, SecretStore())  # email + calendar (§44)
         self._browser = build_browser(settings.browser)  # Sali's own Firefox (§44); launched lazily
         self._vision = _VisionSink(provider)  # look at the screen locally (sali3 §33-35)
@@ -555,6 +565,19 @@ class AgentLoop:
                                 acc += chunk.content
                                 yield LoopEvent("token", chunk.content)
                         final_text = acc.strip() or "Let me stop here for now."
+
+                if not final_text.strip():
+                    # The model broke out of the loop with an empty answer (typically after exhausting
+                    # failing tool attempts). Never record silence — have Sali explain what happened,
+                    # in its own voice, streamed; a plain fallback if even that comes back empty.
+                    yield LoopEvent("status", "wrapping up")
+                    messages.append(ChatMessage(role="user", content=_EMPTY_WRAP_NUDGE))
+                    acc = ""
+                    async for chunk in self.provider.chat_stream(messages, options=_VOICE):
+                        if chunk.content:
+                            acc += chunk.content
+                            yield LoopEvent("token", chunk.content)
+                    final_text = acc.strip() or _EMPTY_FALLBACK
 
                 await journal.set_state(RunState.LEARN)
                 async with self.pool.acquire() as learn_conn:

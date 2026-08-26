@@ -12,7 +12,7 @@ from sali.core.ids import new_id
 from sali.provider.base import ChatResult, ToolCall
 from sali.provider.fake import FakeModelProvider
 from sali.retrieval.service import RetrievalService
-from sali.runtime.loop import _MAX_TOOL_FAILURES, AgentLoop
+from sali.runtime.loop import _EMPTY_FALLBACK, _MAX_TOOL_FAILURES, AgentLoop
 from sali.security.confirm import AutoAllowConfirmer
 from sali.security.policy import PolicyEngine
 from sali.tools.registry import default_registry
@@ -35,6 +35,26 @@ def _loop(pool: Any, provider: FakeModelProvider) -> AgentLoop:
         confirmer=AutoAllowConfirmer(),
         settings=_settings(),
     )
+
+
+async def test_empty_final_answer_is_wrapped_up_in_voice(live_pool: Any) -> None:
+    # The model gives up with an empty reply; the guard has it explain itself instead of showing blank.
+    fake = FakeModelProvider(responses=[
+        ChatResult("", None, [], 5, 1, "fake"),  # empty final — the "stopped without anything" case
+        ChatResult("I couldn't reach the server — the password auth failed.", None, [], 5, 1, "fake"),
+    ])
+    result = await _loop(live_pool, fake).run("check the vps")
+    assert "password auth failed" in result.text  # a real explanation, not silence
+
+
+async def test_empty_final_never_records_a_blank_reply(live_pool: Any) -> None:
+    # Even if the wrap-up ALSO comes back empty, Sali says something — never a zero-char response.
+    fake = FakeModelProvider(responses=[
+        ChatResult("", None, [], 5, 1, "fake"),
+        ChatResult("", None, [], 5, 1, "fake"),
+    ])
+    result = await _loop(live_pool, fake).run("do the impossible")
+    assert result.text == _EMPTY_FALLBACK and result.text.strip()
 
 
 async def test_loop_calls_tool_then_answers_and_journals(live_pool: Any) -> None:

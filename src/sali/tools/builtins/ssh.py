@@ -42,13 +42,18 @@ class SshRun(Tool):
     description = (
         "Run a command on a remote host over ssh and get its output. `host` is a ~/.ssh/config alias "
         "or user@host. Ordinary checks (df, systemctl status, tail logs, git pull) run freely; a "
-        "genuinely destructive remote command pauses to confirm first."
+        "genuinely destructive remote command pauses to confirm first. If the host needs a password "
+        "(no key set up) pass `password` ONCE — it's stored in the encrypted vault and reused, so you "
+        "only supply it the first time. Never pass a password inside `command`."
     )
     parameters = {
         "type": "object",
         "properties": {
             "host": {"type": "string", "description": "~/.ssh/config alias or user@host."},
             "command": {"type": "string", "description": "The command to run on the remote host."},
+            "password": {"type": "string",
+                         "description": "SSH password, only if the host has no key. Stored encrypted, "
+                                        "reused next time — supply it once. Omit for key-based hosts."},
         },
         "required": ["host", "command"],
     }
@@ -64,10 +69,11 @@ class SshRun(Tool):
             return ToolResult(ok=False, display="no ssh", error="remote execution isn't available")
         host = str(args.get("host", "")).strip()
         command = str(args.get("command", "")).strip()
+        password = args.get("password") or None
         if not host or not command:
             return ToolResult(ok=False, display="need host + command",
                               error="host and command are required")
-        res = await ctx.remote.run(host, command)
+        res = await ctx.remote.run(host, command, password=password)
         return ToolResult(
             ok=res.ok,
             output={"host": res.host, "returncode": res.returncode,
@@ -79,13 +85,16 @@ class SshRun(Tool):
 
 class SshPut(Tool):
     name = "ssh_put"
-    description = "Copy a local file to a remote host over scp. Give local path, host, remote path."
+    description = ("Copy a local file to a remote host over scp. Give local path, host, remote path. "
+                   "For a password host, pass `password` once (stored encrypted, reused after).")
     parameters = {
         "type": "object",
         "properties": {
             "local": {"type": "string", "description": "The local file to copy."},
             "host": {"type": "string", "description": "~/.ssh/config alias or user@host."},
             "remote": {"type": "string", "description": "Destination path on the remote host."},
+            "password": {"type": "string", "description": "SSH password if the host has no key "
+                         "(stored encrypted, reused). Omit for key-based hosts."},
         },
         "required": ["local", "host", "remote"],
     }
@@ -97,10 +106,11 @@ class SshPut(Tool):
         if ctx.remote is None:
             return ToolResult(ok=False, display="no ssh", error="remote execution isn't available")
         local, host, remote = (str(args.get(k, "")).strip() for k in ("local", "host", "remote"))
+        password = args.get("password") or None
         if not (local and host and remote):
             return ToolResult(ok=False, display="need local, host, remote",
                               error="local, host and remote are all required")
-        res = await ctx.remote.put(host, local, remote)
+        res = await ctx.remote.put(host, local, remote, password=password)
         return ToolResult(
             ok=res.ok,
             output={"host": host, "returncode": res.returncode, "remote": remote},
