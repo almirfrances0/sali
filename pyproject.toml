@@ -20,6 +20,9 @@ dependencies = [
     "httpx>=0.28",
     "ollama>=0.5",
     "jsonschema>=4.20",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "websockets>=13",
 ]
 
 [project.optional-dependencies]
@@ -64,7 +67,7 @@ plugins = ["pydantic.mypy"]
 files = ["src", "tests"]
 
 [[tool.mypy.overrides]]
-module = ["asyncpg.*", "ollama.*", "jsonschema.*"]
+module = ["asyncpg.*", "ollama.*", "jsonschema.*", "uvicorn.*", "websockets.*"]
 ignore_missing_imports = true
 
 [tool.coverage.run]
@@ -84,6 +87,7 @@ name = "Layered architecture (inward dependencies only)"
 type = "layers"
 layers = [
     "sali.cli",
+    "sali.api",
     "sali.runtime",
     "sali.context",
     "sali.retrieval",

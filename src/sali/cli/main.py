@@ -20,26 +20,10 @@ from sali import __version__
 from sali.config.settings import Settings, load_settings
 from sali.context.engine import IDENTITY
 from sali.obs.log import configure_logging
+from sali.runtime.session import persistent_session_id
 
 app = typer.Typer(add_completion=False, help="Sali — a local-first personal AI agent.")
 console = Console()
-
-_SESSION_FILE = Path.home() / ".local" / "share" / "sali" / "session"
-
-
-def _persistent_session() -> UUID:
-    """One continuous session, always — so Sali picks up exactly where you left off."""
-    from sali.core.ids import new_id
-
-    _SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if _SESSION_FILE.exists():
-        try:
-            return UUID(_SESSION_FILE.read_text().strip())
-        except ValueError:
-            pass
-    session = new_id()
-    _SESSION_FILE.write_text(str(session))
-    return session
 
 
 @app.command()
@@ -204,7 +188,7 @@ async def _agent(settings: Settings, message: str | None) -> None:
 
     kernel = Kernel.create(settings)
     loop = await kernel.agent_loop(confirmer=TerminalConfirmer())
-    session = _persistent_session()  # always the same continuous conversation
+    session = persistent_session_id()  # always the same continuous conversation
     try:
         if message:
             await _stream_turn(loop, message, session)
@@ -375,6 +359,31 @@ async def _recall(settings: Settings, query: str) -> None:
             console.print(f"[magenta]graph[/]  {fact.src} --{fact.rel}--> {fact.dst}")
     finally:
         await pool.close()
+
+
+@app.command()
+def serve(
+    socket: str = typer.Option("", help="Unix socket (default ~/.local/share/sali/sali.sock)."),
+    host: str = typer.Option("", help="Bind a TCP host instead (e.g. 127.0.0.1) for the app."),
+    port: int = typer.Option(8790, help="TCP port, used with --host."),
+) -> None:
+    """Run Sali's local WebSocket API — streams turns to the app / a realtime UI."""
+    import uvicorn
+
+    from sali.api import create_app
+    from sali.kernel import Kernel
+
+    settings = load_settings()
+    configure_logging(settings.log_level)
+    application = create_app(Kernel.create(settings))
+    if host:
+        console.print(f"[green]Sali API →[/] ws://{host}:{port}/ws")
+        uvicorn.run(application, host=host, port=port, log_level="warning")
+    else:
+        sock = socket or str(Path.home() / ".local" / "share" / "sali" / "sali.sock")
+        Path(sock).parent.mkdir(parents=True, exist_ok=True)
+        console.print(f"[green]Sali API →[/] unix:{sock} (path /ws)")
+        uvicorn.run(application, uds=sock, log_level="warning")
 
 
 @app.command()
