@@ -194,6 +194,29 @@ async def test_loop_follows_through_after_partial_work(live_pool: Any) -> None:
         assert followed == 1
 
 
+async def test_loop_breaks_a_repeated_tool_loop(live_pool: Any) -> None:
+    # Sali re-runs the same tool over and over (the investigate-forever loop). The loop guard must
+    # inject a course-correction once it's repeated enough, so it doesn't spin to the iteration cap.
+    same = ToolCall("memory_info", {})
+    fake = FakeModelProvider(
+        responses=[
+            ChatResult("", None, [same], 3, 2, "fake"),   # 1st  (repeats 0)
+            ChatResult("", None, [same], 3, 2, "fake"),   # 2nd  (repeats 1)
+            ChatResult("", None, [same], 3, 2, "fake"),   # 3rd  (repeats 2)
+            ChatResult("", None, [same], 3, 2, "fake"),   # 4th  (repeats 3 → loop_break)
+            ChatResult("Okay, stopping — here's what I found.", None, [], 3, 3, "fake"),  # finishes
+            ChatResult("DONE", None, [], 1, 1, "fake"),   # self-judgement
+        ]
+    )
+    result = await _loop(live_pool, fake).run("keep looking into it")
+    assert "here's what I found" in result.text
+    async with live_pool.acquire() as c:
+        breaks = await c.fetchval(
+            "SELECT count(*) FROM run_events WHERE run_id=$1 AND kind='loop_break'", result.run_id
+        )
+        assert breaks >= 1  # the loop was detected and broken
+
+
 async def test_loop_does_not_nudge_a_complete_answer(live_pool: Any) -> None:
     # A short answer that Sali judges DONE must NOT be nudged — it just finalizes.
     fake = FakeModelProvider(
@@ -216,7 +239,7 @@ async def test_stalled_is_structural_then_model_judged() -> None:
     # No phrase list: a long reply is assumed complete (no model call at all); a short one is put to
     # the model, which judges its own reply.
     stalled = _loop(None, FakeModelProvider(responses=[ChatResult("STALLED", None, [], 1, 1, "fake")]))
-    assert await stalled._stalled("deploy the app", "x " * 200) is False  # long → not even checked
+    assert await stalled._stalled("deploy the app", "x " * 700) is False  # very long → not checked
     assert await stalled._stalled("deploy the app", "Let's start.") is True  # short → judged a stall
     done = _loop(None, FakeModelProvider(responses=[ChatResult("DONE", None, [], 1, 1, "fake")]))
     assert await done._stalled("say hi", "Hey Almir!") is False  # short → judged complete

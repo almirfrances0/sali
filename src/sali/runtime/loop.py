@@ -81,6 +81,15 @@ _FOLLOW_THROUGH_NUDGE = (
     "it's done.)"
 )
 
+# Sali sometimes gets stuck investigating — re-reading the same files, re-listing the same dirs —
+# instead of acting. When it repeats tool calls it already made, that's a loop; break it.
+_LOOP_REPEATS = 3
+_ANTI_LOOP_NUDGE = (
+    "(You're repeating tool calls you've already made — you're going in circles. Stop investigating: "
+    "make the change or fix directly NOW, or if you're genuinely stuck, stop and tell Almir plainly "
+    "what you found and what's blocking you. Don't read or list anything you've already looked at.)"
+)
+
 # A tool call sometimes leaks out as *text* instead of a parsed call (the model emits the JSON
 # itself). We must never leave Almir staring at raw JSON, so we detect it and ask for a clean redo.
 _MAX_JSON_RECOVERY = 2
@@ -104,7 +113,7 @@ def _looks_like_leaked_tool_call(text: str) -> bool:
 # candidate (a substantial answer is assumed complete and never checked), and then the reasoning
 # engine judges its OWN reply — did it act, or only announce and stop? This is what the model is
 # for (judgement, not parsing), and it can't drift out of date the way a verb list does.
-_STALL_MAX_CHARS = 240
+_STALL_MAX_CHARS = 1200  # generous: a stall can be a long explanation ending in "let me do X"
 _STALL_JUDGE_SYSTEM = (
     "Almir asked you to do something and you just replied. Judge your OWN reply against the FULL "
     "task: did you actually finish everything he asked and give him the result — or did you only "
@@ -275,6 +284,8 @@ class AgentLoop:
                 iteration = 0
                 follow_through = 0
                 json_recovery = 0
+                tool_sigs: dict[str, int] = {}  # signatures of tool calls seen this turn (loop guard)
+                repeats_at_last_nudge = 0
 
                 while iteration < max_iter and tokens_used < budget:
                     await journal.set_state(RunState.REASON_PLAN, iteration=iteration)
@@ -355,11 +366,20 @@ class AgentLoop:
                     yield LoopEvent("reset")
                     for call in res.tool_calls:
                         tool_calls += 1
+                        sig = f"{call.name}:{json.dumps(call.arguments, sort_keys=True, default=str)}"
+                        tool_sigs[sig] = tool_sigs.get(sig, 0) + 1
                         yield LoopEvent("tool", call.name,
                                         {"phase": "start", "name": call.name, "args": call.arguments})
                         tool_msg = await self._handle_tool(conn, journal, grants, call)
                         yield LoopEvent("tool", call.name, {"phase": "done", "name": call.name})
                         messages.append(tool_msg)
+                    # Going in circles? Break the investigate-forever loop with a course-correction.
+                    repeats = sum(count - 1 for count in tool_sigs.values() if count > 1)
+                    if repeats - repeats_at_last_nudge >= _LOOP_REPEATS:
+                        repeats_at_last_nudge = repeats
+                        messages.append(ChatMessage(role="user", content=_ANTI_LOOP_NUDGE))
+                        await journal.event("loop_break", {"repeats": repeats})
+                        yield LoopEvent("status", "getting unstuck")
                     iteration += 1
                 else:
                     if not final_text:  # ran long — let Sali wrap up in its own voice, streamed
