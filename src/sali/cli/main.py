@@ -450,6 +450,67 @@ async def _recall(settings: Settings, query: str) -> None:
 
 
 @app.command()
+def learn() -> None:
+    """Consolidate what Sali has done into knowledge — learn repeated procedures, record failures.
+
+    Learning is memory acquisition, not retraining (§17-19). A procedure is only learned once it
+    has repeated evidence — never from a single observation.
+    """
+    settings = load_settings()
+    configure_logging("WARNING")
+    asyncio.run(_learn(settings))
+
+
+async def _learn(settings: Settings) -> None:
+    from sali.db.pool import create_pool
+    from sali.learning.service import LearningService
+    from sali.provider.registry import build_provider
+
+    pool = await create_pool(settings)
+    service = LearningService(pool, build_provider(settings))
+    try:
+        with console.status("[cyan]consolidating what you've been doing…[/]"):
+            result = await service.consolidate()
+        if result.procedures:
+            console.print(f"[green]Learned {len(result.procedures)} procedure(s):[/]")
+            for p in result.procedures:
+                console.print(f"  • [bold]{p.name}[/] [dim](seen in {p.evidence} runs)[/]: "
+                              + " → ".join(p.steps))
+        if result.failures_recorded:
+            console.print(f"[yellow]Noted {result.failures_recorded} past failure(s)[/] to learn from.")
+        if not result.procedures and not result.failures_recorded:
+            console.print("[dim]Nothing new to consolidate — Sali learns from repeated activity.[/]")
+    finally:
+        await pool.close()
+
+
+@app.command()
+def procedures() -> None:
+    """List the procedures Sali has learned from watching Almir work."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    asyncio.run(_procedures(settings))
+
+
+async def _procedures(settings: Settings) -> None:
+    from sali.db.pool import create_pool
+    from sali.learning.service import LearningService
+    from sali.provider.registry import build_provider
+
+    pool = await create_pool(settings)
+    try:
+        procs = await LearningService(pool, build_provider(settings)).procedures()
+    finally:
+        await pool.close()
+    if not procs:
+        console.print("[dim]No procedures learned yet — run `sali learn` after repeating a workflow.[/]")
+        return
+    for p in procs:
+        ev = f" · seen {p['evidence']}×" if p.get("evidence") else ""
+        console.print(f"• {p['content']}  [dim](conf {p['confidence']:.2f}{ev})[/]")
+
+
+@app.command()
 def twin(
     refresh: bool = typer.Option(False, "--refresh", help="Re-observe the machine before showing."),
 ) -> None:
