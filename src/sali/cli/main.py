@@ -964,12 +964,21 @@ WantedBy=multi-user.target
 """
     unit_path = Path(tempfile.gettempdir()) / "sali.service"
     unit_path.write_text(unit, encoding="utf-8")
-    console.print("[bold]Set Sali up as a system service — run these (they need sudo):[/]\n")
+
+    # Put `sali` on PATH WITHOUT sudo — ~/.local/bin is already on PATH. Only the service needs sudo.
+    link = Path.home() / ".local" / "bin" / "sali"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.unlink(missing_ok=True)
+    link.symlink_to(sali_bin)
+    console.print(f"[green]✓ `sali` is on your PATH[/] ({link} → the venv). Open a new terminal "
+                  "(or run `hash -r`) and `sali agent` works anywhere.\n")
+
+    console.print("[bold]To run Sali as a system service, run these (they need sudo):[/]\n")
     console.print(f"  sudo cp {unit_path} /etc/systemd/system/sali.service")
-    console.print(f"  sudo ln -sf {sali_bin} /usr/local/bin/sali   [dim]# so `sali agent` works anywhere[/]")
     console.print("  sudo systemctl daemon-reload")
     console.print("  sudo systemctl enable --now sali              [dim]# start now + at boot[/]\n")
-    console.print("[dim]Then: sudo systemctl status sali  ·  logs: journalctl -u sali -f[/]")
+    console.print("[dim]Then: sudo systemctl start/stop sali  ·  status: sudo systemctl status sali "
+                  " ·  logs: journalctl -u sali -f[/]")
     console.print("[dim]If you had the old user watcher, retire it: "
                   "systemctl --user disable --now sali-observe.service[/]")
 
