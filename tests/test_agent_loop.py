@@ -148,6 +148,35 @@ async def test_astream_emits_tool_events(live_pool: Any) -> None:
     assert len(starts) == 1 and starts[0].data["name"] == "memory_info"
 
 
+async def test_sense_short_circuits_on_tiny_input() -> None:
+    # A hunch on <4 chars would be noise — and it must never touch the DB for that (pool=None).
+    loop = _loop(None, FakeModelProvider())
+    assert await loop.sense("hi") == ""
+    assert await loop.sense("   ") == ""
+
+
+async def test_sense_forms_a_hunch_from_the_graph(live_pool: Any) -> None:
+    from sali.core.enums import MemorySource
+    from sali.graph import writer as gw
+
+    async with live_pool.acquire() as c:
+        almir = await gw.ensure_node(
+            c, node_type="person", name="Almir", canonical_key="person:almir",
+            source=MemorySource.USER_EXPLICIT,
+        )
+        sali = await gw.ensure_node(
+            c, node_type="agent", name="Sali", canonical_key="agent:sali",
+            source=MemorySource.USER_EXPLICIT,
+        )
+        await gw.relate(
+            c, src_id=almir.id, dst_id=sali.id, rel_type="uses",
+            source=MemorySource.USER_EXPLICIT,
+        )
+    # As Almir types about Almir, the entity links in — retrieval only, no model was called.
+    hunch = await _loop(live_pool, FakeModelProvider()).sense("what does Almir use")
+    assert "Almir" in hunch and "Sali" in hunch
+
+
 async def test_conversation_compacts_when_long(db_conn: Any) -> None:
     from sali.runtime.session import persistent_session_id  # noqa: F401 (import-shape check)
 

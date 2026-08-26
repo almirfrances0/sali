@@ -94,6 +94,20 @@ def test_execute_destructive_commands_self_escalate() -> None:
     assert tool.assess({"command": "apt-get install ripgrep"}) is RiskLevel.R1  # installs are free
 
 
+def test_sandbox_argv_is_fake_root_ephemeral_and_gates_network() -> None:
+    # Pure builder check (no bwrap needed): fake root, ephemeral system overlays, home unmounted.
+    argv = jail.build_sandbox_argv(["apt-get", "install", "-y", "cowsay"])
+    assert argv[0] == "bwrap"
+    assert argv[-5:] == ["--", "apt-get", "install", "-y", "cowsay"]  # command passed through
+    joined = " ".join(argv)
+    assert "--unshare-user --uid 0 --gid 0" in joined  # fake root → can install/delete
+    assert "--tmp-overlay /usr" in joined  # writable but discarded on exit
+    assert "--overlay-src" in joined  # never a real bind of the system
+    assert "/home" not in joined  # Sali's real files are not mounted in
+    assert "--unshare-net" not in argv  # network on by default (installs need it)
+    assert "--unshare-net" in jail.build_sandbox_argv(["true"], allow_network=False)
+
+
 async def test_sandbox_is_fake_root_and_ephemeral() -> None:
     if not jail.available():
         pytest.skip("bubblewrap not available")

@@ -193,10 +193,13 @@ async def _agent(settings: Settings, message: str | None) -> None:
         if message:
             await _stream_turn(loop, message, session)
             return
-        console.print("[dim]talking to Sali — Ctrl-D to leave. It remembers.[/]")
+        reader = _live_reader(loop)
+        watching = " It watches as you type," if reader is not None else ""
+        console.print(f"[dim]talking to Sali — Ctrl-D to leave.{watching} and it remembers.[/]")
         while True:
             try:
-                text = console.input("[bold cyan]you ›[/] ")
+                text = await reader.prompt("you › ") if reader is not None \
+                    else console.input("[bold cyan]you ›[/] ")
             except (EOFError, KeyboardInterrupt):
                 console.print()
                 return
@@ -205,6 +208,21 @@ async def _agent(settings: Settings, message: str | None) -> None:
             await _stream_turn(loop, text, session)
     finally:
         await kernel.close()
+
+
+def _live_reader(loop: Any) -> Any:
+    """The keystroke-aware reader, so Sali senses as Almir types. Returns None (→ a plain
+    blocking prompt) when there's no real terminal or prompt_toolkit is missing — the sensing
+    is a nicety, never a requirement."""
+    import sys
+
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+    try:
+        from sali.cli.liveinput import SenseInput
+    except Exception:  # noqa: BLE001 - degrade to the ordinary blocking prompt
+        return None
+    return SenseInput(loop.sense)
 
 
 @app.command()

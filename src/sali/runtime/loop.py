@@ -103,6 +103,26 @@ class AgentLoop:
             iterations=int(final.data["iterations"]), tool_calls=int(final.data["tool_calls"]),
         )
 
+    async def sense(self, partial: str) -> str:
+        """A quiet hunch about what Almir is typing, formed the instant he pauses — retrieval
+        only: no model call, no journal, no writes. The keystroke layer (terminal + WebSocket)
+        shows it so Sali is visibly noticing in realtime, without burning a token per keystroke.
+        Best-effort by design: any failure just means no hunch, never a disturbed turn."""
+        partial = partial.strip()
+        if len(partial) < 4:
+            return ""
+        try:
+            plan = classify(partial)
+            bundle = await self.retrieval.gather(partial, plan, k=3)
+        except Exception:  # noqa: BLE001 - a hunch must never break typing
+            return ""
+        for fact in bundle.graph_facts:  # a matched relationship is the sharpest hunch
+            return f"{fact.src} {fact.rel.replace('_', ' ')} {fact.dst}"
+        for hit in bundle.memories:  # else the strongest fresh memory it brushes against
+            if not hit.stale:
+                return hit.memory.content.strip().split("\n", 1)[0][:80]
+        return ""
+
     async def astream(
         self, user_input: str, session_id: UUID | None = None
     ) -> AsyncIterator[LoopEvent]:

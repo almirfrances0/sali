@@ -5,7 +5,8 @@ One WebSocket carries the same continuous session as the terminal. The client se
 (``status``/``token``/``thinking``/``tool``/``final``) — the same events the terminal renders.
 When Sali needs to confirm a destructive act it sends a ``confirm`` event and waits for the
 client's ``{"type":"confirm_response","id":...,"ok":bool}``. Realtime typing arrives as
-``{"type":"typing","text":...}`` (used by the keystroke-awareness layer).
+``{"type":"typing","text":...}``: once it lulls, Sali forms a retrieval-only hunch and pushes
+back a ``sense`` event — so the UI can show it noticing while you're still typing.
 """
 
 from __future__ import annotations
@@ -62,6 +63,20 @@ def create_app(kernel: Any) -> FastAPI:
         loop = await kernel.agent_loop(confirmer=confirmer)
         session = persistent_session_id()
         work: asyncio.Queue[str | None] = asyncio.Queue()
+        sensing: dict[str, asyncio.Task[None]] = {}
+
+        async def sense_after_pause(text: str) -> None:
+            # Realtime keystroke awareness: once typing lulls, form a quiet hunch (retrieval
+            # only — no model, no tokens) and surface it. Debounced by cancel-on-new-keystroke.
+            try:
+                await asyncio.sleep(0.45)
+                hunch = await loop.sense(text)
+                if hunch:
+                    await websocket.send_json({"kind": "sense", "text": hunch, "data": {}})
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001 - a hunch must never break the socket
+                pass
 
         async def receiver() -> None:
             try:
@@ -72,7 +87,13 @@ def create_app(kernel: Any) -> FastAPI:
                         confirmer.resolve(msg.get("id"), msg.get("ok"))
                     elif kind == "message":
                         await work.put(str(msg.get("text", "")))
-                    # 'typing' events are handled by the keystroke layer.
+                    elif kind == "typing":  # Sali senses what you're typing, in realtime
+                        prior = sensing.get("t")
+                        if prior is not None and not prior.done():
+                            prior.cancel()
+                        sensing["t"] = asyncio.create_task(
+                            sense_after_pause(str(msg.get("text", "")))
+                        )
             except (WebSocketDisconnect, RuntimeError):
                 await work.put(None)
 
@@ -93,5 +114,7 @@ def create_app(kernel: Any) -> FastAPI:
                     await websocket.send_json({"kind": "error", "text": str(exc), "data": {}})
         finally:
             receive_task.cancel()
+            for task in sensing.values():
+                task.cancel()
 
     return app

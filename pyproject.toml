@@ -16,6 +16,7 @@ dependencies = [
     "structlog>=25.0",
     "typer>=0.15",
     "rich>=14.0",
+    "prompt_toolkit>=3.0",
     "tenacity>=9.0",
     "httpx>=0.28",
     "ollama>=0.5",
