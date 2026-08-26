@@ -71,6 +71,9 @@ strict = true
 warn_unused_configs = true
 plugins = ["pydantic.mypy"]
 files = ["src", "tests"]
+# The AT-SPI probe is a standalone script run by the SYSTEM python (PyGObject), not Sali's runtime —
+# type-checking it against our venv (no `gi`) is meaningless.
+exclude = "src/sali/perception/_atspi_probe\\.py"
 
 [[tool.mypy.overrides]]
 # Third-party without type info, and the OPTIONAL §44 extras (pypdf/icalendar/playwright/keyring):
@@ -103,7 +106,7 @@ layers = [
     "sali.context",
     "sali.retrieval",
     "sali.twin | sali.learning | sali.ingest",
-    "sali.memory | sali.graph | sali.tasks | sali.scheduler | sali.comms | sali.browser",
+    "sali.memory | sali.graph | sali.tasks | sali.scheduler | sali.comms | sali.browser | sali.perception",
     "sali.security | sali.verify",
     "sali.tools",
     "sali.provider",

@@ -97,6 +97,14 @@ class VisionSink(Protocol):
     async def look(self, prompt: str, image: bytes) -> str: ...
 
 
+class PerceptionSink(Protocol):
+    """How a tool reads the desktop's semantic state (sali3 §2,8,9): the focused app/window and,
+    optionally, its accessibility tree. Concrete impl (DesktopPerception) is injected by the runtime;
+    it returns a JSON-ready dict so the tools layer stays free of perception types. All local."""
+
+    async def snapshot(self, *, ui: bool = False) -> dict[str, Any]: ...
+
+
 @dataclass(slots=True)
 class ToolContext:
     settings: Settings
@@ -112,6 +120,7 @@ class ToolContext:
     comms: CommsSink | None = None  # injected by the loop; lets a tool read/send email + calendar
     browser: BrowserSink | None = None  # injected by the loop; lets a tool drive Sali's browser
     vision: VisionSink | None = None  # injected by the loop; lets a tool look at the screen locally
+    perception: PerceptionSink | None = None  # injected by the loop; the focused app/window + UI tree
 
     @property
     def paths(self) -> PathGuard:

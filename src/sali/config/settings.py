@@ -99,6 +99,16 @@ class BrowserSettings(BaseModel):
     mem_floor_mb: int = 1500  # don't launch below this much free RAM (this box is 15GB)
 
 
+class PerceptionSettings(BaseModel):
+    # Desktop perception (sali3 Phase 4): the focused app/window (X11) + accessibility tree (AT-SPI).
+    # 'fake' selects the in-memory perception for tests.
+    backend: Literal["desktop", "fake"] = "desktop"
+    max_tree_nodes: int = 200  # cap the accessibility walk so a huge UI can't flood the context
+    max_tree_depth: int = 12
+    # AT-SPI lives in the SYSTEM python (PyGObject); Sali's venv (3.14) has none, so the probe runs here.
+    system_python: str = "/usr/bin/python3"
+
+
 def _default_fs_deny() -> list[str]:
     # This machine is Sali's home — it's open to it. Only credentials and the separate
     # `salix` project stay protected by default (a light guard the owner can remove).
@@ -152,6 +162,7 @@ class Settings(BaseSettings):
     ssh: SshSettings = Field(default_factory=SshSettings)
     comms: CommsSettings = Field(default_factory=CommsSettings)
     browser: BrowserSettings = Field(default_factory=BrowserSettings)
+    perception: PerceptionSettings = Field(default_factory=PerceptionSettings)
 
     @classmethod
     def settings_customise_sources(

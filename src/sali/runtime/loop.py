@@ -33,6 +33,7 @@ from sali.ingest.service import IngestService
 from sali.learning.episodes import prune_stm
 from sali.memory.writer import observe
 from sali.obs.log import get_logger
+from sali.perception.service import build_perception
 from sali.provider.base import ChatMessage, ChatResult, ModelProvider, ToolCall
 from sali.retrieval.router import classify
 from sali.retrieval.service import RetrievalService
@@ -267,6 +268,7 @@ class AgentLoop:
         self._comms = CommsService(settings.comms, SecretStore())  # email + calendar (§44)
         self._browser = build_browser(settings.browser)  # Sali's own Firefox (§44); launched lazily
         self._vision = _VisionSink(provider)  # look at the screen locally (sali3 §33-35)
+        self._perception = build_perception(settings)  # focused app/window + a11y tree (sali3 §2,8,9)
         self._consolidating: asyncio.Task[Any] | None = None
         self._last_consolidate: Any = None
 
@@ -653,7 +655,8 @@ class AgentLoop:
         ctx = ToolContext(settings=self.settings, clock=self.clock, pool=self.pool,
                           memory=self._memory_sink, graph=self._graph, tasks=self._tasks,
                           schedules=self._schedules, documents=self._documents, remote=self._remote,
-                          comms=self._comms, browser=self._browser, vision=self._vision)
+                          comms=self._comms, browser=self._browser, vision=self._vision,
+                          perception=self._perception)
         result = await dispatch.run_tool(tool, call.arguments, ctx)
 
         await journal.set_state(RunState.OBSERVE)

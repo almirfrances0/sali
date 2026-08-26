@@ -81,3 +81,17 @@ def test_redaction_scrubs_secrets() -> None:
     assert "postgresql://" not in redact("dsn=postgresql://u:pw@localhost/sali")
     assert "almir@example.com" not in redact("contact almir@example.com please")
     assert redact_obj({"password": "hunter2", "note": "ok"})["password"] == "[redacted]"
+
+
+def test_redaction_scrubs_inline_cli_credentials() -> None:
+    # Passwords passed on a command line (e.g. surfaced via a terminal's window title).
+    assert "hunter2" not in redact("mysql -phunter2 sali")
+    assert "s3cr3t" not in redact("redis-cli -a s3cr3t")
+    assert "p4ss" not in redact("curl -u admin:p4ss https://ex.com")
+    assert "topsecret" not in redact("pg_dump --password=topsecret db")
+
+
+def test_redaction_leaves_benign_attached_flags_alone() -> None:
+    # Command-anchored patterns must NOT eat innocent flags — those stay legible in logs.
+    for benign in ("tar -pxzf archive.tar", "mkdir -p /tmp/sali", "ps aux -p 1234", "grep -n foo"):
+        assert redact(benign) == benign
