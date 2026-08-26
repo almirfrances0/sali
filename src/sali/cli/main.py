@@ -466,6 +466,32 @@ async def _learn(settings: Settings) -> None:
 
 
 @app.command()
+def tasks() -> None:
+    """Show the persistent tasks Sali has in progress (they survive restarts)."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    asyncio.run(_tasks(settings))
+
+
+async def _tasks(settings: Settings) -> None:
+    from sali.db.pool import create_pool
+    from sali.tasks.store import TaskStore
+
+    pool = await create_pool(settings)
+    try:
+        open_tasks = await TaskStore(pool).open_tasks(limit=20)
+    finally:
+        await pool.close()
+    if not open_tasks:
+        console.print("[dim]No tasks in progress.[/]")
+        return
+    for t in open_tasks:
+        console.print(f"[bold]{t.objective}[/] [dim]({t.status})[/]")
+        for step in t.steps:
+            console.print(f"   {step.seq}. [{step.status}] {step.description}")
+
+
+@app.command()
 def procedures() -> None:
     """List the procedures Sali has learned from watching Almir work."""
     settings = load_settings()

@@ -80,7 +80,8 @@ def tctx() -> Any:
 
 _LOOP_TABLES = (
     "tool_audit, tool_execution, run_events, agent_runs, message, conversation, "
-    "memory_evidence, memory, stm_observation, event, graph_edge, graph_node, contradiction"
+    "memory_evidence, memory, stm_observation, event, graph_edge, graph_node, contradiction, "
+    "task_step, task"
 )
 
 

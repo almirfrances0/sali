@@ -36,6 +36,7 @@ from sali.runtime.state import RunState, resume_action
 from sali.security.confirm import Confirmer
 from sali.security.policy import Action, PolicyEngine, SessionGrants
 from sali.security.redact import redact_obj
+from sali.tasks.store import TaskStore
 from sali.tools import dispatch
 from sali.tools.base import VerifyResult
 from sali.tools.context import ToolContext
@@ -232,6 +233,7 @@ class AgentLoop:
         self.log = get_logger("sali.loop")
         self._memory_sink = _MemorySink(retrieval.memory)  # lets the remember tool save durably
         self._graph = GraphService(pool)  # lets the relate tool write conversational edges
+        self._tasks = TaskStore(pool)  # persistent multi-step tasks (§24), resumed across restarts
         self._consolidating: asyncio.Task[Any] | None = None
         self._last_consolidate: Any = None
 
@@ -266,6 +268,22 @@ class AgentLoop:
             "words — don't make a big deal of it."
         )
         return note, through
+
+    async def _open_tasks_note(self) -> str | None:
+        """A compact view of any task still in progress (§24), so Sali resumes it — this is read
+        from the datastore every turn, which is exactly what makes a task survive a restart.
+        Best-effort: the task engine is a nicety, never a reason to break a turn."""
+        try:
+            tasks = await self._tasks.open_tasks(limit=3)
+        except Exception:  # noqa: BLE001 - tasks are a nicety, never break a turn
+            return None
+        if not tasks:
+            return None
+        lines = "\n".join(f"- {t.one_line()}" for t in tasks)
+        return (
+            "Task(s) you have in progress — pick up where you left off, advancing steps as you go:\n"
+            + lines
+        )
 
     async def _stalled(
         self, user_input: str, response: str, journal: RunJournal | None = None
@@ -346,10 +364,11 @@ class AgentLoop:
                 # The 'interpret' branch of observation (§16): notice machine changes that
                 # happened while Almir was away, so Sali can bring them up in its own words.
                 machine_changes, ack_changes_through = await self._machine_changes(conn, journal)
+                tasks_note = await self._open_tasks_note()  # §24: resume any task in progress
                 assembled = self.context.assemble(
                     user_input, bundle, specs,
                     live_note=LIVE_NOTE if plan.needs_live else None, history=history,
-                    machine_changes=machine_changes,
+                    machine_changes=machine_changes, tasks_note=tasks_note,
                 )
                 messages = list(assembled.messages)
                 await journal.event(
@@ -589,7 +608,7 @@ class AgentLoop:
         await journal.set_state(RunState.EXECUTE_TOOL)
         started = self.clock.now()
         ctx = ToolContext(settings=self.settings, clock=self.clock, pool=self.pool,
-                          memory=self._memory_sink, graph=self._graph)
+                          memory=self._memory_sink, graph=self._graph, tasks=self._tasks)
         result = await dispatch.run_tool(tool, call.arguments, ctx)
 
         await journal.set_state(RunState.OBSERVE)

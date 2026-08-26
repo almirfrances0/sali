@@ -96,6 +96,7 @@ class ContextEngine:
         live_note: str | None = None,
         history: list[tuple[str, str]] | None = None,
         machine_changes: str | None = None,
+        tasks_note: str | None = None,
     ) -> AssembledContext:
         conflicts: list[str] = []
         sections: list[Section] = [
@@ -108,6 +109,10 @@ class ContextEngine:
                 f"{role}: {content}" for role, content in history[-6:]
             )
             sections.append(Section("conversation", Priority.P1, convo, self._count(convo)))
+        if tasks_note:
+            # Tasks in progress ride high (P1) so Sali resumes what it was doing — even after a
+            # restart, since the tasks are read back from the datastore each turn.
+            sections.append(Section("tasks", Priority.P1, tasks_note, self._count(tasks_note)))
         if live_note:
             sections.append(Section("live", Priority.P1, live_note, self._count(live_note)))
         if machine_changes:

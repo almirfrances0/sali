@@ -39,6 +39,18 @@ class GraphSink(Protocol):
     ) -> Any: ...  # concrete returns the Edge; tools ignore it
 
 
+class TaskSink(Protocol):
+    """How a tool records and advances a persistent multi-step task (§24). Concrete impl (TaskStore)
+    is injected by the runtime; tasks survive restarts because they live in the datastore."""
+
+    async def create(self, objective: str, steps: list[str]) -> Any: ...
+    async def current(self) -> Any: ...  # the task Sali is working on now, or None
+    async def advance(
+        self, task_id: Any, step_seq: int, status: str, *, note: str | None = None
+    ) -> Any: ...
+    async def finish(self, task_id: Any, *, status: str = "done", result: str | None = None) -> None: ...
+
+
 @dataclass(slots=True)
 class ToolContext:
     settings: Settings
@@ -47,6 +59,7 @@ class ToolContext:
     session_id: UUID | None = None
     memory: MemorySink | None = None  # injected by the loop; None in tests / pool-less probes
     graph: GraphSink | None = None  # injected by the loop; lets a tool assert a relationship
+    tasks: TaskSink | None = None  # injected by the loop; lets a tool run a persistent task
 
     @property
     def paths(self) -> PathGuard:
