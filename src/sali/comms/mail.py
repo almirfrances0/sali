@@ -24,6 +24,11 @@ from sali.comms.models import EmailMessage
 _TIMEOUT = 20.0  # socket timeout for every IMAP/SMTP op — fail fast, never hang the loop
 
 
+class MailUnavailable(RuntimeError):
+    """Mail transport can't be reached (e.g. the network blocks SMTP) — carries the fix, so the
+    model doesn't misdiagnose it as a local mail-server problem."""
+
+
 @dataclass(slots=True)
 class MailAccount:
     address: str
@@ -97,9 +102,18 @@ class ImapSmtpMail:
         mime["Subject"] = subject
         mime["Message-ID"] = message_id
         mime["Date"] = email.utils.formatdate()
-        with smtplib.SMTP_SSL(self._acct.smtp_host, self._acct.smtp_port, timeout=_TIMEOUT) as smtp:
-            smtp.login(self._acct.address, self._acct.password)
-            smtp.send_message(mime)
+        try:
+            with smtplib.SMTP_SSL(self._acct.smtp_host, self._acct.smtp_port, timeout=10) as smtp:
+                smtp.login(self._acct.address, self._acct.password)
+                smtp.send_message(mime)
+        except (OSError, smtplib.SMTPException) as exc:
+            # A network that blocks outbound SMTP (common) — NOT a local mail-server problem, so do
+            # not try to start one. Sending must go over the Gmail API (HTTPS) instead.
+            raise MailUnavailable(
+                "can't reach Gmail's SMTP server — this network blocks outbound SMTP (465/587). This "
+                "is NOT a local mail server issue; do not start one. Sending needs the Gmail API over "
+                "HTTPS: run `sali email-auth` to set it up, then set comms.send_backend='gmail_api'."
+            ) from exc
         return message_id
 
 

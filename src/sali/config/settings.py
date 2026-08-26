@@ -71,6 +71,12 @@ class MailAccountConfig(BaseModel):
     imap_port: int = 993
     smtp_port: int = 465
     secret_ref: str = "mail.password"
+    # Reading is always IMAP. Sending is 'smtp' by default, or 'gmail_api' (HTTPS) for networks that
+    # block outbound SMTP — its OAuth creds live in the SecretStore under these refs.
+    send_backend: Literal["smtp", "gmail_api"] = "smtp"
+    gmail_client_id_ref: str = "gmail.client_id"
+    gmail_client_secret_ref: str = "gmail.client_secret"
+    gmail_refresh_token_ref: str = "gmail.refresh_token"
 
 
 class CalAccountConfig(BaseModel):

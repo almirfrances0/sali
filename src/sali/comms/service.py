@@ -50,7 +50,24 @@ class CommsService:
         return await self._mail_client().read(uid)
 
     async def email_send(self, to: str, subject: str, body: str) -> str:
-        return await self._mail_client().send(to, subject, body)
+        return str(await self._sender().send(to, subject, body))
+
+    def _sender(self) -> Any:
+        """The SEND path: the injected fake, or the Gmail API over HTTPS (for SMTP-blocked networks),
+        else SMTP. Reading always stays IMAP; only sending moves to the API."""
+        if self._mail is not None:
+            return self._mail  # the test fake reads and sends
+        acct = self._settings.mail
+        if acct is None:
+            raise CommsNotConfigured("email isn't set up — add an account + `sali secrets set` its "
+                                     "app-password")
+        if acct.send_backend == "gmail_api":
+            from sali.comms.gmail_api import GmailApiSender, GmailOAuth
+            return GmailApiSender(acct.address, GmailOAuth(
+                client_id=self._secrets.require(acct.gmail_client_id_ref),
+                client_secret=self._secrets.require(acct.gmail_client_secret_ref),
+                refresh_token=self._secrets.require(acct.gmail_refresh_token_ref)))
+        return self._mail_client()  # SMTP (fails clearly if the network blocks it)
 
     # ---- calendar ----
     def _cal_client(self) -> CalClient:

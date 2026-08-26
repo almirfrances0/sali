@@ -98,6 +98,40 @@ async def test_email_tool_reports_not_configured_clearly() -> None:
     assert not res.ok and "set up" in (res.error or "")
 
 
+def test_gmail_authorization_url() -> None:
+    from sali.comms.gmail_api import authorization_url
+
+    url = authorization_url("cid123", "http://localhost:8080")
+    assert url.startswith("https://accounts.google.com/o/oauth2/v2/auth?")
+    assert "client_id=cid123" in url  # offline + consent → we get a durable refresh token
+    assert "access_type=offline" in url and "prompt=consent" in url and "gmail.send" in url
+
+
+def _gmail_settings() -> CommsSettings:
+    from sali.config.settings import MailAccountConfig
+
+    return CommsSettings(mail=MailAccountConfig(
+        address="salieno.co@gmail.com", imap_host="imap.gmail.com", smtp_host="smtp.gmail.com",
+        send_backend="gmail_api"))
+
+
+def test_send_routes_to_gmail_api_over_https_when_configured() -> None:
+    from sali.comms.gmail_api import GmailApiSender
+
+    secrets = FakeSecretStore({"mail.password": "pw", "gmail.client_id": "cid",
+                               "gmail.client_secret": "sec", "gmail.refresh_token": "rt"})
+    sender = CommsService(_gmail_settings(), secrets)._sender()
+    assert isinstance(sender, GmailApiSender)  # send goes over the API, not blocked SMTP
+
+
+def test_send_raises_when_gmail_creds_missing() -> None:
+    from sali.config.secrets import SecretNotFound
+
+    secrets = FakeSecretStore({"mail.password": "pw"})  # no OAuth creds yet
+    with pytest.raises(SecretNotFound):
+        CommsService(_gmail_settings(), secrets)._sender()  # → prompts to run `sali email-auth`
+
+
 def test_outbound_risk_levels() -> None:
     # Almir's call: email sends immediately, no confirm (do-not-restrict). Creating a calendar event
     # on a shared calendar still confirms. Reading is always free.

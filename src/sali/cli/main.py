@@ -585,6 +585,62 @@ async def _tasks(settings: Settings) -> None:
             console.print(f"   {step.seq}. [{step.status}] {step.description}")
 
 
+@app.command("email-auth")
+def email_auth() -> None:
+    """Authorize Gmail sending over the HTTPS API (for networks that block SMTP). One-time OAuth."""
+    import contextlib
+    import http.server
+    import threading
+    import time
+    import urllib.parse
+    import webbrowser
+
+    from sali.comms.gmail_api import authorization_url, exchange_code
+    from sali.config.secrets import SecretStore
+
+    secrets = SecretStore()
+    client_id, client_secret = secrets.get("gmail.client_id"), secrets.get("gmail.client_secret")
+    if not client_id or not client_secret:
+        console.print("[yellow]First store your OAuth client:[/]")
+        console.print("  sali secrets set gmail.client_id\n  sali secrets set gmail.client_secret")
+        console.print("[dim]Create one at console.cloud.google.com → APIs & Services → Credentials → "
+                      "OAuth client ID → Desktop app, and enable the Gmail API for the project.[/]")
+        return
+
+    captured: dict[str, str] = {}
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - http.server API
+            params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            captured["code"] = params.get("code", [""])[0]
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"<h2>Sali is authorized to send email. You can close this tab.</h2>")
+
+        def log_message(self, *args: object) -> None:  # silence the server's stderr logging
+            pass
+
+    server = http.server.HTTPServer(("localhost", 0), _Handler)
+    redirect_uri = f"http://localhost:{server.server_address[1]}"
+    url = authorization_url(client_id, redirect_uri)
+    console.print(f"[bold]Open this URL and grant Sali send access:[/]\n{url}\n")
+    with contextlib.suppress(Exception):
+        webbrowser.open(url)
+    threading.Thread(target=server.handle_request, daemon=True).start()
+    for _ in range(300):  # wait up to 5 min for the redirect
+        if captured.get("code"):
+            break
+        time.sleep(1)
+    server.server_close()
+    if not captured.get("code"):
+        console.print("[red]No authorization code received — try again.[/]")
+        return
+    refresh = asyncio.run(exchange_code(client_id, client_secret, captured["code"], redirect_uri))
+    secrets.set("gmail.refresh_token", refresh)
+    console.print("[green]✓ Gmail sending authorized.[/] Set [bold]send_backend = 'gmail_api'[/] under "
+                  "[comms.mail] in ~/.config/sali/sali.toml, and email will send over HTTPS.")
+
+
 @app.command()
 def ingest(path: str) -> None:
     """Read a document into Sali's memory so it can recall and cite it (§44)."""
