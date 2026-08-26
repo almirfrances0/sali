@@ -877,6 +877,104 @@ async def _observe(settings: Settings, interval: int) -> None:
 
 
 @app.command()
+def daemon() -> None:
+    """Sali's background presence: keep the twin current, consolidate learning, and fire due
+    schedules (which can proactively notify Almir). This is what the systemd `sali` service runs."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    asyncio.run(_daemon(settings))
+
+
+async def _daemon(settings: Settings) -> None:
+    from sali.kernel import Kernel
+    from sali.learning.service import LearningService
+    from sali.provider.registry import build_provider
+    from sali.scheduler.daemon import SchedulerDaemon
+    from sali.scheduler.store import ScheduleStore
+    from sali.security.confirm import AutoDenyConfirmer
+    from sali.twin.daemon import TwinDaemon
+
+    kernel = Kernel.create(settings)
+    pool = await kernel.pool()
+    # Scheduled turns run unattended → AutoDeny so a destructive step is skipped, not left hanging.
+    loop = await kernel.agent_loop(confirmer=AutoDenyConfirmer())
+    session = persistent_session_id()
+
+    class _LoopRunner:
+        async def run(self, prompt: str) -> Any:
+            return await loop.run(prompt, session_id=session)
+
+    scheduler = SchedulerDaemon(ScheduleStore(pool), _LoopRunner(), pool=pool, poll_s=30.0)
+    twin = TwinDaemon(_twin_service(pool, settings), interval=300.0,
+                      exclude_projects=tuple(settings.permissions.fs_deny))
+    learning = LearningService(pool, build_provider(settings))
+    stop = asyncio.Event()
+
+    async def on_tick(cycle: int) -> None:
+        if cycle % _LEARN_EVERY == 0:
+            await learning.consolidate()
+
+    console.print("[dim]Sali is up — observing, learning, and watching its schedules.[/]")
+    try:
+        await asyncio.gather(scheduler.run_forever(), twin.run(stop=stop, on_tick=on_tick))
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
+    finally:
+        scheduler.stop()
+        stop.set()
+        await loop.aclose()
+        await kernel.close()
+
+
+@app.command()
+def service(
+    uninstall: bool = typer.Option(False, "--uninstall", help="Print how to remove the service."),
+) -> None:
+    """Print the exact commands to run Sali as a systemd SYSTEM service — so you can
+    `sudo systemctl start sali` (and it's enabled at boot). Needs sudo, which Sali can't do itself."""
+    import os
+    import sys
+    import tempfile
+
+    sali_bin = Path(sys.executable).parent / "sali"
+    workdir = Path(__file__).resolve().parents[3]
+    uid = os.getuid()
+    if uninstall:
+        console.print("[bold]Remove the Sali service:[/]")
+        console.print("  sudo systemctl disable --now sali\n  sudo rm /etc/systemd/system/sali.service"
+                      "\n  sudo systemctl daemon-reload\n  sudo rm -f /usr/local/bin/sali")
+        return
+    unit = f"""[Unit]
+Description=Sali — personal AI agent (background presence)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={os.getenv("USER", "almir")}
+WorkingDirectory={workdir}
+Environment=DISPLAY=:0
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus
+ExecStart={sali_bin} daemon
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+"""
+    unit_path = Path(tempfile.gettempdir()) / "sali.service"
+    unit_path.write_text(unit, encoding="utf-8")
+    console.print("[bold]Set Sali up as a system service — run these (they need sudo):[/]\n")
+    console.print(f"  sudo cp {unit_path} /etc/systemd/system/sali.service")
+    console.print(f"  sudo ln -sf {sali_bin} /usr/local/bin/sali   [dim]# so `sali agent` works anywhere[/]")
+    console.print("  sudo systemctl daemon-reload")
+    console.print("  sudo systemctl enable --now sali              [dim]# start now + at boot[/]\n")
+    console.print("[dim]Then: sudo systemctl status sali  ·  logs: journalctl -u sali -f[/]")
+    console.print("[dim]If you had the old user watcher, retire it: "
+                  "systemctl --user disable --now sali-observe.service[/]")
+
+
+@app.command()
 def serve(
     socket: str = typer.Option("", help="Unix socket (default ~/.local/share/sali/sali.sock)."),
     host: str = typer.Option("", help="Bind a TCP host instead (e.g. 127.0.0.1) for the app."),
