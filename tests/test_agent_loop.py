@@ -272,6 +272,30 @@ async def test_stalled_is_model_judged_with_no_length_cutoff() -> None:
     assert await done._stalled("say hi", "Hey Almir!") is False  # judged complete
 
 
+async def test_maybe_learn_schedules_consolidation_off_thread_and_throttles() -> None:
+    # Memory only ACCRUES if the loop actually drives consolidation. _maybe_learn must schedule the
+    # learning pass off-thread (fire-and-forget, no turn latency) and then throttle repeat calls.
+    from sali.learning.model import ConsolidationResult
+
+    ran = []
+
+    class _FakeLearning:
+        async def consolidate(self) -> ConsolidationResult:
+            ran.append(1)
+            return ConsolidationResult()
+
+    loop = _loop(None, FakeModelProvider(responses=[]))
+    loop.learning = _FakeLearning()
+
+    loop._maybe_learn()
+    assert loop._consolidating is not None  # scheduled, not awaited inline
+    await loop._consolidating  # let the background pass finish
+    assert ran == [1]
+
+    loop._maybe_learn()  # immediately again → throttled, no second pass
+    assert ran == [1]
+
+
 def test_looks_like_leaked_tool_call() -> None:
     from sali.runtime.loop import _looks_like_leaked_tool_call
 

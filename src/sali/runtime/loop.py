@@ -9,6 +9,7 @@ never assumed to have succeeded (rule 13).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import re
@@ -23,6 +24,7 @@ from sali.core.clock import Clock, SystemClock
 from sali.core.enums import MemoryLayer, MemorySource
 from sali.core.errors import ProviderError
 from sali.core.ids import new_id
+from sali.learning.episodes import prune_stm
 from sali.memory.writer import observe
 from sali.obs.log import get_logger
 from sali.provider.base import ChatMessage, ChatResult, ModelProvider, ToolCall
@@ -93,6 +95,10 @@ _ANTI_LOOP_NUDGE = (
 # The SAME (tool, args) call failing identically this many times → stop dispatching it and hand the
 # failure back as a factual result, so a wrong call (e.g. a hallucinated path) can't be retried forever.
 _MAX_TOOL_FAILURES = 2
+# How often the background consolidation pass (§17-19: mine procedures, record failures, distill an
+# episode) may run. Throttled so a busy session doesn't distill every turn; it runs OFF-THREAD after
+# the turn is already done, so it never adds latency to Almir's reply.
+_CONSOLIDATE_EVERY_S = 600.0
 
 # A tool call sometimes leaks out as *text* instead of a parsed call (the model emits the JSON
 # itself). We must never leave Almir staring at raw JSON, so we detect it and ask for a clean redo.
@@ -206,6 +212,7 @@ class AgentLoop:
         confirmer: Confirmer,
         settings: Settings,
         clock: Clock | None = None,
+        learning: Any = None,
     ) -> None:
         self.pool = pool
         self.provider = provider
@@ -215,9 +222,12 @@ class AgentLoop:
         self.policy = policy
         self.confirmer = confirmer
         self.settings = settings
+        self.learning = learning  # LearningService | None — drives §17-19 consolidation off-thread
         self.clock = clock or SystemClock()
         self.log = get_logger("sali.loop")
         self._memory_sink = _MemorySink(retrieval.memory)  # lets the remember tool save durably
+        self._consolidating: asyncio.Task[Any] | None = None
+        self._last_consolidate: Any = None
 
     async def run(self, user_input: str, session_id: UUID | None = None) -> AgentResult:
         """Run one turn to completion (non-streaming) by consuming the event stream."""
@@ -501,6 +511,8 @@ class AgentLoop:
                     if ack_changes_through is not None:
                         await twin_awareness.acknowledge(conn, ack_changes_through)
                     await self._maybe_compact(conn, session_id)  # keep the one session from breaking
+                    await prune_stm(conn)  # reclaim expired short-term rows every turn (cheap, no model)
+                    self._maybe_learn()  # fold raw activity into episodes/procedures — off-thread
                 except Exception as exc:  # noqa: BLE001 - housekeeping, never fail a done turn
                     self.log.warning("post_turn_housekeeping_failed", error=str(exc))
             except Exception as exc:
@@ -741,6 +753,33 @@ class AgentLoop:
                 role="user", content=f"(Your most recent result, in full:\n{(recent.content or '')[:6000]})"
             ))
         return folded
+
+    def _maybe_learn(self) -> None:
+        """Fire a throttled, OFF-THREAD consolidation pass (§17-19) so memory actually ACCRUES during
+        normal use: mine procedures, record failures→fixes, distill an episode. Fire-and-forget so it
+        never adds turn latency; skipped if one is already running or ran within _CONSOLIDATE_EVERY_S.
+        Without this the six memory types never come into existence during a normal session."""
+        if self.learning is None:
+            return
+        if self._consolidating is not None and not self._consolidating.done():
+            return  # one already in flight — don't stack distillations
+        now = self.clock.now()
+        if (self._last_consolidate is not None
+                and (now - self._last_consolidate).total_seconds() < _CONSOLIDATE_EVERY_S):
+            return  # ran recently — throttle
+        self._last_consolidate = now
+        self._consolidating = asyncio.create_task(self._consolidate_safe())
+
+    async def _consolidate_safe(self) -> None:
+        """Run one consolidation pass, swallowing any error — background learning must never crash
+        the session, and a distillation hiccup just means we try again next window."""
+        try:
+            result = await self.learning.consolidate()
+            self.log.info("consolidated", procedures=len(result.procedures),
+                          episodes=result.episodes_created, failures=result.failures_recorded,
+                          pruned=result.stm_pruned)
+        except Exception as exc:  # noqa: BLE001 - never let background learning surface as a crash
+            self.log.warning("consolidate_failed", error=str(exc))
 
     async def _maybe_compact(self, conn: Any, session_id: UUID) -> None:
         """When the conversation grows long, summarize older turns so the session never breaks."""

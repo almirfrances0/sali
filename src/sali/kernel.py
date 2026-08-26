@@ -37,6 +37,7 @@ class Kernel:
     async def agent_loop(self, *, confirmer: Any) -> Any:
         """Build the fully-wired agent loop. The single place the object graph is assembled."""
         from sali.context.engine import ContextEngine
+        from sali.learning.service import LearningService
         from sali.retrieval.service import RetrievalService
         from sali.runtime.loop import AgentLoop
         from sali.security.policy import PolicyEngine
@@ -52,6 +53,7 @@ class Kernel:
             policy=PolicyEngine(),
             confirmer=confirmer,
             settings=self.settings,
+            learning=LearningService(pool, self.provider),  # so memory actually ACCRUES (§17-19)
         )
 
     async def close(self) -> None:
