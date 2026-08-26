@@ -25,6 +25,32 @@ from sali.runtime.session import persistent_session_id
 app = typer.Typer(add_completion=False, help="Sali — a local-first personal AI agent.")
 console = Console()
 
+secrets_cli = typer.Typer(help="Manage Sali's secrets — never stored in the database.")
+app.add_typer(secrets_cli, name="secrets")
+
+
+@secrets_cli.command("set")
+def secrets_set(ref: str) -> None:
+    """Store a secret (e.g. 'mail.personal.password') into ~/.config/sali/secrets.toml (0600)."""
+    from sali.config.secrets import SecretStore
+
+    value = typer.prompt(f"value for {ref}", hide_input=True)
+    SecretStore().set(ref, value)
+    console.print(f"[green]stored[/] {ref} [dim](value not shown; file is 0600, never in the DB)[/]")
+
+
+@secrets_cli.command("list")
+def secrets_list() -> None:
+    """List the secret NAMES that are configured (never the values)."""
+    from sali.config.secrets import SecretStore
+
+    refs = SecretStore().refs()
+    if not refs:
+        console.print("[dim]No secrets set.[/]")
+        return
+    for ref in refs:
+        console.print(f"• {ref}")
+
 
 @app.command()
 def version() -> None:
@@ -552,6 +578,32 @@ async def _tasks(settings: Settings) -> None:
         console.print(f"[bold]{t.objective}[/] [dim]({t.status})[/]")
         for step in t.steps:
             console.print(f"   {step.seq}. [{step.status}] {step.description}")
+
+
+@app.command()
+def ingest(path: str) -> None:
+    """Read a document into Sali's memory so it can recall and cite it (§44)."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    asyncio.run(_ingest(settings, path))
+
+
+async def _ingest(settings: Settings, path: str) -> None:
+    from sali.db.pool import create_pool
+    from sali.ingest.service import IngestService
+    from sali.provider.registry import build_provider
+
+    pool = await create_pool(settings)
+    try:
+        result = await IngestService(pool, build_provider(settings)).ingest(path)
+    finally:
+        await pool.close()
+    if result.status == "ok":
+        console.print(f"[green]ingested[/] {result.chunks} chunk(s) from {path}")
+    elif result.status == "unchanged":
+        console.print(f"[dim]unchanged — {path} was already ingested[/]")
+    else:
+        console.print(f"[yellow]{result.status}[/] — {result.detail or path}")
 
 
 @app.command()

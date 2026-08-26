@@ -25,6 +25,7 @@ from sali.core.enums import MemoryLayer, MemorySource
 from sali.core.errors import ProviderError
 from sali.core.ids import new_id
 from sali.graph.service import GraphService
+from sali.ingest.service import IngestService
 from sali.learning.episodes import prune_stm
 from sali.memory.writer import observe
 from sali.obs.log import get_logger
@@ -236,6 +237,7 @@ class AgentLoop:
         self._graph = GraphService(pool)  # lets the relate tool write conversational edges
         self._tasks = TaskStore(pool)  # persistent multi-step tasks (§24), resumed across restarts
         self._schedules = ScheduleStore(pool, self.clock)  # recurring work (§44)
+        self._documents = IngestService(pool, provider)  # document ingestion → memory (§44)
         self._consolidating: asyncio.Task[Any] | None = None
         self._last_consolidate: Any = None
 
@@ -611,7 +613,7 @@ class AgentLoop:
         started = self.clock.now()
         ctx = ToolContext(settings=self.settings, clock=self.clock, pool=self.pool,
                           memory=self._memory_sink, graph=self._graph, tasks=self._tasks,
-                          schedules=self._schedules)
+                          schedules=self._schedules, documents=self._documents)
         result = await dispatch.run_tool(tool, call.arguments, ctx)
 
         await journal.set_state(RunState.OBSERVE)

@@ -92,7 +92,7 @@ layers = [
     "sali.runtime",
     "sali.context",
     "sali.retrieval",
-    "sali.twin | sali.learning",
+    "sali.twin | sali.learning | sali.ingest",
     "sali.memory | sali.graph | sali.tasks | sali.scheduler",
     "sali.security | sali.verify",
     "sali.tools",
@@ -108,6 +108,6 @@ name = "Concrete model backends are wired only at the edges"
 type = "forbidden"
 source_modules = [
     "sali.memory", "sali.graph", "sali.retrieval", "sali.context",
-    "sali.runtime", "sali.tools", "sali.security", "sali.verify",
+    "sali.runtime", "sali.tools", "sali.security", "sali.verify", "sali.ingest",
 ]
 forbidden_modules = ["sali.provider.ollama", "sali.provider.fake"]

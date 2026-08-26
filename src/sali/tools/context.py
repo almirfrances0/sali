@@ -59,6 +59,13 @@ class ScheduleSink(Protocol):
     async def delete(self, name: str) -> int: ...
 
 
+class IngestSink(Protocol):
+    """How a tool ingests a document into memory (§44). Concrete impl (IngestService) is injected by
+    the runtime; the chunks become citeable FILE_OBSERVATION memories."""
+
+    async def ingest(self, path: str) -> Any: ...
+
+
 @dataclass(slots=True)
 class ToolContext:
     settings: Settings
@@ -69,6 +76,7 @@ class ToolContext:
     graph: GraphSink | None = None  # injected by the loop; lets a tool assert a relationship
     tasks: TaskSink | None = None  # injected by the loop; lets a tool run a persistent task
     schedules: ScheduleSink | None = None  # injected by the loop; lets a tool set up recurring work
+    documents: IngestSink | None = None  # injected by the loop; lets a tool ingest a document
 
     @property
     def paths(self) -> PathGuard:
