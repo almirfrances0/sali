@@ -17,6 +17,14 @@ def _command_of(plan: Any) -> str | None:
     return (plan.get("args") or {}).get("command") if isinstance(plan, dict) else None
 
 
+def _binary(command: str | None) -> str:
+    """The first token of a command — the program being run. Two commands are 'the same fix target'
+    only if they share this, so 'docker … up' → 'docker … --env-file up' counts but a random later
+    success of another command does not."""
+    parts = (command or "").strip().split(maxsplit=1)
+    return parts[0] if parts else ""
+
+
 async def record_failures(conn: Any, *, limit: int = 50) -> int:
     """Record recent verified failures not yet captured — and, when a later step in the same run
     fixed it, the correction too (§18's diagnosis→correction). Caller owns the transaction."""
@@ -47,7 +55,10 @@ async def record_failures(conn: Any, *, limit: int = 50) -> int:
         # Content is the failure SIGNATURE (tool + command + error) — NOT the per-turn task, which
         # varies and would record the same recurring failure dozens of times (a bloat of near-dupes,
         # and the (layer, content_hash) collision Almir kept seeing). The task goes in the note.
-        learned_fix = bool(fix_command and fix_command != command)
+        # A genuine correction: a later success that RE-RUNS the same program with a change — not any
+        # unrelated later command that happened to succeed (which produced spurious failure→fix noise).
+        learned_fix = bool(command and fix_command and fix_command != command
+                           and _binary(command) == _binary(fix_command))
         if not learned_fix:
             continue  # §18 is failure→CORRECTION — a bare one-off error is noise, not a lesson
         content = (f"A past attempt failed: the {row['tool_name']} tool{doing} failed{because}. "
