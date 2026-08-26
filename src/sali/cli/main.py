@@ -8,6 +8,9 @@ persists nothing.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+from typing import Any
+from uuid import UUID
 
 import typer
 from rich.console import Console
@@ -20,6 +23,23 @@ from sali.obs.log import configure_logging
 
 app = typer.Typer(add_completion=False, help="Sali — a local-first personal AI agent.")
 console = Console()
+
+_SESSION_FILE = Path.home() / ".local" / "share" / "sali" / "session"
+
+
+def _persistent_session() -> UUID:
+    """One continuous session, always — so Sali picks up exactly where you left off."""
+    from sali.core.ids import new_id
+
+    _SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if _SESSION_FILE.exists():
+        try:
+            return UUID(_SESSION_FILE.read_text().strip())
+        except ValueError:
+            pass
+    session = new_id()
+    _SESSION_FILE.write_text(str(session))
+    return session
 
 
 @app.command()
@@ -133,30 +153,34 @@ def agent(
     asyncio.run(_agent(settings, message))
 
 
+async def _turn(loop: Any, text: str, session: UUID) -> str:
+    with console.status("[dim]thinking…[/]", spinner="dots"):
+        result = await loop.run(text, session_id=session)
+    return str(result.text)
+
+
 async def _agent(settings: Settings, message: str | None) -> None:
-    from sali.core.ids import new_id
     from sali.kernel import Kernel
     from sali.security.confirm import TerminalConfirmer
 
     kernel = Kernel.create(settings)
     loop = await kernel.agent_loop(confirmer=TerminalConfirmer())
-    session_id = new_id()  # one session across the REPL: a continuous, remembered conversation
+    session = _persistent_session()  # always the same continuous conversation
     try:
         if message:
-            result = await loop.run(message, session_id=session_id)
-            console.print(result.text)
+            console.print(await _turn(loop, message, session))
             return
-        console.print("[dim]Sali agent — Ctrl-D to exit. Every turn is journaled and remembered.[/]")
+        console.print("[dim]talking to Sali — Ctrl-D to leave. It remembers.[/]")
         while True:
             try:
-                text = console.input("[bold cyan]sali ›[/] ")
+                text = console.input("[bold cyan]you ›[/] ")
             except (EOFError, KeyboardInterrupt):
                 console.print()
                 return
             if not text.strip():
                 continue
-            result = await loop.run(text, session_id=session_id)
-            console.print(result.text)
+            reply = await _turn(loop, text, session)
+            console.print(f"[bold green]sali ›[/] {reply}")
     finally:
         await kernel.close()
 

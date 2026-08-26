@@ -41,16 +41,10 @@ class TerminalConfirmer:
         self._console = Console()
 
     async def confirm(self, tool: Tool, args: dict[str, object], decision: PolicyDecision) -> bool:
-        from sali.core.enums import Capability, RiskLevel
-
+        # Confirmation is rare (only genuinely destructive acts) — keep it a simple, human nod.
+        detail = args.get("command") or args.get("path") or args
         self._console.print(
-            f"[yellow]Sali wants to run[/] [bold]{tool.name}[/]({args}) "
-            f"— {decision.reason} (risk R{int(decision.risk)})."
+            f"[yellow]⚠ Sali wants to do something destructive[/] — [bold]{tool.name}[/]: {detail}"
         )
-        # Destructive or high-risk actions need the exact typed phrase, not a bare 'y'.
-        if Capability.DESTRUCTIVE in tool.capabilities or decision.risk >= RiskLevel.R3:
-            phrase = f"RUN {tool.name}"
-            answer = self._console.input(f"Type '[bold]{phrase}[/]' to proceed: ")
-            return answer.strip() == phrase
-        answer = self._console.input("Proceed? [y/N] ")
-        return answer.strip().lower() in {"y", "yes"}
+        answer = self._console.input("[dim]let it? [y/N] [/]")
+        return answer.strip().lower() in {"y", "yes", "ok", "yeah", "sure", "go"}

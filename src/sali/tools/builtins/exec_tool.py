@@ -1,19 +1,18 @@
-"""execute_command — the one arbitrary-binary tool, made safe by construction (fix H2).
+"""execute_command — Sali runs commands on its own machine, freely.
 
-Defence in depth, all of which must pass:
-  1. **Allowlist only** — argv[0]'s basename must be in ``permissions.exec_allowlist``.
-  2. **No shells/interpreters** — refused even if somehow allowlisted, so there is no path to
-     arbitrary code (`bash -c`, `python -c`, `find -exec`, …).
-  3. **argv, never a shell** — the command is a list; nothing is ever string-parsed.
-  4. **Jailed** — run inside bubblewrap: read-only binds, private /proc + /tmp, no network by
-     default, no access to anything not explicitly bound. If the jail is required but
-     unavailable, the tool refuses rather than running unconfined.
-  5. **Scrubbed environment** and a hard timeout that kills the process group.
-It is R3 (confirmation with a typed phrase) on top of all this.
+This is Sali's home, so ordinary commands (checking things, installing tools, poking around)
+run without asking. The tool only *escalates itself* to a confirmation when the command is
+genuinely destructive (rm -rf, mkfs, dd to a device, a fork bomb, …) — the policy then pauses
+so Sali (and Almir) think first, the way anyone would before wrecking their own system.
+
+For risky experiments there's ``sandbox=true``: the command runs inside a throwaway bubblewrap
+jail so installing/deleting can't touch the real system (used during learning).
 """
 
 from __future__ import annotations
 
+import os
+import re
 from typing import Any
 
 from sali.core.enums import Capability, RiskLevel
@@ -24,74 +23,102 @@ from sali.tools.exec import CommandTimeout, run_argv
 from sali.tools.registry import ToolRegistry
 
 _MAX = 64 * 1024
-# Anything that can execute further code from its arguments is refused outright.
-_INTERPRETERS = frozenset({
-    "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh",
-    "python", "python3", "perl", "ruby", "node", "nodejs", "php", "lua", "tclsh",
-    "env", "xargs", "find", "awk", "gawk", "sed", "nc", "ncat", "netcat", "socat", "ssh", "scp",
-})
+
+# Commands that destroy data/hardware/the running system → self-escalate to R4 (confirm).
+_DESTRUCTIVE = [
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"\brm\b(?=.*\s-\w*[rf])",  # rm -r / -f
+        r"\brm\b\s+(-\w+\s+)*(/|~|\*)",  # rm targeting root / home / a glob
+        r"\b(mkfs|mke2fs|fdisk|parted|sgdisk|wipefs|shred|blkdiscard|cryptsetup|mkswap)\b",
+        r"\bdd\b.*\bof=/dev/",
+        r">\s*/dev/(sd|nvme|hd|mmcblk|vd)",
+        r"\b(shutdown|reboot|halt|poweroff)\b",
+        r"\b(userdel|deluser|groupdel)\b",
+        r"\bchmod\b\s+-\w*R\s+0*0\b",
+        r":\(\)\s*\{\s*:\s*\|\s*:",  # fork bomb
+        r"\bmv\b.*\s/dev/null\b",
+        r"\btruncate\b\s+-s\s*0",
+    )
+]
+_SECRET_ENV = re.compile(r"(?i)(key|secret|token|password|passwd|credential|\bapi\b)")
+
+
+def _as_text(command: Any) -> str:
+    if isinstance(command, str):
+        return command
+    if isinstance(command, list):
+        return " ".join(str(c) for c in command)
+    return ""
+
+
+def _is_destructive(command: Any) -> bool:
+    text = _as_text(command)
+    return any(pattern.search(text) for pattern in _DESTRUCTIVE)
+
+
+def _safe_env() -> dict[str, str]:
+    # The real environment (so PATH/HOME/tooling work), minus obviously secret-shaped vars —
+    # Sali runs freely, but I don't hand credentials to arbitrary commands.
+    return {k: v for k, v in os.environ.items() if not _SECRET_ENV.search(k)}
 
 
 class ExecuteCommand(Tool):
     name = "execute_command"
-    description = "Run an allowlisted, read-only diagnostic command inside a sandbox."
+    description = (
+        "Run any shell command on your own machine — check things, install tools, whatever you "
+        "need. Pass sandbox=true to run it in a throwaway isolated environment for risky tests."
+    )
     parameters = {
         "type": "object",
         "properties": {
-            "command": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+            "command": {
+                "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
+                "description": "A shell command string, or an argv list.",
+            },
+            "sandbox": {"type": "boolean", "description": "Run isolated (learning experiments)."},
         },
         "required": ["command"],
     }
-    risk_level = RiskLevel.R3
-    capabilities = frozenset({Capability.EXECUTE})
+    risk_level = RiskLevel.R1  # ordinary; assess() escalates destructive commands
+    capabilities = frozenset({Capability.EXECUTE, Capability.NETWORK})
     idempotent = False
-    timeout_s = 15.0
+    timeout_s = 120.0
+
+    def assess(self, args: dict[str, Any]) -> RiskLevel:
+        return RiskLevel.R4 if _is_destructive(args.get("command")) else RiskLevel.R1
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        command = args["command"]
-        if not isinstance(command, list) or not command or not all(isinstance(c, str) for c in command):
-            return ToolResult(ok=False, display="bad command", error="command must be a non-empty argv list")
+        command = args.get("command")
+        if isinstance(command, str):
+            argv = ["bash", "-c", command]
+        elif isinstance(command, list) and command and all(isinstance(c, str) for c in command):
+            argv = command
+        else:
+            return ToolResult(ok=False, display="bad command", error="command must be a string or argv list")
 
         perms = ctx.settings.permissions
-        # argv[0] must be a BARE name (no '/'): a path lets a planted binary with an allowlisted
-        # basename run, and lets the interpreter refusal be bypassed (red-team #7). A bare name is
-        # resolved via PATH inside the jail, which only exposes the system bin dirs.
-        if "/" in command[0]:
-            return ToolResult(ok=False, display="denied",
-                              error="command must be a bare binary name, not a path")
-        binary = command[0]
-        if binary not in set(perms.exec_allowlist):
-            return ToolResult(ok=False, display="denied",
-                              error=f"'{binary}' is not on the exec allowlist")
-        if binary in _INTERPRETERS:
-            return ToolResult(ok=False, display="denied",
-                              error=f"interpreters/shells are refused: {binary}")
-
-        if perms.jail:
-            if not jail.available():
-                return ToolResult(ok=False, display="no jail",
-                                  error="a sandbox is required but bubblewrap is unavailable")
-            # Bind ONLY the exec cwd (not the broad read roots), and mask the deny prefixes,
-            # so no secret outside the project is reachable inside the jail (red-team #4).
+        sandbox = bool(args.get("sandbox"))
+        if sandbox and perms.jail_learning and jail.available():
             argv = jail.build_argv(
-                command, read_binds=[perms.exec_cwd], cwd=perms.exec_cwd,
+                argv, read_binds=[perms.exec_cwd], cwd=perms.exec_cwd,
                 allow_network=perms.exec_allow_network, deny=perms.fs_deny,
             )
-        else:
-            argv = command  # explicit, configured opt-out only
 
         try:
-            rc, out, err = await run_argv(argv, timeout=self.timeout_s, limits=True)
+            rc, out, err = await run_argv(
+                argv, timeout=self.timeout_s, env=_safe_env(), max_output=256 * 1024
+            )
         except CommandTimeout as exc:
             return ToolResult(ok=False, display="timeout", error=str(exc))
-        except FileNotFoundError:
-            return ToolResult(ok=False, display="not found", error=f"{binary} not found")
+        except FileNotFoundError as exc:
+            return ToolResult(ok=False, display="not found", error=str(exc))
 
         return ToolResult(
             ok=(rc == 0),
-            output={"returncode": rc, "stdout": out[:_MAX], "stderr": err[:_MAX]},
-            display=f"exit {rc}",
-            error=None if rc == 0 else (err.strip()[:200] or f"exit {rc}"),
+            output={"returncode": rc, "stdout": out[:_MAX], "stderr": err[:_MAX], "sandboxed": sandbox},
+            display=f"exit {rc}" + (" (sandboxed)" if sandbox else ""),
+            error=None if rc == 0 else (err.strip()[:300] or f"exit {rc}"),
         )
 
 

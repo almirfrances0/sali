@@ -53,6 +53,12 @@ class Tool(ABC):
     @abstractmethod
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult: ...
 
+    def assess(self, args: dict[str, Any]) -> RiskLevel:
+        """Effective risk for THIS specific call. Override to judge by the arguments — e.g. a
+        plain command runs free (low) while a destructive one (rm -rf, mkfs) escalates to R4 so
+        it pauses. This is how Sali stays free for ordinary work but careful about destruction."""
+        return self.risk_level
+
     async def verify(self, args: dict[str, Any], result: ToolResult) -> VerifyResult:
         """Default post-condition: the tool succeeded and returned something."""
         if result.ok and result.output:

@@ -44,9 +44,6 @@ class PathGuard:
         return self._check(path, self.read_roots, "read")
 
     def check_write(self, path: str | Path) -> Path:
-        resolved = self._check(path, self.write_roots, "write")
-        # Never write inside a git repo's control dir — blocks .git/config (core.sshCommand
-        # RCE) and .git/hooks persistence, even if a repo sits under a write root (red-team #2).
-        if ".git" in resolved.parts:
-            raise PathViolation(f"write denied: {resolved} is inside a .git directory")
-        return resolved
+        # Sali writes freely in its home (including its own repos); only fs_deny (credentials,
+        # the separate salix project) is off-limits, enforced in _check.
+        return self._check(path, self.write_roots, "write")

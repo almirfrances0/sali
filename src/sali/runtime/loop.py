@@ -33,6 +33,12 @@ from sali.tools import dispatch
 from sali.tools.context import ToolContext
 from sali.tools.registry import ToolRegistry
 
+# Warmer sampling so Sali sounds like a person, not a deterministic tool. Tool-calling is
+# rendered structurally by the model, so it still works reliably at this temperature.
+_VOICE: dict[str, Any] = {
+    "temperature": 0.7, "top_k": 40, "top_p": 0.95, "presence_penalty": 0.3, "repeat_penalty": 1.1,
+}
+
 
 @dataclass(slots=True)
 class AgentResult:
@@ -143,7 +149,7 @@ class AgentLoop:
         while iteration < max_iter and tokens_used < budget:
             await journal.set_state(RunState.REASON_PLAN, iteration=iteration)
             started = self.clock.now()
-            res = await self.provider.chat(messages, tools=specs or None)
+            res = await self.provider.chat(messages, tools=specs or None, options=_VOICE)
             latency = int((self.clock.now() - started).total_seconds() * 1000)
             tokens_used += res.tokens_in + res.tokens_out
             await journal.event(
@@ -162,8 +168,16 @@ class AgentLoop:
                 messages.append(await self._handle_tool(conn, journal, grants, call))
             iteration += 1
         else:
+            # Ran long — don't dead-end with a robotic message; let Sali wrap up in its own voice.
             if not final_text:
-                final_text = "(stopped: reached the iteration or token budget for this turn.)"
+                messages.append(
+                    ChatMessage(
+                        role="user",
+                        content="(You've done plenty here — wrap up now in your own words, no more tools.)",
+                    )
+                )
+                closing = await self.provider.chat(messages, options=_VOICE)
+                final_text = closing.content.strip() or "Let me stop here for now."
 
         await journal.set_state(RunState.LEARN)
         async with self.pool.acquire() as learn_conn:

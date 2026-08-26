@@ -43,7 +43,7 @@ def test_budget_is_respected_and_p0_never_cut() -> None:
     # identity + security text is actually present in the rendered system message
     system = assembled.messages[0].content
     assert "You are Sali" in system
-    assert "permission policy" in system
+    assert "genuinely destructive" in system  # the security/judgment note (P0) survived
 
 
 def test_stale_memory_is_surfaced_not_asserted() -> None:
@@ -59,7 +59,7 @@ def test_live_note_included_when_present() -> None:
         "how much RAM now?", RetrievalBundle(), tool_specs=[], live_note=LIVE_NOTE
     )
     assert "live" in assembled.included
-    assert "call a tool" in assembled.messages[0].content.lower()
+    assert "go check it directly" in assembled.messages[0].content.lower()
 
 
 def test_user_query_always_in_messages() -> None:

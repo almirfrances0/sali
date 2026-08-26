@@ -28,12 +28,15 @@ class PolicyDecision:
     risk: RiskLevel
 
 
+# Sali's home: ordinary work runs free; only genuinely destructive acts (R4) pause to confirm.
+# Nothing is auto-denied except an explicit denylist — this is a resident with judgment, not a
+# gated agent.
 _RISK_ACTION: dict[RiskLevel, Action] = {
     RiskLevel.R0: Action.AUTO_ALLOW,
     RiskLevel.R1: Action.AUTO_ALLOW,
-    RiskLevel.R2: Action.CONFIRM,
-    RiskLevel.R3: Action.CONFIRM,
-    RiskLevel.R4: Action.DENY,
+    RiskLevel.R2: Action.AUTO_ALLOW,
+    RiskLevel.R3: Action.AUTO_ALLOW,
+    RiskLevel.R4: Action.CONFIRM,
 }
 
 
@@ -57,27 +60,21 @@ class PolicyEngine:
     def decide(
         self, tool: Tool, args: dict[str, object], grants: SessionGrants | None = None
     ) -> PolicyDecision:
-        if tool.name in self.denylist:  # hard denylist always wins
+        if tool.name in self.denylist:  # explicit hard denylist (rarely used)
             return PolicyDecision(Action.DENY, f"{tool.name} is denylisted", tool.risk_level)
         if not tool.available:
             return PolicyDecision(Action.DENY, f"{tool.name} is unavailable", tool.risk_level)
-        if self.allowlist and tool.name not in self.allowlist:  # allowlist mode: default-deny
+        if self.allowlist and tool.name not in self.allowlist:  # allowlist mode (opt-in)
             return PolicyDecision(Action.DENY, f"{tool.name} is not on the allowlist", tool.risk_level)
 
-        risk = tool.risk_level
-        # A DESTRUCTIVE capability forces at least a confirmation, regardless of nominal risk.
-        if Capability.DESTRUCTIVE in tool.capabilities and risk < RiskLevel.R2:
-            risk = RiskLevel.R2
-
+        risk = tool.assess(args)  # per-call risk: a destructive command escalates itself
         action = _RISK_ACTION[risk]
-        # A per-session grant may upgrade a CONFIRM to AUTO_ALLOW — but never for a destructive
-        # or high-risk (R3+) tool: a name-only grant must not silently authorize those.
-        grantable = risk < RiskLevel.R3 and Capability.DESTRUCTIVE not in tool.capabilities
-        if grants is not None and tool.name in grants.allowed and action is Action.CONFIRM and grantable:
-            return PolicyDecision(Action.AUTO_ALLOW, "granted for this session", risk)
+        # A DESTRUCTIVE-capability tool always pauses at least for a nod, even if nominally low.
+        if Capability.DESTRUCTIVE in tool.capabilities and action is Action.AUTO_ALLOW:
+            action = Action.CONFIRM
         reason = {
-            Action.AUTO_ALLOW: "read-only / low-risk",
-            Action.CONFIRM: "requires confirmation",
-            Action.DENY: "destructive — denied by default",
+            Action.AUTO_ALLOW: "ordinary work on Sali's own machine",
+            Action.CONFIRM: "destructive — pausing to think first",
+            Action.DENY: "blocked",
         }[action]
         return PolicyDecision(action, reason, risk)

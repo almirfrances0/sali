@@ -8,6 +8,7 @@ can escape those roots because every path is realpath-resolved before the check.
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 from typing import Any
 
 from sali.core.enums import Capability, RiskLevel
@@ -181,6 +182,32 @@ class ModifyFile(Tool):
                           display=f"modified {path.name}")
 
 
+class DeleteFile(Tool):
+    name = "delete_file"
+    description = "Delete a file. Deleting anything outside scratch space pauses to confirm first."
+    parameters = _PATH_ARG
+    risk_level = RiskLevel.R1  # base; assess() escalates deletions of non-scratch files
+    capabilities = frozenset({Capability.WRITE})
+    idempotent = False
+
+    def assess(self, args: dict[str, Any]) -> RiskLevel:
+        target = str(Path(str(args.get("path", ""))).expanduser())
+        scratch = ("/tmp/", "/var/tmp/", str(Path.home() / ".local" / "share" / "sali" / "workspace"))
+        return RiskLevel.R1 if any(target.startswith(s) for s in scratch) else RiskLevel.R4
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        try:
+            path = ctx.paths.check_write(args["path"])
+        except PathViolation as exc:
+            return ToolResult(ok=False, display="denied", error=str(exc))
+        if not path.exists():
+            return ToolResult(ok=False, display="not found", error=f"{path} does not exist")
+        if path.is_dir():
+            return ToolResult(ok=False, display="is a directory", error="refusing to delete a directory")
+        path.unlink()
+        return ToolResult(ok=True, output={"path": str(path)}, display=f"deleted {path.name}")
+
+
 def register_builtins(registry: ToolRegistry) -> None:
-    for cls in (ListDir, ReadFile, FileMetadata, SearchFiles, CreateFile, ModifyFile):
+    for cls in (ListDir, ReadFile, FileMetadata, SearchFiles, CreateFile, ModifyFile, DeleteFile):
         registry.register(cls())

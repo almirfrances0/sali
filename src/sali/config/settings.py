@@ -43,41 +43,30 @@ class ModelSettings(BaseModel):
 
 
 class RuntimeSettings(BaseModel):
-    max_iterations: int = 8
-    token_budget_per_run: int = 24_000
+    max_iterations: int = 20
+    token_budget_per_run: int = 120_000
 
 
 def _default_fs_deny() -> list[str]:
+    # This machine is Sali's home — it's open to it. Only credentials and the separate
+    # `salix` project stay protected by default (a light guard the owner can remove).
     h = Path.home()
     return [
-        str(h / ".ssh"), str(h / ".gnupg"), str(h / ".aws"), str(h / ".config" / "sali"),
-        str(h / "Desktop" / "salix"), str(h / ".bash_history"), str(h / ".zsh_history"),
-        str(h / ".netrc"), str(h / ".git-credentials"), "/etc/shadow", "/etc/gshadow",
-    ]
-
-
-def _default_exec_allowlist() -> list[str]:
-    # ONLY binaries that cannot execute further code from their arguments. Deliberately
-    # excludes git / systemctl / journalctl (they take config/alias/-c args that spawn
-    # subprocesses) — those have dedicated, scoped tools instead. Interpreters are refused too.
-    return [
-        "uname", "uptime", "df", "free", "lscpu", "lsblk", "nproc", "ip", "ss", "ps", "who",
-        "id", "date", "nvidia-smi", "stat", "du", "lsof", "hostname", "sensors",
+        str(h / ".ssh"), str(h / ".gnupg"), str(h / ".aws"),
+        str(h / ".git-credentials"), str(h / ".netrc"), str(h / "Desktop" / "salix"),
     ]
 
 
 class PermissionsSettings(BaseModel):
-    fs_read_roots: list[str] = Field(default_factory=lambda: [str(Path.home())])
-    # Writes default to a dedicated scratch workspace — NOT Sali's own source tree — so the
-    # model can never silently rewrite Sali's code/.git for persistence (red-team crit #3).
-    fs_write_roots: list[str] = Field(
-        default_factory=lambda: [str(Path.home() / ".local" / "share" / "sali" / "workspace")]
+    # Broad read (Sali reads its own source, configs, logs) and broad write (its whole home).
+    fs_read_roots: list[str] = Field(
+        default_factory=lambda: [str(Path.home()), "/etc", "/usr", "/proc", "/var/log"]
     )
+    fs_write_roots: list[str] = Field(default_factory=lambda: [str(Path.home())])
     fs_deny: list[str] = Field(default_factory=_default_fs_deny)
-    exec_allowlist: list[str] = Field(default_factory=_default_exec_allowlist)
-    exec_cwd: str = Field(default_factory=lambda: str(Path.home() / "Desktop" / "sali"))
-    exec_allow_network: bool = False
-    jail: bool = True  # use bubblewrap when available
+    exec_cwd: str = Field(default_factory=lambda: str(Path.home()))
+    exec_allow_network: bool = True  # Sali runs freely, including networked commands (installs)
+    jail_learning: bool = True  # an isolated sandbox is available for learning-time experiments
 
 
 class Settings(BaseSettings):

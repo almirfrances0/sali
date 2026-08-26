@@ -45,8 +45,9 @@ def test_r0_auto_allow() -> None:
     assert PolicyEngine().decide(MemoryInfo(), {}).action is Action.AUTO_ALLOW
 
 
-def test_r4_denied_by_default() -> None:
-    assert PolicyEngine().decide(_Destructive(), {}).action is Action.DENY
+def test_r4_confirms_not_denies() -> None:
+    # In Sali's home nothing is auto-denied; a destructive R4 tool pauses to confirm.
+    assert PolicyEngine().decide(_Destructive(), {}).action is Action.CONFIRM
 
 
 def test_denylist_beats_everything() -> None:
