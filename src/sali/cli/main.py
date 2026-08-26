@@ -1011,7 +1011,7 @@ async def _daemon(settings: Settings) -> None:
             await learning.consolidate()
 
     coros = [scheduler.run_forever(), twin.run(stop=stop, on_tick=on_tick)]
-    engine = _perception_engine(settings)  # continuous desktop perception (§7,11,42); None if disabled
+    engine = _perception_engine(settings, pool)  # continuous desktop perception (§7,11,42); None if off
     if engine is not None:
         coros.append(engine.run(stop))
 
@@ -1027,12 +1027,14 @@ async def _daemon(settings: Settings) -> None:
         await kernel.close()
 
 
-def _perception_engine(settings: Settings) -> Any:
+def _perception_engine(settings: Settings, pool: Any = None) -> Any:
     """Build the continuous event engine from settings, or None if watching is disabled. The window
-    source is the Phase-4 perception snapshot; the fs source watches the configured roots."""
+    source is the Phase-4 perception snapshot; the fs source watches the configured roots; surfaced
+    observations are PERSISTED (via DbObservationSink) so the agent loop becomes aware of them."""
     if not settings.perception.watch_enabled:
         return None
     from sali.events.engine import PerceptionEngine
+    from sali.events.sink import DbObservationSink
     from sali.perception.service import build_perception
 
     perception = build_perception(settings)
@@ -1041,8 +1043,9 @@ def _perception_engine(settings: Settings) -> Any:
         return await perception.snapshot(ui=False)
 
     p = settings.perception
+    sink = DbObservationSink(pool) if pool is not None else None  # None → engine's default LoggingSink
     return PerceptionEngine(
-        snapshot=snapshot, fs_roots=p.watch_roots, window_poll_s=p.window_poll_s,
+        sink=sink, snapshot=snapshot, fs_roots=p.watch_roots, window_poll_s=p.window_poll_s,
         aggregate_window_s=p.aggregate_window_s, buffer_size=p.observation_buffer)
 
 

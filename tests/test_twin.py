@@ -232,6 +232,44 @@ async def test_awareness_surfaces_changes_then_acknowledges(db_conn: Any) -> Non
     assert again == []  # surfaced once, then quiet
 
 
+async def test_desktop_observations_persist_and_surface_then_acknowledge(db_conn: Any) -> None:
+    # sali3 Phase 5 fusion: the continuous engine's observations reach the loop's awareness.
+    from datetime import UTC, datetime
+
+    from sali.events.base import EventKind, Observation
+    from sali.events.sink import DbObservationSink
+    from sali.twin.awareness import acknowledge_observations, unacknowledged_observations
+
+    class _Acq:
+        def __init__(self, c: Any) -> None:
+            self.c = c
+
+        async def __aenter__(self) -> Any:
+            return self.c
+
+        async def __aexit__(self, *a: Any) -> bool:
+            return False
+
+    class _Pool:
+        def __init__(self, c: Any) -> None:
+            self.c = c
+
+        def acquire(self) -> Any:
+            return _Acq(self.c)
+
+    t = datetime(2026, 8, 26, 12, 0, 0, tzinfo=UTC)
+    sink = DbObservationSink(_Pool(db_conn), min_importance=0.6)
+    await sink.observe(Observation(EventKind.FILE_MODIFIED, "modified main.py", 0.8, 1, t, t))
+    await sink.observe(Observation(EventKind.FILE_MODIFIED, "modified junk", 0.3, 1, t, t))  # too low
+
+    phrases, through = await unacknowledged_observations(db_conn)
+    assert phrases == ["modified main.py"]  # only the meaningful one was persisted + surfaced
+
+    await acknowledge_observations(db_conn, through)
+    again, _ = await unacknowledged_observations(db_conn)
+    assert again == []  # surfaced once, then quiet
+
+
 async def test_awareness_dedups_add_then_remove(db_conn: Any) -> None:
     from sali.twin.awareness import unacknowledged_changes
 

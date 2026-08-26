@@ -61,3 +61,31 @@ async def acknowledge(conn: Any, through_seq: int) -> None:
         "('twin.acknowledged','machine',$1)",
         {"through_seq": int(through_seq)},
     )
+
+
+async def unacknowledged_observations(conn: Any, *, limit: int = 8) -> tuple[list[str], int]:
+    """Recent DESKTOP observations Sali hasn't noticed yet (from the continuous event engine, sali3
+    Phase 5) — what Almir's been doing on screen: edits, app switches. Returns (phrases, watermark)."""
+    through = await conn.fetchval(
+        "SELECT coalesce(max((payload->>'through_seq')::bigint), 0) "
+        "FROM event WHERE event_type='desktop.acknowledged'"
+    ) or 0
+    rows = await conn.fetch(
+        "SELECT seq, payload->>'summary' AS summary FROM event "
+        "WHERE event_type='desktop.observed' AND seq > $1 ORDER BY seq DESC LIMIT $2",
+        int(through), int(limit),
+    )
+    if not rows:
+        return [], int(through)
+    max_seq = max(int(through), max(int(r["seq"]) for r in rows))
+    phrases = [str(r["summary"]) for r in rows if r["summary"]]  # newest first
+    return phrases, max_seq
+
+
+async def acknowledge_observations(conn: Any, through_seq: int) -> None:
+    """Mark desktop observations up to ``through_seq`` as noticed, so they aren't surfaced again."""
+    await conn.execute(
+        "INSERT INTO event (event_type, subject_type, payload) VALUES "
+        "('desktop.acknowledged','desktop',$1)",
+        {"through_seq": int(through_seq)},
+    )

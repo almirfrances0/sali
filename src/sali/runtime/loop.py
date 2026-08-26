@@ -300,24 +300,35 @@ class AgentLoop:
             iterations=int(final.data["iterations"]), tool_calls=int(final.data["tool_calls"]),
         )
 
-    async def _machine_changes(self, conn: Any, journal: RunJournal) -> tuple[str | None, int | None]:
-        """A one-line heads-up about machine changes Sali hasn't noticed yet, plus the watermark
-        to acknowledge — but NOT acknowledged here: the caller acks only once the turn actually
-        reached the model, so a failed turn doesn't silently swallow the change."""
+    async def _machine_changes(
+        self, conn: Any, journal: RunJournal
+    ) -> tuple[str | None, int | None, int | None]:
+        """A heads-up about what Sali hasn't noticed yet — structural machine changes (installs, hw)
+        AND recent desktop activity from the continuous event engine (files Almir edited, apps he
+        switched to). Returns (note, twin_watermark, obs_watermark); NOT acknowledged here — the caller
+        acks only once the turn actually reached the model, so a failed turn never swallows a change."""
         try:
             phrases, through = await twin_awareness.unacknowledged_changes(conn)
         except Exception:  # noqa: BLE001 - awareness is a nicety, never break a turn
-            return None, None
-        if not phrases:
-            return None, None
-        await journal.event("twin_changes", {"count": len(phrases)})
+            phrases, through = [], None
+        try:
+            obs, obs_through = await twin_awareness.unacknowledged_observations(conn)
+        except Exception:  # noqa: BLE001
+            obs, obs_through = [], None
+        parts: list[str] = []
+        if phrases:
+            parts.append("Things changed on your machine: " + "; ".join(phrases[:6]) + ".")
+        if obs:
+            parts.append("Recently on screen, Almir: " + "; ".join(obs[:6]) + ".")
+        if not parts:
+            return None, None, None
+        await journal.event("awareness", {"changes": len(phrases), "observations": len(obs)})
         note = (
-            "While Almir was away, some things changed on your machine: "
-            + "; ".join(phrases[:6])
-            + ". If it's worth a heads-up, mention it to him naturally and briefly, in your own "
-            "words — don't make a big deal of it."
+            "You're continuously aware of Almir's machine. " + " ".join(parts)
+            + " Use this only if it's relevant — mention it naturally and briefly, in your own words; "
+            "don't make a big deal of it."
         )
-        return note, through
+        return note, (through if phrases else None), (obs_through if obs else None)
 
     async def _open_tasks_note(self) -> str | None:
         """A compact view of any task still in progress (§24), so Sali resumes it — this is read
@@ -413,7 +424,8 @@ class AgentLoop:
                 specs = self.registry.advertise()
                 # The 'interpret' branch of observation (§16): notice machine changes that
                 # happened while Almir was away, so Sali can bring them up in its own words.
-                machine_changes, ack_changes_through = await self._machine_changes(conn, journal)
+                machine_changes, ack_changes_through, ack_obs_through = await self._machine_changes(
+                    conn, journal)
                 tasks_note = await self._open_tasks_note()  # §24: resume any task in progress
                 assembled = self.context.assemble(
                     user_input, bundle, specs,
@@ -604,6 +616,8 @@ class AgentLoop:
                 try:
                     if ack_changes_through is not None:
                         await twin_awareness.acknowledge(conn, ack_changes_through)
+                    if ack_obs_through is not None:
+                        await twin_awareness.acknowledge_observations(conn, ack_obs_through)
                     await self._maybe_compact(conn, session_id)  # keep the one session from breaking
                     await prune_stm(conn)  # reclaim expired short-term rows every turn (cheap, no model)
                     self._maybe_learn()  # fold raw activity into episodes/procedures — off-thread
