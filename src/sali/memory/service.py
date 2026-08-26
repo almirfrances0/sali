@@ -10,13 +10,19 @@ asserted (engineering rule 9).
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
 from sali.core.clock import Clock, SystemClock
 from sali.core.enums import FreshnessPolicy, MemoryLayer, MemorySource
 from sali.memory import embed_worker, retriever, writer
-from sali.memory.decay import effective_confidence, freshness_factor, is_stale
+from sali.memory.decay import (
+    decayed_importance,
+    effective_confidence,
+    freshness_factor,
+    is_stale,
+)
 from sali.memory.models import Memory, MemoryHit, row_to_memory
 from sali.provider.base import ModelProvider
 
@@ -84,8 +90,15 @@ class MemoryService:
         ff = freshness_factor(policy, row["last_verified"], now)
         eff_conf = effective_confidence(row["confidence"], ff)
 
-        # Trust only *modulates* relevance (never inverts it).
-        score = relevance * (0.7 + 0.3 * eff_conf)
+        # Rerank by more than similarity (§37): relevance LEADS, then trust + decayed-importance
+        # modulate it, and reuse amplifies an already-relevant hit. Importance decay is per-layer
+        # (the half-life comes from layer_policy), so identity/preferences barely decay while a
+        # transient system fact sinks (§28); reactivation lets an often-recalled memory rise (§29).
+        # Relevance still dominates, so an important-but-irrelevant memory stays suppressed (§38).
+        half_life = timedelta(seconds=float(row["half_life_s"])) if row["half_life_s"] else timedelta(days=30)
+        dimp = decayed_importance(float(row["importance"]), half_life, now - row["last_verified"])
+        reuse = min(0.2, 0.04 * int(row["access_count"] or 0))
+        score = relevance * (0.6 + 0.25 * eff_conf + 0.15 * dimp) * (1.0 + reuse)
         which = "hybrid" if len(retrievers) > 1 else next(iter(retrievers))
         return MemoryHit(
             memory=row_to_memory(row),
