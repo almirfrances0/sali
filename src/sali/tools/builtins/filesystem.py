@@ -21,6 +21,19 @@ _MAX_BYTES = 64 * 1024
 _PATH_ARG = {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
 
 
+def _in_free_zone(raw: Any) -> bool:
+    """Writing inside Sali's own home (or scratch) is ordinary work and runs freely; writing out
+    in the wider system is where it should pause and think first. One rule, not a blessed-folder
+    list — so Sali can create a file anywhere, and only stops to confirm when it's off in /etc,
+    /opt, and the like."""
+    try:
+        target = Path(str(raw)).expanduser().resolve()
+    except (OSError, ValueError, RuntimeError):
+        return False
+    zones = [Path.home().resolve(), Path("/tmp"), Path("/var/tmp")]
+    return any(target == z or z in target.parents for z in zones)
+
+
 class ListDir(Tool):
     name = "list_directory"
     description = "List the entries of a directory (name, type, size)."
@@ -124,15 +137,21 @@ class SearchFiles(Tool):
 
 class CreateFile(Tool):
     name = "create_file"
-    description = "Create a new file with the given text content (refuses to overwrite)."
+    description = (
+        "Create a new file anywhere with the given text content (makes parent folders as needed; "
+        "refuses to overwrite an existing file — use modify_file for that)."
+    )
     parameters = {
         "type": "object",
         "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
         "required": ["path", "content"],
     }
-    risk_level = RiskLevel.R1
+    risk_level = RiskLevel.R1  # base; assess() escalates writes outside Sali's home
     capabilities = frozenset({Capability.WRITE})
     idempotent = False
+
+    def assess(self, args: dict[str, Any]) -> RiskLevel:
+        return RiskLevel.R1 if _in_free_zone(args.get("path", "")) else RiskLevel.R4
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         try:
@@ -160,9 +179,12 @@ class ModifyFile(Tool):
         },
         "required": ["path", "content"],
     }
-    risk_level = RiskLevel.R1
+    risk_level = RiskLevel.R1  # base; assess() escalates writes outside Sali's home
     capabilities = frozenset({Capability.WRITE})
     idempotent = False
+
+    def assess(self, args: dict[str, Any]) -> RiskLevel:
+        return RiskLevel.R1 if _in_free_zone(args.get("path", "")) else RiskLevel.R4
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         try:

@@ -45,8 +45,10 @@ class ModelSettings(BaseModel):
 
 
 class RuntimeSettings(BaseModel):
-    max_iterations: int = 20
-    token_budget_per_run: int = 120_000
+    # Generous ceilings, not tight limits: a long multi-step task keeps going (the context is
+    # folded and continued when it fills — see the loop), so these are just runaway backstops.
+    max_iterations: int = 40
+    token_budget_per_run: int = 400_000
 
 
 def _default_fs_deny() -> list[str]:
@@ -60,11 +62,11 @@ def _default_fs_deny() -> list[str]:
 
 
 class PermissionsSettings(BaseModel):
-    # Broad read (Sali reads its own source, configs, logs) and broad write (its whole home).
-    fs_read_roots: list[str] = Field(
-        default_factory=lambda: [str(Path.home()), "/etc", "/usr", "/proc", "/var/log"]
-    )
-    fs_write_roots: list[str] = Field(default_factory=lambda: [str(Path.home())])
+    # The whole machine is open to Sali: it can read and create files anywhere. The real guards
+    # are the OS's own permissions (it runs as Almir, not root), the small fs_deny set below, and
+    # the loop's confirm-before-destructive judgment — not a hardcoded map of allowed folders.
+    fs_read_roots: list[str] = Field(default_factory=lambda: ["/"])
+    fs_write_roots: list[str] = Field(default_factory=lambda: ["/"])
     fs_deny: list[str] = Field(default_factory=_default_fs_deny)
     exec_cwd: str = Field(default_factory=lambda: str(Path.home()))
     exec_allow_network: bool = True  # Sali runs freely, including networked commands (installs)

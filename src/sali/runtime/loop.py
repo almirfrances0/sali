@@ -48,9 +48,27 @@ _SUMMARIZE: dict[str, Any] = {"temperature": 0.3, "top_k": 40, "top_p": 0.9}
 _COMPACT_AFTER = 24
 _KEEP_RECENT = 6
 
+# Intra-turn context folding: when the *working* prompt for a single task nears the model's
+# window, fold everything done so far into a compact progress note and carry on — so a long,
+# many-step job continues on its own instead of dead-ending on the context limit.
+_CTX_HEADROOM = 0.65  # fold once the estimated prompt passes this fraction of the window
+_CTX_MARGIN = 8       # per-message token overhead added to the estimate
+_FOLD_INSTRUCTION = (
+    "You are Sali, in the middle of a task. Fold everything you've done so far on THIS task into "
+    "a tight progress note you can pick up from: what Almir asked for, what you've tried, what the "
+    "tools returned, what you've concluded, and exactly what's still left to do. Be explicit about "
+    "steps you've ALREADY completed so you don't repeat them. First person, concrete, compact — it "
+    "replaces the detailed history so you can keep going. Just the note."
+)
+
 # Follow-through: models sometimes *narrate* an action ("I'll run these in parallel") and then
 # stop without calling anything, leaving Almir to re-prompt. When a reply defers a machine
 # action but emits no tool call, we nudge Sali to actually do it — bounded, so it can't loop.
+# The model occasionally emits a malformed tool call the backend can't parse (a transient 500).
+# Re-sampling at the warm voice temperature almost always yields a clean one, so retry a couple
+# of times before giving up rather than crashing the whole turn.
+_MAX_PROVIDER_RETRIES = 2
+
 _MAX_FOLLOW_THROUGH = 2
 _FOLLOW_THROUGH_NUDGE = (
     "(You just said you'd do that but didn't actually call anything. Do it now, in this reply — "
@@ -238,20 +256,41 @@ class AgentLoop:
 
                 while iteration < max_iter and tokens_used < budget:
                     await journal.set_state(RunState.REASON_PLAN, iteration=iteration)
+                    # Nearing the window on a long task? Fold what's done and keep going — the
+                    # task never dead-ends on the context limit; it compacts and continues.
+                    if self._over_context(messages):
+                        yield LoopEvent("status", "compacting to keep going")
+                        messages = await self._fold_messages(messages)
+                        await journal.event("context_folded", {"kept": len(messages)})
                     yield LoopEvent("status", "thinking")
                     started = self.clock.now()
                     res: ChatResult | None = None
-                    async for chunk in self.provider.chat_stream(
-                        messages, tools=specs or None, options=_VOICE
-                    ):
-                        if chunk.thinking:
-                            yield LoopEvent("thinking", chunk.thinking)
-                        if chunk.content:
-                            yield LoopEvent("token", chunk.content)
-                        if chunk.done:
-                            res = chunk.result
-                    if res is None:
-                        raise ProviderError("model stream ended without a result")
+                    attempt = 0
+                    while res is None:
+                        streamed = False
+                        try:
+                            async for chunk in self.provider.chat_stream(
+                                messages, tools=specs or None, options=_VOICE
+                            ):
+                                if chunk.thinking:
+                                    yield LoopEvent("thinking", chunk.thinking)
+                                if chunk.content:
+                                    streamed = True
+                                    yield LoopEvent("token", chunk.content)
+                                if chunk.done:
+                                    res = chunk.result
+                            if res is None:
+                                raise ProviderError("model stream ended without a result")
+                        except ProviderError as exc:
+                            attempt += 1
+                            if attempt > _MAX_PROVIDER_RETRIES:
+                                raise
+                            await journal.event(
+                                "provider_retry", {"attempt": attempt, "error": str(exc)[:200]}
+                            )
+                            if streamed:
+                                yield LoopEvent("reset")  # drop any partial before re-sampling
+                            yield LoopEvent("status", "let me try that again")
                     latency = int((self.clock.now() - started).total_seconds() * 1000)
                     tokens_used += res.tokens_in + res.tokens_out
                     await journal.event(
@@ -517,6 +556,48 @@ class AgentLoop:
             history.insert(0, ("earlier", summary))
         return history
 
+    def _context_window(self) -> int:
+        return min(self.settings.model.ctx_default, self.settings.model.ctx_max)
+
+    def _over_context(self, messages: list[ChatMessage]) -> bool:
+        """True when the working prompt is close enough to the model's window that we should fold
+        it before the next call. Conservative (over-estimates) so we fold early, never overflow."""
+        if len(messages) <= 3:
+            return False  # system + first turn + one more — nothing worth folding yet
+        limit = int(self._context_window() * _CTX_HEADROOM)
+        est = sum(
+            int(self.provider.count_tokens(m.content or "") * 1.3) + _CTX_MARGIN for m in messages
+        )
+        return est > limit
+
+    async def _fold_messages(self, messages: list[ChatMessage]) -> list[ChatMessage]:
+        """Fold the middle of the working prompt (everything after the system + first user turn)
+        into one model-written progress note, so Sali continues the task with a small context.
+        Model-driven, not scripted: the note is whatever Sali says it needs to carry forward."""
+        system, first_user = messages[0], messages[1]
+        body = messages[2:]
+        transcript = "\n".join(f"{m.role}: {(m.content or '')[:2000]}" for m in body)
+        note = await self.provider.chat(
+            [ChatMessage(role="system", content=_FOLD_INSTRUCTION),
+             ChatMessage(role="user", content=transcript)],
+            options=_SUMMARIZE,
+        )
+        folded = [
+            system, first_user,
+            ChatMessage(
+                role="user",
+                content=f"(Where you are in this task so far — continue from here:\n{note.content.strip()})",
+            ),
+        ]
+        # Keep the single most recent concrete result verbatim (as plain context, so there are no
+        # orphaned tool-call pairings) — so Sali doesn't redo the step it just finished.
+        recent = next((m for m in reversed(body) if (m.content or "").strip()), None)
+        if recent is not None:
+            folded.append(ChatMessage(
+                role="user", content=f"(Your most recent result, in full:\n{(recent.content or '')[:6000]})"
+            ))
+        return folded
+
     async def _maybe_compact(self, conn: Any, session_id: UUID) -> None:
         """When the conversation grows long, summarize older turns so the session never breaks."""
         row = await conn.fetchrow(
@@ -573,5 +654,14 @@ class AgentLoop:
         )
 
 
+# No single tool result may swallow the whole context window: a read/command can be 64 KiB
+# (~the entire window), which would crowd out everything else and confuse the model into
+# re-fetching. Bound what feeds back to it; the full result still lives in the durable record.
+_TOOL_OUTPUT_CAP = 12_000
+
+
 def _tool_message(tool_name: str, payload: dict[str, Any]) -> ChatMessage:
-    return ChatMessage(role="tool", name=tool_name, content=json.dumps(payload))
+    content = json.dumps(payload)
+    if len(content) > _TOOL_OUTPUT_CAP:
+        content = content[:_TOOL_OUTPUT_CAP] + f"… [truncated; {len(content)} bytes total]"
+    return ChatMessage(role="tool", name=tool_name, content=content)

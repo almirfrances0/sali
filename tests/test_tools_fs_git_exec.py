@@ -61,6 +61,17 @@ async def test_write_outside_root_is_denied(tmp_path: Path) -> None:
     assert not result.ok and "denied" in result.display
 
 
+def test_create_and_modify_escalate_outside_home() -> None:
+    # Sali can create a file anywhere, but writing out in the system pauses to confirm (R4);
+    # inside its own home (or scratch) it just writes (R1). One rule, not a folder allowlist.
+    assert CreateFile().assess({"path": str(Path.home() / "notes" / "todo.md")}) is RiskLevel.R1
+    assert CreateFile().assess({"path": "/tmp/scratch.txt"}) is RiskLevel.R1
+    assert CreateFile().assess({"path": "/etc/whatever.conf"}) is RiskLevel.R4
+    assert CreateFile().assess({"path": "/opt/app/config.yaml"}) is RiskLevel.R4
+    assert ModifyFile().assess({"path": str(Path.home() / "a.txt")}) is RiskLevel.R1
+    assert ModifyFile().assess({"path": "/usr/local/bin/thing"}) is RiskLevel.R4
+
+
 def test_delete_self_escalates_outside_scratch() -> None:
     # Scratch deletions run free; anything else escalates to R4 (confirm).
     assert DeleteFile().assess({"path": "/tmp/junk"}) is RiskLevel.R1

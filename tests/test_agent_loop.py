@@ -246,6 +246,104 @@ async def test_loop_recovers_from_leaked_tool_json(live_pool: Any) -> None:
         assert recovered >= 1
 
 
+async def test_loop_retries_transient_provider_error(live_pool: Any) -> None:
+    # A malformed-tool-call 500 must not crash the turn — the loop re-samples and carries on.
+    from collections.abc import AsyncIterator
+
+    from sali.core.errors import ProviderError
+    from sali.provider.base import ChatChunk, ChatMessage, ToolSpec
+
+    class FlakyProvider(FakeModelProvider):
+        def __init__(self) -> None:
+            super().__init__(
+                responses=[ChatResult("Recovered and answered.", None, [], 3, 3, "fake")]
+            )
+            self._failed = False
+
+        async def chat_stream(
+            self, messages: list[ChatMessage], *, tools: list[ToolSpec] | None = None,
+            options: Any = None, think: bool = False,
+        ) -> AsyncIterator[ChatChunk]:
+            if not self._failed:
+                self._failed = True
+                raise ProviderError("XML syntax error: malformed tool call")
+                yield  # pragma: no cover - makes this an async generator
+            async for chunk in super().chat_stream(messages, tools=tools, options=options):
+                yield chunk
+
+    result = await _loop(live_pool, FlakyProvider()).run("do the thing", session_id=new_id())
+    assert "Recovered and answered." in result.text  # the retry succeeded
+    async with live_pool.acquire() as c:
+        retries = await c.fetchval(
+            "SELECT count(*) FROM run_events WHERE run_id=$1 AND kind='provider_retry'",
+            result.run_id,
+        )
+        assert retries == 1
+
+
+def test_tool_message_bounds_huge_output() -> None:
+    from sali.runtime.loop import _TOOL_OUTPUT_CAP, _tool_message
+
+    msg = _tool_message("read_file", {"ok": True, "output": {"content": "x" * 100_000}})
+    assert len(msg.content) < 100_000  # a giant result can't swallow the whole context window
+    assert "truncated" in msg.content
+    small = _tool_message("memory_info", {"ok": True, "output": {"free": 123}})
+    assert "truncated" not in small.content and len(small.content) <= _TOOL_OUTPUT_CAP
+
+
+def test_over_context_predicate() -> None:
+    from sali.provider.base import ChatMessage
+
+    loop = _loop(None, FakeModelProvider())
+    loop.settings.model.ctx_default = 100  # tiny window so the estimate trips quickly
+    small = [ChatMessage(role="system", content="x"), ChatMessage(role="user", content="hi")]
+    assert not loop._over_context(small)  # <=3 messages: nothing to fold
+    big = [ChatMessage(role="system", content="s"), ChatMessage(role="user", content="q")]
+    big += [ChatMessage(role="assistant", content="detail " * 40) for _ in range(6)]
+    assert loop._over_context(big)  # well past 0.65 * 100 tokens
+
+
+async def test_fold_messages_keeps_system_and_task_and_notes_progress() -> None:
+    from sali.provider.base import ChatMessage
+
+    fake = FakeModelProvider(responses=[ChatResult("did A and B; C remains.", None, [], 5, 5, "fake")])
+    loop = _loop(None, fake)
+    messages = [
+        ChatMessage(role="system", content="SYSTEM"),
+        ChatMessage(role="user", content="TASK: build the thing"),
+        ChatMessage(role="assistant", content="step one"),
+        ChatMessage(role="tool", name="t", content="result one"),
+        ChatMessage(role="assistant", content="step two"),
+    ]
+    folded = await loop._fold_messages(messages)
+    assert len(folded) == 4  # system + original task + progress note + most-recent result verbatim
+    assert folded[0].content == "SYSTEM" and folded[1].content == "TASK: build the thing"
+    assert "did A and B; C remains." in folded[2].content  # the model-written carry-forward note
+    assert "step two" in folded[3].content  # the most recent concrete result is kept, not lost
+
+
+async def test_loop_folds_context_mid_turn_and_still_finishes(live_pool: Any) -> None:
+    # A long turn: several tool round-trips push the working prompt past a (tiny) window, so the
+    # loop folds and continues on its own, then finalizes — no dead-end on the context limit.
+    fake = FakeModelProvider(
+        responses=[
+            ChatResult("", None, [ToolCall("memory_info", {})], 5, 5, "fake"),  # iter 0: a tool
+            ChatResult("(folded progress note)", None, [], 5, 5, "fake"),       # the fold summary
+            ChatResult("All done — here's the result.", None, [], 5, 5, "fake"),  # iter 1: answer
+        ]
+    )
+    loop = _loop(live_pool, fake)
+    loop.settings.model.ctx_default = 60  # tiny window → folds once the first tool result lands
+    result = await loop.run("do a long multi-step job", session_id=new_id())
+    assert "All done" in result.text
+    async with live_pool.acquire() as c:
+        folded = await c.fetchval(
+            "SELECT count(*) FROM run_events WHERE run_id=$1 AND kind='context_folded'",
+            result.run_id,
+        )
+        assert folded >= 1  # it compacted mid-turn and kept going
+
+
 async def test_sense_short_circuits_on_tiny_input() -> None:
     # A hunch on <4 chars would be noise — and it must never touch the DB for that (pool=None).
     loop = _loop(None, FakeModelProvider())
