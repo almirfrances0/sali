@@ -149,16 +149,17 @@ async def test_astream_emits_tool_events(live_pool: Any) -> None:
 
 
 async def test_loop_follows_through_on_announced_action(live_pool: Any) -> None:
-    # Sali narrates an action but calls nothing (the reported bug) → the loop must nudge it to
-    # actually do it in the SAME turn, not stop and wait for Almir to re-prompt.
+    # Sali narrates an action but calls nothing (the reported bug). The loop asks Sali to judge its
+    # own reply (STALLED), then nudges it to actually do it in the SAME turn — no re-prompt needed.
     fake = FakeModelProvider(
         responses=[
-            ChatResult("I'll run these in parallel to keep it fast.", None, [], 5, 3, "fake"),
-            ChatResult("", None, [ToolCall("memory_info", {})], 4, 2, "fake"),
-            ChatResult("You've got plenty of memory free.", None, [], 4, 3, "fake"),
+            ChatResult("Let's start by checking your memory.", None, [], 5, 3, "fake"),  # announces
+            ChatResult("STALLED", None, [], 1, 1, "fake"),                                # self-judgement
+            ChatResult("", None, [ToolCall("memory_info", {})], 4, 2, "fake"),            # follows through
+            ChatResult("You've got plenty of memory free.", None, [], 4, 3, "fake"),      # answers
         ]
     )
-    result = await _loop(live_pool, fake).run("check memory and disk in parallel")
+    result = await _loop(live_pool, fake).run("check my memory")
     assert result.tool_calls == 1  # it followed through and actually ran the tool
     assert "plenty of memory free" in result.text
     async with live_pool.acquire() as c:
@@ -169,10 +170,13 @@ async def test_loop_follows_through_on_announced_action(live_pool: Any) -> None:
         assert followed == 1  # the nudge was journaled exactly once
 
 
-async def test_loop_does_not_nudge_a_normal_answer(live_pool: Any) -> None:
-    # A plain, complete answer with no deferred action must NOT be nudged — it just finalizes.
+async def test_loop_does_not_nudge_a_complete_answer(live_pool: Any) -> None:
+    # A short answer that Sali judges DONE must NOT be nudged — it just finalizes.
     fake = FakeModelProvider(
-        responses=[ChatResult("Your disk is about half full.", None, [], 4, 4, "fake")]
+        responses=[
+            ChatResult("Your disk is about half full.", None, [], 4, 4, "fake"),  # the answer
+            ChatResult("DONE", None, [], 1, 1, "fake"),                            # self-judgement
+        ]
     )
     result = await _loop(live_pool, fake).run("how full is my disk")
     assert result.text == "Your disk is about half full."
@@ -184,36 +188,14 @@ async def test_loop_does_not_nudge_a_normal_answer(live_pool: Any) -> None:
         assert followed == 0
 
 
-def test_defers_action_detects_announced_but_not_asked() -> None:
-    from sali.runtime.loop import _defers_action
-
-    # Bare, short announcements of a not-yet-taken action → follow through.
-    assert _defers_action("I'll run these in parallel to keep it fast.")
-    assert _defers_action("Let me check the disk usage real quick.")
-    assert _defers_action("Let's do this.")  # the phrasing Almir flagged
-    assert _defers_action("Let's run these one by one.")
-    assert _defers_action("Okay, let's go one by one through the services.")
-    assert _defers_action("Running that now.")  # bare present-continuous opener
-    assert _defers_action("Setting up the environment now.")
-
-
-def test_defers_action_leaves_real_answers_alone() -> None:
-    # The review's false-positive cases: a complete answer must never be discarded and re-run.
-    from sali.runtime.loop import _defers_action
-
-    assert not _defers_action("Want me to run these in parallel?")  # a question is for Almir
-    assert not _defers_action("Your disk is about half full.")  # plain finished answer
-    assert not _defers_action("I'll remember that.")  # intent, but no machine-action verb
-    assert not _defers_action("Half full. I'll run a cleanup if it gets tight.")  # conditional offer
-    assert not _defers_action("I'll take a look at the other services tomorrow.")  # deferred by design
-    assert not _defers_action("I'll check back later.")
-    assert not _defers_action("Let me know if you want me to run it.")  # an offer, not a stall
-    assert not _defers_action("I finished installing the package and it works now.")  # completion report
-    # A long, substantive answer that merely mentions an action is not a preamble.
-    assert not _defers_action(
-        "Here's the full rundown of your system. " * 8 + "I'll run the scan."
-    )
-    assert not _defers_action("")
+async def test_stalled_is_structural_then_model_judged() -> None:
+    # No phrase list: a long reply is assumed complete (no model call at all); a short one is put to
+    # the model, which judges its own reply.
+    stalled = _loop(None, FakeModelProvider(responses=[ChatResult("STALLED", None, [], 1, 1, "fake")]))
+    assert await stalled._stalled("deploy the app", "x " * 200) is False  # long → not even checked
+    assert await stalled._stalled("deploy the app", "Let's start.") is True  # short → judged a stall
+    done = _loop(None, FakeModelProvider(responses=[ChatResult("DONE", None, [], 1, 1, "fake")]))
+    assert await done._stalled("say hi", "Hey Almir!") is False  # short → judged complete
 
 
 def test_looks_like_leaked_tool_call() -> None:

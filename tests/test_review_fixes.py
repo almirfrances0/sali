@@ -130,8 +130,10 @@ async def test_denied_tool_is_audited_and_never_executes(live_pool: Any) -> None
 async def test_multi_turn_conversation_is_persisted_and_carried(live_pool: Any) -> None:
     fake = FakeModelProvider(
         responses=[
-            ChatResult("Hi Almir.", None, [], 5, 5, "fake"),
-            ChatResult("Yes — you greeted me.", None, [], 5, 5, "fake"),
+            ChatResult("Hi Almir.", None, [], 5, 5, "fake"),           # turn 1 reply
+            ChatResult("DONE", None, [], 1, 1, "fake"),                 # turn 1 self-judgement
+            ChatResult("Yes — you greeted me.", None, [], 5, 5, "fake"),  # turn 2 reply
+            ChatResult("DONE", None, [], 1, 1, "fake"),                 # turn 2 self-judgement
         ]
     )
     loop = _loop(live_pool, fake)
@@ -150,7 +152,9 @@ async def test_multi_turn_conversation_is_persisted_and_carried(live_pool: Any) 
         ) == 1
 
     # The second turn's context actually saw the first turn (continuity, not a fresh session).
-    last_system = next(m for m in fake.calls[-1]["messages"] if m.role == "system")
+    # Inspect the reasoning call (it carries tools), not the tool-less self-judgement call.
+    reasoning = [c for c in fake.calls if c.get("tools")][-1]
+    last_system = next(m for m in reasoning["messages"] if m.role == "system")
     assert "Conversation so far" in last_system.content
     assert "hello" in last_system.content
 

@@ -94,45 +94,20 @@ def _looks_like_leaked_tool_call(text: str) -> bool:
     it as a malfunction to recover from, not as an answer to show."""
     stripped = text.strip()
     return stripped.startswith(("{", "[")) and bool(_LEAKED_TOOL_JSON.match(stripped))
-# A short reply is a *preamble* ("I'll run these in parallel."); a long one is a real answer that
-# merely mentions an action, and must never be discarded and re-generated. Keep the window tight.
-_PREAMBLE_MAX_CHARS = 220
-# An intent lead ("I'll", "let me", "let's") closely followed by an action verb — kept narrow so
-# ordinary sign-offs don't trip it (collision-prone verbs like "show you"/"take"/"start" removed).
-_DEFER_LEAD_ACTION = re.compile(
-    r"\b(i'?ll|i\s+will|i'?m\s+going\s+to|i\s+am\s+going\s+to|let\s+me|let'?s|let\s+us|going\s+to|"
-    r"gonna|about\s+to)\b[^.?!]{0,50}?\b(run|check|inspect|install|grep|find|search|scan|read|"
-    r"open|list|pull\s+up|take\s+a\s+look|dig\s+into|go\s+(?:through|one)|verify|execute|fetch|"
-    r"kick\s+off|do\s+(?:that|it|this|these|them))\b",
-    re.IGNORECASE,
-)
-# Bare present-continuous *openers* — anchored at the start so mid-sentence participles and
-# past-tense completion reports ("I finished installing X") don't match.
-_DEFER_BARE = re.compile(
-    r"^\s*(?:okay|ok|alright|sure|right|got\s+it|on\s+it)?[,.\s]*"
-    r"(running|checking|installing|searching|scanning|inspecting|setting\s+up|pulling\s+up|"
-    r"digging\s+into|kicking\s+off)\b",
-    re.IGNORECASE,
-)
-# Conditional / optional / offered actions ("I'll run it if it gets tight", "let me know if…")
-# are not stalls — the work is genuinely deferred by design, so never auto-continue past them.
-_CONDITIONAL = re.compile(
-    r"\b(if|once|when|unless|whenever|later|tomorrow|afterwards?|next\s+time|down\s+the\s+line|"
-    r"let\s+me\s+know|want\s+me\s+to|should\s+i|feel\s+free)\b",
-    re.IGNORECASE,
-)
 
 
-def _defers_action(text: str) -> bool:
-    """True only when a reply is a *bare, short announcement* of a machine action it hasn't taken
-    yet — the exact "I'll do X" then stop that leaves Almir re-prompting. A question (anywhere), a
-    conditional/offer, or any substantial answer is NOT a stall and is left to finalize untouched."""
-    stripped = text.strip()
-    if not stripped or "?" in stripped or len(stripped) > _PREAMBLE_MAX_CHARS:
-        return False
-    if _CONDITIONAL.search(stripped):
-        return False
-    return bool(_DEFER_LEAD_ACTION.search(stripped) or _DEFER_BARE.match(stripped))
+# Stall detection is structural, not a phrase list: only a SHORT, tool-less first reply is even a
+# candidate (a substantial answer is assumed complete and never checked), and then the reasoning
+# engine judges its OWN reply — did it act, or only announce and stop? This is what the model is
+# for (judgement, not parsing), and it can't drift out of date the way a verb list does.
+_STALL_MAX_CHARS = 240
+_STALL_JUDGE_SYSTEM = (
+    "Almir asked you to do something and you just replied. Judge your OWN reply honestly: did you "
+    "actually do it / give him the answer, or did you only say you WOULD — announce or start an "
+    "action ('let's…', 'I'll…') and then stop without doing it? If a tool was needed, saying you'll "
+    "do it is NOT doing it. A genuine question back to Almir counts as DONE. Reply with exactly one "
+    "word: DONE or STALLED."
+)
 
 
 @dataclass(slots=True)
@@ -208,6 +183,23 @@ class AgentLoop:
             "words — don't make a big deal of it."
         )
         return note, through
+
+    async def _stalled(self, user_input: str, response: str) -> bool:
+        """Did Sali announce an action and stop, instead of doing it? Structural pre-filter (only a
+        short, tool-less reply is a candidate — a substantial answer is taken as complete), then the
+        model judges its own reply. No hardcoded phrases, so it never drifts out of date."""
+        text = response.strip()
+        if not text or len(text) > _STALL_MAX_CHARS:
+            return False
+        try:
+            verdict = await self.provider.chat(
+                [ChatMessage(role="system", content=_STALL_JUDGE_SYSTEM),
+                 ChatMessage(role="user", content=f"Almir asked: {user_input}\n\nYour reply: {text}")],
+                options=_SUMMARIZE,
+            )
+        except Exception:  # noqa: BLE001 - a failed judgement just means no nudge, never a broken turn
+            return False
+        return verdict.content.strip().upper().startswith("STALL")
 
     async def sense(self, partial: str) -> str:
         """A quiet hunch about what Almir is typing, formed the instant he pauses — retrieval
@@ -335,10 +327,10 @@ class AgentLoop:
                             iteration += 1
                             continue
                         # If Sali *announced* an action but has done nothing yet this turn, push it
-                        # to actually follow through (bounded, so it can never spin). Only on a bare
-                        # preamble with no work done — a finished answer is never second-guessed.
+                        # to actually follow through (bounded, so it can never spin). Structural gate
+                        # (nothing done yet) + the model judging its own reply — no phrase list.
                         if (tool_calls == 0 and follow_through < _MAX_FOLLOW_THROUGH
-                                and _defers_action(res.content)):
+                                and await self._stalled(user_input, res.content)):
                             follow_through += 1
                             yield LoopEvent("reset")  # clear the preamble; the real answer streams fresh
                             messages.append(ChatMessage(role="assistant", content=res.content))
