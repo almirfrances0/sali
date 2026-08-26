@@ -12,8 +12,22 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from sali.context.budget import Priority, Section, pack
+from sali.core.enums import MemorySource
 from sali.provider.base import ChatMessage, ModelProvider, ToolSpec
 from sali.retrieval.models import RetrievalBundle
+
+# Where a memory came from, in plain words — so the model weighs a web claim differently from a
+# first-hand observation or something Almir said, instead of treating them all as equal fact.
+_SOURCE_LABEL = {
+    MemorySource.SYSTEM_OBSERVATION: "observed on this machine",
+    MemorySource.FILE_OBSERVATION: "seen in a file",
+    MemorySource.USER_EXPLICIT: "Almir told you",
+    MemorySource.TOOL_RESULT: "a tool result",
+    MemorySource.PROCEDURE_EXECUTION: "from running a procedure",
+    MemorySource.EXTERNAL_SOURCE: "from the web",
+    MemorySource.CONVERSATION: "came up in chat",
+    MemorySource.INFERENCE: "your own inference",
+}
 
 # Deliberately small: character + self + judgement, nothing operational. Sali's BEHAVIOUR comes
 # from the SYSTEM around the model (the loop's follow-through/anti-loop logic, the verified tools
@@ -109,12 +123,17 @@ class ContextEngine:
         if bundle.memories:
             lines = []
             for hit in bundle.memories:
-                tag = f"(confidence {hit.effective_confidence:.2f}"
-                tag += ", STALE — verify)" if hit.stale else ")"
-                lines.append(f"- {hit.memory.content} {tag}")
+                bits = [
+                    _SOURCE_LABEL.get(hit.memory.source, hit.memory.source.value),
+                    f"confidence {hit.effective_confidence:.2f}",
+                ]
+                if hit.memory.needs_grounding:
+                    bits.append("unverified")
                 if hit.stale:
+                    bits.append("STALE — verify")
                     conflicts.append(hit.memory.content)
-            text = "What you remember (each with its confidence):\n" + "\n".join(lines)
+                lines.append(f"- {hit.memory.content} ({'; '.join(bits)})")
+            text = "What you remember (where it came from, and how sure you are):\n" + "\n".join(lines)
             avg = sum(h.score for h in bundle.memories) / len(bundle.memories)
             sections.append(Section("memories", Priority.P2, text, self._count(text), score=avg))
 

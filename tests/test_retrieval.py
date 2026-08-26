@@ -55,3 +55,26 @@ async def test_plain_lookup_returns_memories_only(live_pool: Any) -> None:
     assert not plan.use_graph and not plan.use_recent
     assert bundle.graph_facts == [] and bundle.recent == []
     assert any("local models" in h.memory.content for h in bundle.memories)
+
+
+async def test_gather_reinforces_recalled_memories(live_pool: Any) -> None:
+    # A memory Sali actually recalls is marked USED (access_count++, last_accessed set). Without this
+    # every memory sits at access_count=0 and recall leaves no trace — the core "not using its
+    # memory" symptom. Reinforcement must not touch last_verified (recall isn't re-verification).
+    async with live_pool.acquire() as c:
+        mem = await mem_writer.remember(
+            c, layer=MemoryLayer.SEMANTIC, content="Almir prefers local models",
+            source=MemorySource.USER_EXPLICIT,
+        )
+        before = await c.fetchrow("SELECT last_verified FROM memory WHERE id=$1", mem.id)
+
+    service = RetrievalService(live_pool, FakeModelProvider())
+    plan = classify("what did I say about local models?")
+    bundle = await service.gather("what did I say about local models?", plan)
+    assert any(h.memory.id == mem.id for h in bundle.memories)  # it was recalled
+
+    async with live_pool.acquire() as c:
+        row = await c.fetchrow(
+            "SELECT access_count, last_accessed, last_verified FROM memory WHERE id=$1", mem.id)
+    assert row["access_count"] == 1 and row["last_accessed"] is not None
+    assert row["last_verified"] == before["last_verified"]  # recall did NOT re-verify

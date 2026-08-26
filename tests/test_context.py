@@ -54,6 +54,15 @@ def test_stale_memory_is_surfaced_not_asserted() -> None:
     assert "STALE" in system  # labeled, with an instruction to verify
 
 
+def test_memory_provenance_is_rendered_at_use_time() -> None:
+    # Each recalled memory carries WHERE it came from into context, so the model weighs a web claim
+    # differently from something Almir said — provenance isn't thrown away at the moment of use.
+    bundle = RetrievalBundle(memories=[_hit("Almir prefers Neovim")])  # source=USER_EXPLICIT
+    system = _engine().assemble("what editor do I like?", bundle, tool_specs=[]).messages[0].content
+    assert "Almir told you" in system  # the source label for USER_EXPLICIT
+    assert "confidence" in system
+
+
 def test_live_note_included_when_present() -> None:
     assembled = _engine().assemble(
         "how much RAM now?", RetrievalBundle(), tool_specs=[], live_note=LIVE_NOTE

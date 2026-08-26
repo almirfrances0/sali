@@ -98,12 +98,21 @@ class MemoryService:
         )
 
     async def touch(self, memory_id: UUID) -> None:
-        """Access reinforcement: bump access_count and reset the decay clock."""
+        """Access reinforcement: bump access_count and record it was just used."""
+        await self.touch_many([memory_id])
+
+    async def touch_many(self, memory_ids: list[UUID]) -> None:
+        """Reinforce a whole recalled batch in one write: bump access_count and last_accessed for
+        the memories Sali actually used this turn. This is what makes a fact that keeps coming up
+        *count as used* — without it every memory sits at access_count=0 and recall leaves no trace.
+        Note: it does NOT touch last_verified — recalling a fact is not re-verifying it's still true."""
+        if not memory_ids:
+            return
         async with self.pool.acquire() as conn:
             await conn.execute(
                 "UPDATE memory SET access_count = access_count + 1, last_accessed = now() "
-                "WHERE id = $1",
-                memory_id,
+                "WHERE id = ANY($1::uuid[])",
+                memory_ids,
             )
 
 

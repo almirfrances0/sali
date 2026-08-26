@@ -7,6 +7,7 @@ query tokens are matched against node names, and the neighbours of the matches b
 
 from __future__ import annotations
 
+import contextlib
 import re
 from typing import Any
 
@@ -35,6 +36,11 @@ class RetrievalService:
             if (plan.use_vector or plan.use_keyword)
             else []
         )
+        # Reinforce what we recalled: a memory Sali actually uses gets marked used (access_count,
+        # last_accessed). Best-effort — reinforcement must never break retrieval.
+        if memories:
+            with contextlib.suppress(Exception):
+                await self.memory.touch_many([h.memory.id for h in memories])
         # Graph seeding is always attempted — it is entity-guarded (returns nothing when no
         # node name matches), so any mentioned entity brings in its known relationships
         # regardless of how the question is phrased. The relational intent is a ranking hint.
