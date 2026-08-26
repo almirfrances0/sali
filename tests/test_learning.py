@@ -163,3 +163,14 @@ async def test_consolidate_stm_skips_below_threshold_and_prune_drops_expired(db_
         "VALUES ('turn','stale','conversation'::memory_source, now() - interval '1 hour')"
     )
     assert await prune_stm(db_conn) == 1  # only the expired one is dropped
+
+
+async def test_consolidate_skips_when_a_pass_already_holds_the_lock(live_pool: Any) -> None:
+    # Two consolidation passes (the agent loop + the observe daemon) must never race into a
+    # duplicate-key crash — the advisory lock serialises them; the second skips cleanly.
+    from sali.learning.service import _CONSOLIDATE_LOCK, LearningService
+
+    async with live_pool.acquire() as holder, holder.transaction():
+        await holder.fetchval("SELECT pg_advisory_xact_lock($1)", _CONSOLIDATE_LOCK)  # hold it
+        result = await LearningService(live_pool, FakeModelProvider()).consolidate()
+        assert not result.did_something  # blocked pass skipped, no crash

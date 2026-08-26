@@ -20,6 +20,11 @@ from sali.provider.base import ModelProvider
 
 log = get_logger("sali.learning")
 
+# One consolidation at a time, cluster-wide: the `sali agent` loop and the `sali observe` daemon can
+# both fire a pass, and two passes distilling the same short-term memory produce the same episode →
+# a duplicate-key race. A transaction advisory lock serialises them; a pass that can't get it skips.
+_CONSOLIDATE_LOCK = 0x5A11_C0DE
+
 
 class LearningService:
     def __init__(self, pool: Any, provider: ModelProvider) -> None:
@@ -28,8 +33,11 @@ class LearningService:
 
     async def consolidate(self, *, threshold: int = 2) -> ConsolidationResult:
         """One consolidation pass (§17-19): learn procedures (evidence-gated), record failures +
-        their fixes, fold short-term observations into an episode, prune stale raw — then embed."""
+        their fixes, fold short-term observations into an episode, prune stale raw — then embed.
+        Skipped (no-op) if another consolidation is already running — never a duplicate-key crash."""
         async with self.pool.acquire() as conn, conn.transaction():
+            if not await conn.fetchval("SELECT pg_try_advisory_xact_lock($1)", _CONSOLIDATE_LOCK):
+                return ConsolidationResult()  # another pass holds the lock — skip cleanly
             procedures = await learn_procedures(conn, self.provider, threshold=threshold)
             failures = await record_failures(conn)
             episodes = await consolidate_stm(conn, self.provider)
