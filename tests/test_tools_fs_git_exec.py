@@ -56,6 +56,25 @@ async def test_create_read_modify_delete_within_root(tmp_path: Path) -> None:
     assert deleted.ok and not (tmp_path / "n.txt").exists()
 
 
+async def test_effectful_tools_verify_the_effect_independently(tmp_path: Path) -> None:
+    # Verification re-observes reality (spec §23): it doesn't trust the tool's ok flag. If the file
+    # vanishes out-of-band after a write, verify must FAIL even though run() reported ok.
+    ctx = _ctx(tmp_path)
+    args = {"path": str(tmp_path / "v.txt"), "content": "hello"}
+    result = await CreateFile().run(args, ctx)
+    assert result.ok
+    assert (await CreateFile().verify(args, result, ctx)).success  # file really on disk
+
+    (tmp_path / "v.txt").unlink()  # something removed it behind Sali's back
+    assert not (await CreateFile().verify(args, result, ctx)).success  # caught — not assumed
+
+    # Delete verify confirms the file is actually gone.
+    (tmp_path / "d.txt").write_text("x")
+    del_args = {"path": str(tmp_path / "d.txt")}
+    del_res = await DeleteFile().run(del_args, ctx)
+    assert (await DeleteFile().verify(del_args, del_res, ctx)).success
+
+
 async def test_write_outside_root_is_denied(tmp_path: Path) -> None:
     result = await CreateFile().run({"path": "/root/escape.txt", "content": "x"}, _ctx(tmp_path))
     assert not result.ok and "denied" in result.display

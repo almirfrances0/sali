@@ -591,7 +591,7 @@ class AgentLoop:
         await journal.set_state(RunState.OBSERVE)
         await journal.set_state(RunState.VERIFY)
         try:
-            verify = await tool.verify(call.arguments, result)
+            verify = await tool.verify(call.arguments, result, ctx)
         except Exception as exc:  # noqa: BLE001 - a raising verifier is a failed verification,
             verify = VerifyResult(False, f"verify raised: {exc}")  # not an orphaned executing row
         duration = int((self.clock.now() - started).total_seconds() * 1000)

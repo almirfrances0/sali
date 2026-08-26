@@ -11,13 +11,28 @@ from pathlib import Path
 from typing import Any
 
 from sali.core.enums import Capability, RiskLevel
-from sali.tools.base import Tool, ToolResult
+from sali.tools.base import Tool, ToolResult, VerifyResult
 from sali.tools.context import ToolContext
 from sali.tools.pathguard import PathViolation
 from sali.tools.registry import ToolRegistry
 
 _MAX_BYTES = 64 * 1024
 _PATH_ARG = {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
+
+
+def _verify_write(args: dict[str, Any], result: ToolResult, ctx: ToolContext) -> VerifyResult:
+    """Independent post-condition for a write: re-stat the file on disk and confirm it exists with
+    the byte length we meant to write — instead of trusting the tool's own ok flag (spec §23)."""
+    if not result.ok:
+        return VerifyResult(False, result.error or "write failed")
+    try:
+        path = ctx.paths.check_write(args["path"])
+    except PathViolation as exc:
+        return VerifyResult(False, str(exc))
+    expected = len(str(args.get("content", "")).encode("utf-8"))
+    if path.is_file() and path.stat().st_size == expected:
+        return VerifyResult(True, f"file present on disk, {expected} bytes")
+    return VerifyResult(False, "file missing or wrong size after write")
 
 
 def _in_free_zone(raw: Any) -> bool:
@@ -165,6 +180,9 @@ class CreateFile(Tool):
         return ToolResult(ok=True, output={"path": str(path), "bytes": len(content.encode())},
                           display=f"created {path.name}")
 
+    async def verify(self, args: dict[str, Any], result: ToolResult, ctx: ToolContext) -> VerifyResult:
+        return _verify_write(args, result, ctx)
+
 
 class ModifyFile(Tool):
     name = "modify_file"
@@ -195,6 +213,9 @@ class ModifyFile(Tool):
         path.write_text(content, encoding="utf-8")
         return ToolResult(ok=True, output={"path": str(path), "bytes": len(content.encode())},
                           display=f"modified {path.name}")
+
+    async def verify(self, args: dict[str, Any], result: ToolResult, ctx: ToolContext) -> VerifyResult:
+        return _verify_write(args, result, ctx)
 
 
 class DeleteFile(Tool):
@@ -227,6 +248,17 @@ class DeleteFile(Tool):
             return ToolResult(ok=False, display="is a directory", error="refusing to delete a directory")
         path.unlink()
         return ToolResult(ok=True, output={"path": str(path)}, display=f"deleted {path.name}")
+
+    async def verify(self, args: dict[str, Any], result: ToolResult, ctx: ToolContext) -> VerifyResult:
+        """Independently confirm the file is actually gone, not just that unlink() didn't raise."""
+        if not result.ok:
+            return VerifyResult(False, result.error or "delete failed")
+        try:
+            path = ctx.paths.check_write(args["path"])
+        except PathViolation as exc:
+            return VerifyResult(False, str(exc))
+        return (VerifyResult(True, "confirmed gone") if not path.exists()
+                else VerifyResult(False, "file still exists after delete"))
 
 
 def register_builtins(registry: ToolRegistry) -> None:

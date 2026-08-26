@@ -30,7 +30,7 @@ async def test_memory_info_tool_reads_live(tctx: Any) -> None:
     result = await run_tool(MemoryInfo(), {}, tctx)
     assert result.ok
     assert result.output["total_mib"] > 0
-    verify = await MemoryInfo().verify({}, result)
+    verify = await MemoryInfo().verify({}, result, tctx)
     assert verify.success
 
 

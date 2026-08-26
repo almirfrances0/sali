@@ -59,8 +59,13 @@ class Tool(ABC):
         it pauses. This is how Sali stays free for ordinary work but careful about destruction."""
         return self.risk_level
 
-    async def verify(self, args: dict[str, Any], result: ToolResult) -> VerifyResult:
-        """Default post-condition: the tool succeeded and returned something."""
+    async def verify(
+        self, args: dict[str, Any], result: ToolResult, ctx: ToolContext
+    ) -> VerifyResult:
+        """Post-condition check AFTER the tool ran (spec §23: never assume success). The default
+        just confirms it returned something; effectful tools OVERRIDE this to independently
+        re-observe reality (does the file now exist? is it gone?) rather than trust their own ok
+        flag. This verifies the effect — it never blocks the action, so Sali stays free."""
         if result.ok and result.output:
             return VerifyResult(True, "output present")
         return VerifyResult(False, result.error or "no output produced")
