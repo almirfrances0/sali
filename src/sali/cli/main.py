@@ -924,6 +924,46 @@ def daemon() -> None:
     asyncio.run(_daemon(settings))
 
 
+@app.command()
+def perceive() -> None:
+    """Watch the desktop live (files + focused window) and print the observations Sali would record —
+    a foreground view of the continuous event engine. Ctrl-C to stop. Never acts, only observes."""
+    settings = load_settings()
+    configure_logging("ERROR")
+    asyncio.run(_perceive(settings))
+
+
+async def _perceive(settings: Settings) -> None:
+    from sali.events.base import Observation
+    from sali.events.engine import PerceptionEngine
+    from sali.perception.service import build_perception
+
+    perception = build_perception(settings)
+
+    async def snapshot() -> Any:
+        return await perception.snapshot(ui=False)
+
+    class _ConsoleSink:
+        async def observe(self, obs: Observation) -> None:
+            imp = obs.importance
+            colour = "red" if imp >= 0.7 else "yellow" if imp >= 0.5 else "dim"
+            console.print(f"[{colour}]{imp:.2f}[/] {obs.summary}"
+                          + (f" [dim](×{obs.count})[/]" if obs.count > 1 else ""))
+
+    p = settings.perception
+    engine = PerceptionEngine(
+        sink=_ConsoleSink(), snapshot=snapshot, fs_roots=p.watch_roots,
+        window_poll_s=p.window_poll_s, aggregate_window_s=p.aggregate_window_s)
+    stop = asyncio.Event()
+    console.print(f"[dim]Perceiving {p.watch_roots} + the focused window… Ctrl-C to stop.[/]")
+    try:
+        await engine.run(stop)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
+    finally:
+        stop.set()
+
+
 async def _daemon(settings: Settings) -> None:
     from sali.kernel import Kernel
     from sali.learning.service import LearningService
@@ -953,9 +993,14 @@ async def _daemon(settings: Settings) -> None:
         if cycle % _LEARN_EVERY == 0:
             await learning.consolidate()
 
-    console.print("[dim]Sali is up — observing, learning, and watching its schedules.[/]")
+    coros = [scheduler.run_forever(), twin.run(stop=stop, on_tick=on_tick)]
+    engine = _perception_engine(settings)  # continuous desktop perception (§7,11,42); None if disabled
+    if engine is not None:
+        coros.append(engine.run(stop))
+
+    console.print("[dim]Sali is up — observing, learning, perceiving, and watching its schedules.[/]")
     try:
-        await asyncio.gather(scheduler.run_forever(), twin.run(stop=stop, on_tick=on_tick))
+        await asyncio.gather(*coros)
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
@@ -963,6 +1008,25 @@ async def _daemon(settings: Settings) -> None:
         stop.set()
         await loop.aclose()
         await kernel.close()
+
+
+def _perception_engine(settings: Settings) -> Any:
+    """Build the continuous event engine from settings, or None if watching is disabled. The window
+    source is the Phase-4 perception snapshot; the fs source watches the configured roots."""
+    if not settings.perception.watch_enabled:
+        return None
+    from sali.events.engine import PerceptionEngine
+    from sali.perception.service import build_perception
+
+    perception = build_perception(settings)
+
+    async def snapshot() -> dict[str, Any]:
+        return await perception.snapshot(ui=False)
+
+    p = settings.perception
+    return PerceptionEngine(
+        snapshot=snapshot, fs_roots=p.watch_roots, window_poll_s=p.window_poll_s,
+        aggregate_window_s=p.aggregate_window_s, buffer_size=p.observation_buffer)
 
 
 @app.command()

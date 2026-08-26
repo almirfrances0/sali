@@ -99,6 +99,10 @@ class BrowserSettings(BaseModel):
     mem_floor_mb: int = 1500  # don't launch below this much free RAM (this box is 15GB)
 
 
+def _default_watch_roots() -> list[str]:
+    return [str(Path.home() / "Desktop")]  # where Almir works; noise dirs are filtered deterministically
+
+
 class PerceptionSettings(BaseModel):
     # Desktop perception (sali3 Phase 4): the focused app/window (X11) + accessibility tree (AT-SPI).
     # 'fake' selects the in-memory perception for tests.
@@ -107,6 +111,12 @@ class PerceptionSettings(BaseModel):
     max_tree_depth: int = 12
     # AT-SPI lives in the SYSTEM python (PyGObject); Sali's venv (3.14) has none, so the probe runs here.
     system_python: str = "/usr/bin/python3"
+    # Continuous event engine (sali3 Phase 5): watch the filesystem + active window, score, aggregate.
+    watch_enabled: bool = True  # run the event engine inside `sali daemon`
+    watch_roots: list[str] = Field(default_factory=_default_watch_roots)
+    window_poll_s: float = Field(default=3.0, gt=0)  # how often to sample the focused window
+    aggregate_window_s: float = Field(default=2.0, gt=0)  # quiet period before a burst flushes as one
+    observation_buffer: int = 200  # bounded ring of recent observations
 
 
 def _default_fs_deny() -> list[str]:

@@ -41,6 +41,7 @@ dev = [
 pdf = ["pypdf>=6"]           # document ingestion of PDFs
 cal = ["icalendar>=6,<8"]   # robust CalDAV event parsing (a minimal parser works without it)
 browser = ["playwright>=1.55"]  # browser automation (also: playwright install firefox)
+watch = ["watchdog>=4"]     # continuous filesystem perception (the event engine still runs without it)
 
 [project.scripts]
 sali = "sali.__main__:main"
@@ -81,7 +82,7 @@ exclude = "src/sali/perception/_atspi_probe\\.py"
 # treated as untyped so type-checking passes whether or not the extra is installed.
 module = [
     "asyncpg.*", "ollama.*", "jsonschema.*", "uvicorn.*", "websockets.*",
-    "pypdf.*", "icalendar.*", "playwright.*", "keyring.*", "cryptography.*",
+    "pypdf.*", "icalendar.*", "playwright.*", "keyring.*", "cryptography.*", "watchdog.*",
 ]
 ignore_missing_imports = true
 
@@ -107,7 +108,7 @@ layers = [
     "sali.context",
     "sali.retrieval",
     "sali.twin | sali.learning | sali.ingest",
-    "sali.memory | sali.graph | sali.tasks | sali.scheduler | sali.comms | sali.browser | sali.perception",
+    "sali.memory | sali.graph | sali.tasks | sali.scheduler | sali.comms | sali.browser | sali.perception | sali.events",
     "sali.security | sali.verify",
     "sali.tools",
     "sali.provider",
