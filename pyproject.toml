@@ -92,6 +92,7 @@ layers = [
     "sali.runtime",
     "sali.context",
     "sali.retrieval",
+    "sali.twin",
     "sali.memory | sali.graph",
     "sali.security | sali.verify",
     "sali.tools",

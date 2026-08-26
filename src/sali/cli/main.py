@@ -428,6 +428,42 @@ async def _recall(settings: Settings, query: str) -> None:
 
 
 @app.command()
+def twin(
+    refresh: bool = typer.Option(False, "--refresh", help="Re-observe the machine before showing."),
+) -> None:
+    """Show Sali's desktop digital twin — its structural picture of this machine (§14).
+
+    With --refresh, run the deterministic observers first and fold what they find into the graph.
+    """
+    settings = load_settings()
+    configure_logging("WARNING")
+    asyncio.run(_twin(settings, refresh))
+
+
+async def _twin(settings: Settings, refresh: bool) -> None:
+    from sali.db.pool import create_pool
+    from sali.twin.service import TwinService
+
+    pool = await create_pool(settings)
+    service = TwinService(pool)
+    try:
+        if refresh:
+            with console.status("[cyan]observing the machine…[/]"):
+                result = await service.refresh(
+                    exclude_projects=tuple(settings.permissions.fs_deny)  # never scan off-limits dirs
+                )
+            note = f"{result.entities} things"
+            if result.added:
+                note += f" · +{len(result.added)} new"
+            if result.removed:
+                note += f" · -{len(result.removed)} gone"
+            console.print(f"[green]twin refreshed[/] — {note}")
+        console.print((await service.tree()).replace("[", "\\["))
+    finally:
+        await pool.close()
+
+
+@app.command()
 def serve(
     socket: str = typer.Option("", help="Unix socket (default ~/.local/share/sali/sali.sock)."),
     host: str = typer.Option("", help="Bind a TCP host instead (e.g. 127.0.0.1) for the app."),
