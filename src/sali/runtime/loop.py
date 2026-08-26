@@ -174,11 +174,15 @@ class _MemorySink:
 
     async def remember(
         self, content: str, *, source: MemorySource, note: str | None = None,
-        importance: float = 0.6, needs_grounding: bool = False,
+        importance: float = 0.6, needs_grounding: bool = False, about: str | None = None,
     ) -> None:
+        # An `about` topic makes this a functional claim: restating a fact about the same topic
+        # supersedes the old value (evidence-priority) instead of piling up a contradiction.
+        claim_key = f"remember:{about.strip().lower()}" if about and about.strip() else None
         await self._service.remember(
             layer=MemoryLayer.SEMANTIC, content=content, source=source,
             importance=importance, note=note, needs_grounding=needs_grounding,
+            functional=bool(claim_key), claim_key=claim_key,
         )
         await self._service.embed_pending()
 

@@ -24,7 +24,7 @@ class MemorySink(Protocol):
 
     async def remember(
         self, content: str, *, source: MemorySource, note: str | None = None,
-        importance: float = 0.6, needs_grounding: bool = False,
+        importance: float = 0.6, needs_grounding: bool = False, about: str | None = None,
     ) -> None: ...
 
 

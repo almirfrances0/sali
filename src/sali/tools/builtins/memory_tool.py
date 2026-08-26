@@ -33,7 +33,9 @@ class RememberFact(Tool):
     description = (
         "Save a fact worth keeping so you recall it later. Set source: 'user' if it came up with "
         "Almir, 'web' if you found it online (pass the url for provenance), or 'inference' for your "
-        "own conclusion. Online facts are stored as 'reported by <source>', not as settled truth."
+        "own conclusion. Online facts are stored as 'reported by <source>', not as settled truth. "
+        "For a single-valued fact that can change (a preference, a current choice), pass 'about' — a "
+        "short topic — so a new value replaces the old one instead of piling up a contradiction."
     )
     parameters = {
         "type": "object",
@@ -41,6 +43,8 @@ class RememberFact(Tool):
             "content": {"type": "string", "description": "The fact, in one clear sentence."},
             "source": {"type": "string", "enum": ["user", "web", "inference"]},
             "url": {"type": "string", "description": "Where it came from, if online (for provenance)."},
+            "about": {"type": "string",
+                      "description": "Optional topic for a single-valued fact, e.g. 'editor preference'."},
         },
         "required": ["content"],
     }
@@ -68,8 +72,9 @@ class RememberFact(Tool):
             note = f"reported by {domain} — {url}" if url else "reported online"  # full provenance
             shown = f" (from {domain or 'the web'})"  # clean display
 
+        about = str(args.get("about", "")).strip() or None
         await ctx.memory.remember(content, source=source, note=note, importance=importance,
-                                  needs_grounding=needs_grounding)
+                                  needs_grounding=needs_grounding, about=about)
         return ToolResult(ok=True, output={"remembered": content, "source": source.value},
                           display=f"remembered{shown}")
 
