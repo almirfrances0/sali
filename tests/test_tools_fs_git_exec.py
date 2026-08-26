@@ -145,6 +145,19 @@ async def test_execute_accepts_argv_list() -> None:
     assert result.ok and "hi" in result.output["stdout"]
 
 
+async def test_background_launch_that_survives_reports_running() -> None:
+    result = await ExecuteCommand().run(
+        {"command": "sleep 5", "background": True}, local_context())
+    assert result.ok and result.output.get("background") and result.output.get("pid")
+
+
+async def test_background_launch_that_dies_immediately_reports_failure() -> None:
+    # A command that exits non-zero right after launch must NOT be reported as a running job (§23).
+    result = await ExecuteCommand().run(
+        {"command": "sh -c 'exit 7'", "background": True}, local_context())
+    assert not result.ok and result.output.get("returncode") == 7
+
+
 def test_execute_destructive_commands_self_escalate() -> None:
     tool = ExecuteCommand()
     assert tool.assess({"command": "ls -la /home"}) is RiskLevel.R1  # ordinary → free

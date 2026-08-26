@@ -1010,14 +1010,19 @@ async def _daemon(settings: Settings) -> None:
         if cycle % _LEARN_EVERY == 0:
             await learning.consolidate()
 
-    coros = [scheduler.run_forever(), twin.run(stop=stop, on_tick=on_tick)]
+    # Each faculty runs under a supervisor: one crashing is logged and restarted (with backoff) rather
+    # than cancelling its siblings — a hiccup in perception never takes the scheduler down with it.
+    faculties: list[tuple[str, Any]] = [
+        ("scheduler", lambda: scheduler.run_forever()),
+        ("twin", lambda: twin.run(stop=stop, on_tick=on_tick)),
+    ]
     engine = _perception_engine(settings, pool)  # continuous desktop perception (§7,11,42); None if off
     if engine is not None:
-        coros.append(engine.run(stop))
+        faculties.append(("perception", lambda: engine.run(stop)))
 
     console.print("[dim]Sali is up — observing, learning, perceiving, and watching its schedules.[/]")
     try:
-        await asyncio.gather(*coros)
+        await asyncio.gather(*(_supervise(name, make, stop) for name, make in faculties))
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
@@ -1025,6 +1030,26 @@ async def _daemon(settings: Settings) -> None:
         stop.set()
         await loop.aclose()
         await kernel.close()
+
+
+async def _supervise(name: str, make_coro: Any, stop: asyncio.Event) -> None:
+    """Run a daemon faculty until it finishes cleanly (stop set); on an unexpected crash, log it and
+    restart after a short backoff — so no single faculty can bring the whole daemon down."""
+    import contextlib
+
+    from sali.obs.log import get_logger
+
+    log = get_logger("sali.daemon")
+    while not stop.is_set():
+        try:
+            await make_coro()
+            return  # exited cleanly — stop was set
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - isolate the faculty; the daemon lives on
+            log.error("daemon_faculty_crashed", faculty=name, error=str(exc)[:300])
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), timeout=5.0)  # backoff, but wake immediately on stop
 
 
 def _perception_engine(settings: Settings, pool: Any = None) -> Any:

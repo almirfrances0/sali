@@ -300,6 +300,30 @@ class AgentLoop:
             iterations=int(final.data["iterations"]), tool_calls=int(final.data["tool_calls"]),
         )
 
+    async def _voice_stream(
+        self, messages: list[ChatMessage], journal: RunJournal
+    ) -> AsyncIterator[LoopEvent]:
+        """Stream a plain-voice wrap-up with the SAME provider-retry the main turn uses, so a
+        transient model error during the wrap-up doesn't turn the reply into a crash. Yields 'token'
+        events live and, last, a '_final' event carrying the full text for the caller to read off."""
+        attempt = 0
+        while True:
+            acc = ""
+            try:
+                async for chunk in self.provider.chat_stream(messages, options=_VOICE):
+                    if chunk.content:
+                        acc += chunk.content
+                        yield LoopEvent("token", chunk.content)
+                yield LoopEvent("_final", acc)
+                return
+            except ProviderError as exc:
+                attempt += 1
+                if attempt > _MAX_PROVIDER_RETRIES:
+                    yield LoopEvent("_final", acc)  # give back whatever streamed; a fallback covers empty
+                    return
+                await journal.event("provider_retry", {"attempt": attempt, "error": str(exc)[:200]})
+                yield LoopEvent("status", "let me try that again")
+
     async def _machine_changes(
         self, conn: Any, journal: RunJournal
     ) -> tuple[str | None, int | None, int | None]:
@@ -573,10 +597,11 @@ class AgentLoop:
                             content="(You've done plenty here — wrap up now in your own words, no more tools.)",
                         ))
                         acc = ""
-                        async for chunk in self.provider.chat_stream(messages, options=_VOICE):
-                            if chunk.content:
-                                acc += chunk.content
-                                yield LoopEvent("token", chunk.content)
+                        async for ev in self._voice_stream(messages, journal):
+                            if ev.kind == "_final":
+                                acc = ev.text
+                            else:
+                                yield ev
                         final_text = acc.strip() or "Let me stop here for now."
 
                 if not final_text.strip():
@@ -586,10 +611,11 @@ class AgentLoop:
                     yield LoopEvent("status", "wrapping up")
                     messages.append(ChatMessage(role="user", content=_EMPTY_WRAP_NUDGE))
                     acc = ""
-                    async for chunk in self.provider.chat_stream(messages, options=_VOICE):
-                        if chunk.content:
-                            acc += chunk.content
-                            yield LoopEvent("token", chunk.content)
+                    async for ev in self._voice_stream(messages, journal):
+                        if ev.kind == "_final":
+                            acc = ev.text
+                        else:
+                            yield ev
                     final_text = acc.strip() or _EMPTY_FALLBACK
 
                 await journal.set_state(RunState.LEARN)

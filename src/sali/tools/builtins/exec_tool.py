@@ -11,6 +11,8 @@ jail so installing/deleting can't touch the real system (used during learning).
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 import re
 import subprocess
@@ -112,7 +114,7 @@ class ExecuteCommand(Tool):
             # A long-running process (server, watcher): launch it detached in its own session so it
             # keeps running after this call returns, with output tee'd to a log Sali can read. This
             # is what stops `python3 -m http.server` from blocking and timing out forever.
-            return _run_background(argv, cwd=str(Path(perms.exec_cwd).expanduser()))
+            return await _run_background(argv, cwd=str(Path(perms.exec_cwd).expanduser()))
 
         if sandbox:
             if not (perms.jail_learning and jail.available()):
@@ -140,8 +142,10 @@ class ExecuteCommand(Tool):
         )
 
 
-def _run_background(argv: list[str], *, cwd: str) -> ToolResult:
-    """Start a detached process (own session, output → a log file) and return immediately."""
+async def _run_background(argv: list[str], *, cwd: str) -> ToolResult:
+    """Start a detached process (own session, output → a log file) and return once we've confirmed it
+    survived launch — a command that dies instantly (bad binary → 127, bad args) is reported as the
+    failure it is, never as a happily-running background job (verify the effect, §23)."""
     logdir = Path.home() / ".local" / "share" / "sali" / "bg"
     try:
         logdir.mkdir(parents=True, exist_ok=True)
@@ -153,11 +157,24 @@ def _run_background(argv: list[str], *, cwd: str) -> ToolResult:
             )
     except (OSError, ValueError) as exc:
         return ToolResult(ok=False, display="couldn't start", error=str(exc)[:200])
+    await asyncio.sleep(0.2)  # give it a beat to fall over, if it's going to
+    rc = proc.poll()
+    if rc is not None and rc != 0:  # already dead with a failure → surface it, don't claim success
+        tail = _log_tail(log_path)
+        return ToolResult(ok=False, display=f"exited immediately (rc {rc})",
+                          output={"returncode": rc, "log": log_path},
+                          error=tail or f"process exited {rc} right after launch")
     return ToolResult(
         ok=True,
         output={"pid": proc.pid, "log": log_path, "background": True},
         display=f"started in background (pid {proc.pid}); output → {log_path}",
     )
+
+
+def _log_tail(path: str, limit: int = 400) -> str:
+    with contextlib.suppress(OSError):
+        return Path(path).read_text("utf-8", "replace")[-limit:].strip()
+    return ""
 
 
 def register_builtins(registry: ToolRegistry) -> None:
