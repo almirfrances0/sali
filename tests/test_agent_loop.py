@@ -170,6 +170,30 @@ async def test_loop_follows_through_on_announced_action(live_pool: Any) -> None:
         assert followed == 1  # the nudge was journaled exactly once
 
 
+async def test_loop_follows_through_after_partial_work(live_pool: Any) -> None:
+    # Sali does PART of a multi-step task (one tool), then says it'll "keep building" and stops —
+    # the mid-task stall the old tool_calls==0 gate missed. It must be caught and pushed to finish.
+    fake = FakeModelProvider(
+        responses=[
+            ChatResult("", None, [ToolCall("memory_info", {})], 4, 2, "fake"),           # step 1
+            ChatResult("Made a start. I'll keep building the rest.", None, [], 4, 3, "fake"),  # stalls
+            ChatResult("STALLED", None, [], 1, 1, "fake"),                               # self-judged
+            ChatResult("", None, [ToolCall("disk_info", {})], 4, 2, "fake"),             # follows through
+            ChatResult("All done — everything's built.", None, [], 4, 3, "fake"),        # finishes
+            ChatResult("DONE", None, [], 1, 1, "fake"),                                  # self-judged
+        ]
+    )
+    result = await _loop(live_pool, fake).run("build the thing, it has several steps")
+    assert result.tool_calls == 2  # both steps ran — incl. the one after the mid-task nudge
+    assert "All done" in result.text
+    async with live_pool.acquire() as c:
+        followed = await c.fetchval(
+            "SELECT count(*) FROM run_events WHERE run_id=$1 AND kind='follow_through'",
+            result.run_id,
+        )
+        assert followed == 1
+
+
 async def test_loop_does_not_nudge_a_complete_answer(live_pool: Any) -> None:
     # A short answer that Sali judges DONE must NOT be nudged — it just finalizes.
     fake = FakeModelProvider(

@@ -44,7 +44,11 @@ SECURITY_NOTE = (
     "actually do. The flip side of that: when you're going to check or run something, do it in "
     "this same reply — actually call the tool now — instead of only saying you're about to and "
     "stopping. Never leave Almir waiting on an action you announced; if you can do it, do it, then "
-    "tell him what you found."
+    "tell him what you found. You have no background workers or async jobs — you do everything "
+    "right here by calling tools in your reply, so never say you're 'continuing in the background', "
+    "'building it now', or 'still working on it' unless you are actually making those tool calls "
+    "this turn. A multi-step job — make a folder, then write several files — is done in one go, "
+    "with all the tool calls it takes; you don't stop partway and promise to continue."
 )
 LIVE_NOTE = (
     "This is about the machine's state right now — go check it directly instead of answering from "

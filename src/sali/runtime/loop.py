@@ -71,10 +71,14 @@ _FOLD_INSTRUCTION = (
 # of times before giving up rather than crashing the whole turn.
 _MAX_PROVIDER_RETRIES = 2
 
-_MAX_FOLLOW_THROUGH = 2
+# Enough pushes to carry a multi-step build (a folder + several files) to completion, bounded so
+# it can never spin.
+_MAX_FOLLOW_THROUGH = 4
 _FOLLOW_THROUGH_NUDGE = (
-    "(You just said you'd do that but didn't actually call anything. Do it now, in this reply — "
-    "run the tools. Don't narrate that you're about to; just go, then tell me what you found.)"
+    "(You haven't finished, and you have no background process — nothing runs on its own. Do ALL "
+    "the remaining steps NOW, in this reply: make every tool call needed to finish the whole task "
+    "end to end. Don't stop between steps or say you'll 'continue' — just finish it, then tell me "
+    "it's done.)"
 )
 
 # A tool call sometimes leaks out as *text* instead of a parsed call (the model emits the JSON
@@ -102,11 +106,12 @@ def _looks_like_leaked_tool_call(text: str) -> bool:
 # for (judgement, not parsing), and it can't drift out of date the way a verb list does.
 _STALL_MAX_CHARS = 240
 _STALL_JUDGE_SYSTEM = (
-    "Almir asked you to do something and you just replied. Judge your OWN reply honestly: did you "
-    "actually do it / give him the answer, or did you only say you WOULD — announce or start an "
-    "action ('let's…', 'I'll…') and then stop without doing it? If a tool was needed, saying you'll "
-    "do it is NOT doing it. A genuine question back to Almir counts as DONE. Reply with exactly one "
-    "word: DONE or STALLED."
+    "Almir asked you to do something and you just replied. Judge your OWN reply against the FULL "
+    "task: did you actually finish everything he asked and give him the result — or did you only "
+    "announce it, do PART of it, or say you'll 'continue' / 'keep building' / 'work on it' WITHOUT "
+    "actually finishing in this reply? You have no background process, so if there's more to do, it "
+    "is NOT done. A genuine question back to Almir, or a fully-finished task, counts as DONE. Reply "
+    "with exactly one word: DONE or STALLED."
 )
 
 
@@ -326,10 +331,10 @@ class AgentLoop:
                             yield LoopEvent("status", "let me redo that")
                             iteration += 1
                             continue
-                        # If Sali *announced* an action but has done nothing yet this turn, push it
-                        # to actually follow through (bounded, so it can never spin). Structural gate
-                        # (nothing done yet) + the model judging its own reply — no phrase list.
-                        if (tool_calls == 0 and follow_through < _MAX_FOLLOW_THROUGH
+                        # If Sali announced or half-did the task and stopped — even AFTER some tool
+                        # calls (the "created the folder, now continuing…" stall) — push it to
+                        # finish. Bounded so it can never spin; the model judges its own reply.
+                        if (follow_through < _MAX_FOLLOW_THROUGH
                                 and await self._stalled(user_input, res.content)):
                             follow_through += 1
                             yield LoopEvent("reset")  # clear the preamble; the real answer streams fresh
