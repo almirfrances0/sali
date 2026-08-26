@@ -255,6 +255,25 @@ def test_looks_like_leaked_tool_call() -> None:
     assert not _looks_like_leaked_tool_call("Your disk is half full.")
 
 
+def test_token_gate_streams_prose_but_withholds_a_blob() -> None:
+    from sali.runtime.loop import _TokenGate
+
+    # Prose: released and then flows live, one chunk at a time, nothing lost.
+    prose = _TokenGate()
+    shown = "".join(prose.feed(c) for c in ["He", "llo ", "Almir", "!"])
+    assert shown == "Hello Almir!"
+
+    # Leaked tool-call blob: withheld the whole way — the raw JSON is never surfaced as tokens.
+    blob = _TokenGate()
+    emitted = [blob.feed(c) for c in ['{"name": ', '"create_file"', ', "arguments"', ": {}}"]]
+    assert emitted == ["", "", "", ""]  # nothing shown at any point
+
+    # Leading whitespace doesn't fool it — the first real character still decides.
+    spaced = _TokenGate()
+    assert spaced.feed("   \n") == ""  # undecided while only whitespace
+    assert spaced.feed("Hey") == "   \nHey"  # flushes the buffered whitespace with the prose
+
+
 async def test_loop_recovers_from_leaked_tool_json(live_pool: Any) -> None:
     # The model emits a tool call as raw JSON text (parser miss). The loop must NOT hand that
     # back as the answer — it recovers and finalizes on the real reply. Content isn't streamed, so

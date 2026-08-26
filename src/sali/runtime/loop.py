@@ -109,6 +109,37 @@ def _looks_like_leaked_tool_call(text: str) -> bool:
     return stripped.startswith(("{", "[")) and bool(_LEAKED_TOOL_JSON.match(stripped))
 
 
+class _TokenGate:
+    """Streams Sali's words live, but holds back a reply that is really a leaked tool-call JSON
+    blob so the raw JSON is never shown (the loop then has the model redo it cleanly). It keys on
+    the same signal as `_looks_like_leaked_tool_call`: real prose never opens with '{' or '[', a
+    leaked blob always does. So the first non-whitespace character decides — prose is released and
+    then flows live; a blob is withheld for the whole turn. Structural, not a prompt rule."""
+
+    __slots__ = ("_buf", "_streaming")
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._streaming: bool | None = None  # None = undecided, True = prose, False = withholding
+
+    def feed(self, chunk: str) -> str:
+        """Return the text safe to show now — '' while still undecided or withholding a blob."""
+        if self._streaming is True:
+            return chunk
+        self._buf += chunk
+        if self._streaming is False:
+            return ""
+        head = self._buf.lstrip()
+        if not head:
+            return ""  # only whitespace so far — can't tell yet
+        if head[0] in "{[":
+            self._streaming = False  # opens like a tool-call blob — hold it back for recovery
+            return ""
+        self._streaming = True  # it's prose — release what's buffered and stream live from here
+        out, self._buf = self._buf, ""
+        return out
+
+
 # Stall detection is structural, not a phrase list, and has NO length cutoff: a stall can hide at
 # the end of a long explanation ("…let me now write all the files"), so every tool-less reply is
 # put to the model, which judges its OWN reply — did it finish, or only announce/half-do it? This
@@ -153,7 +184,7 @@ class AgentResult:
 class LoopEvent:
     """A streamed moment of a turn, for live rendering (terminal or WebSocket)."""
 
-    kind: str  # 'status' | 'token' | 'thinking' | 'tool' | 'reset' | 'final' | 'error'
+    kind: str  # 'status' | 'token' | 'thinking' | 'tool' | 'final' | 'error'
     text: str = ""
     data: dict[str, Any] = field(default_factory=dict)
 
@@ -319,14 +350,20 @@ class AgentLoop:
                     attempt = 0
                     while res is None:
                         try:
-                            # We DON'T stream the model's content live: if this iteration ends in a
-                            # tool call, that content was just thinking-out-loud (never shown); only
-                            # the final answer is revealed. Thinking drives the animation, not chat.
+                            # Stream Sali's words live (like ChatGPT/Claude): the terminal commits
+                            # each segment to the transcript when an action follows, so words and the
+                            # ● action lines interleave in order. The transcript is append-only — we
+                            # never wipe what's already shown, so Almir can read the turn top to bottom.
+                            gate = _TokenGate()
                             async for chunk in self.provider.chat_stream(
                                 messages, tools=specs or None, options=_VOICE
                             ):
                                 if chunk.thinking:
                                     yield LoopEvent("thinking", chunk.thinking)
+                                if chunk.content:
+                                    shown = gate.feed(chunk.content)
+                                    if shown:
+                                        yield LoopEvent("token", shown)
                                 if chunk.done:
                                     res = chunk.result
                             if res is None:
@@ -346,8 +383,8 @@ class AgentLoop:
                         latency_ms=latency, tokens_in=res.tokens_in, tokens_out=res.tokens_out,
                     )
                     if not res.tool_calls:
-                        # Content that's really a leaked tool-call JSON blob — recover (it was never
-                        # shown, since we don't stream content) and ask for a clean redo.
+                        # Content that's really a leaked tool-call JSON blob — the gate withheld it
+                        # (never shown), so we just recover and ask for a clean redo.
                         if json_recovery < _MAX_JSON_RECOVERY and _looks_like_leaked_tool_call(res.content):
                             json_recovery += 1
                             messages.append(ChatMessage(role="assistant", content=res.content))
@@ -368,8 +405,7 @@ class AgentLoop:
                             yield LoopEvent("status", "on it")
                             iteration += 1
                             continue
-                        final_text = res.content
-                        yield LoopEvent("token", res.content)  # reveal only the final answer, clean
+                        final_text = res.content  # already streamed live as tokens
                         break
                     messages.append(
                         ChatMessage(role="assistant", content=res.content, tool_calls=res.tool_calls)

@@ -8,7 +8,6 @@ persists nothing.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -25,12 +24,6 @@ from sali.runtime.session import persistent_session_id
 
 app = typer.Typer(add_completion=False, help="Sali — a local-first personal AI agent.")
 console = Console()
-
-# Typewriter pacing for streamed answers: ~60fps, 1–8 chars revealed per frame (it catches up
-# on long bursts and eases off at the end, so text always types out instead of dumping).
-_FRAME = 1 / 60
-_REVEAL_MIN = 1
-_REVEAL_MAX = 8
 
 
 @app.command()
@@ -171,94 +164,69 @@ def _fmt_tool(data: dict[str, Any]) -> str:
 
 
 async def _stream_turn(loop: Any, text: str, session: UUID) -> None:
-    """Render one turn live: a thinking animation, then the answer *typed out* character by
-    character. The reveal is paced on its own clock, decoupled from how the model chunks its
-    output — so even a burst that arrives all at once still types out smoothly, the way the
-    big assistants do it, instead of dumping the whole paragraph in one frame."""
+    """Render one turn as a flowing transcript, like the big assistants: Sali's words stream in
+    live, each ● action line lands in order beneath the words that led to it, and the final answer
+    stays on screen. It is append-only — nothing already shown is ever wiped, so you can read the
+    whole turn top to bottom."""
     from rich.console import Group
     from rich.live import Live
     from rich.spinner import Spinner
     from rich.text import Text
 
-    # Shared state between the producer (astream) and the paced renderer.
-    st: dict[str, Any] = {"target": "", "shown": 0, "activity": "…", "done": False, "error": None}
-    # One spinner, reused: a Spinner animates off its own start time, so recreating it every
-    # frame would pin it to frame 0 (a frozen dot). Keep it and just swap the label.
+    seg = ""  # the words Sali is currently streaming, not yet committed to the transcript
+    activity: str | None = "…"
     spinner = Spinner("dots", style="cyan")
+    err: Exception | None = None
 
     def render() -> Group:
         parts: list[Any] = []
-        shown = st["target"][: st["shown"]]
-        if shown:
-            parts.append(Text.assemble(("sali › ", "bold green"), shown))
-        if st["activity"] is not None:
-            spinner.update(text=Text(f" {st['activity']}", style="dim cyan"))
+        if seg:
+            parts.append(Text.assemble(("sali › ", "bold green"), seg))
+        if activity is not None:
+            spinner.update(text=Text(f" {activity}", style="dim cyan"))
             parts.append(spinner)
         return Group(*parts)
 
-    with Live(render(), console=console, auto_refresh=False, transient=False) as live:
+    with Live(render(), console=console, refresh_per_second=12, transient=False) as live:
 
-        async def produce() -> None:
-            try:
-                async for event in loop.astream(text, session_id=session):
-                    if event.kind == "status":
-                        st["activity"] = f"{event.text}…"
-                    elif event.kind == "thinking":
-                        # Reasoning shows as the animation, never as text in the chat.
-                        st["activity"] = "thinking…"
-                    elif event.kind == "tool":
-                        if event.data.get("phase") == "start":
-                            # The current action, live in the spinner.
-                            st["activity"] = f"{event.data['name']} {_fmt_tool(event.data)}".strip()
-                        else:
-                            # A clean, persistent progress line — what was done — so Almir can follow
-                            # along (not the reasoning). Green for done, red for a problem.
-                            ok = event.data.get("ok", True)
-                            summary = str(event.data.get("summary") or event.data.get("name", ""))
-                            mark = "[green]●[/]" if ok else "[red]●[/]"
-                            live.console.print(f"{mark} [dim]{summary}[/]")
-                            st["activity"] = "working…"
-                    elif event.kind == "reset":
-                        # Sali thought out loud or made a false start before acting — wipe it so the
-                        # chat keeps only the clean final answer; the work itself was the animation.
-                        st["target"] = ""
-                        st["shown"] = 0
-                        st["activity"] = "…"
-                    elif event.kind == "token":
-                        st["target"] += event.text
-                        st["activity"] = None  # the answer is coming — drop the spinner
-                    elif event.kind == "final":
-                        if event.text:
-                            st["target"] = event.text
-                            st["shown"] = min(st["shown"], len(event.text))  # never slice past the end
-                        st["activity"] = None
-            except Exception as exc:  # noqa: BLE001 - surfaced after the render loop drains
-                st["error"] = exc
-                st["activity"] = None  # don't leave a spinner frozen above the traceback
-            finally:
-                st["done"] = True
+        def commit() -> None:
+            nonlocal seg
+            if seg.strip():  # move the current words up into the permanent transcript
+                live.console.print(Text.assemble(("sali › ", "bold green"), seg.rstrip()))
+            seg = ""
 
-        producer = asyncio.create_task(produce())
         try:
-            # Reveal a few characters per frame, catching up gently when the model runs ahead
-            # and easing off as it finishes — a real typewriter, not a paragraph dump.
-            while not (st["done"] and st["shown"] >= len(st["target"])):
-                remaining = len(st["target"]) - st["shown"]
-                if remaining > 0:
-                    st["shown"] += min(remaining, max(_REVEAL_MIN, min(_REVEAL_MAX, remaining // 6)))
+            async for event in loop.astream(text, session_id=session):
+                if event.kind == "token":
+                    seg += event.text
+                    activity = None  # the words are flowing — no spinner
+                elif event.kind == "status":
+                    activity = f"{event.text}…"
+                elif event.kind == "thinking":
+                    if not seg:
+                        activity = "thinking…"
+                elif event.kind == "tool":
+                    if event.data.get("phase") == "start":
+                        commit()  # the words that led here → transcript, then the action below them
+                        activity = f"{event.data['name']} {_fmt_tool(event.data)}".strip()
+                    else:
+                        ok = event.data.get("ok", True)
+                        summary = str(event.data.get("summary") or event.data.get("name", ""))
+                        mark = "[green]●[/]" if ok else "[red]●[/]"
+                        live.console.print(f"{mark} [dim]{summary}[/]")
+                        activity = "working…"
+                elif event.kind == "final":
+                    if event.text and not seg.strip():
+                        seg = event.text
+                    activity = None
                 live.update(render())
-                live.refresh()
-                await asyncio.sleep(_FRAME)
-            live.update(render())
-            live.refresh()
+        except Exception as exc:  # noqa: BLE001 - re-raised after the last frame is drawn
+            err = exc
         finally:
-            # Cancel first so a Ctrl-C or render error doesn't block until the whole model
-            # response finishes generating; then drain the (now-cancelled) producer.
-            producer.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await producer
-    if st["error"] is not None:
-        raise st["error"]
+            activity = None
+            live.update(render())  # last frame: the final answer, no spinner (kept on screen)
+    if err is not None:
+        raise err
 
 
 async def _agent(settings: Settings, message: str | None) -> None:
