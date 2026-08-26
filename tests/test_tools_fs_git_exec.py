@@ -10,6 +10,7 @@ import pytest
 from sali.config.settings import PermissionsSettings, Settings
 from sali.core.clock import SystemClock
 from sali.core.enums import RiskLevel
+from sali.tools import jail
 from sali.tools.builtins.exec_tool import ExecuteCommand
 from sali.tools.builtins.filesystem import CreateFile, DeleteFile, ListDir, ModifyFile, ReadFile
 from sali.tools.builtins.git import GitStatus
@@ -93,7 +94,14 @@ def test_execute_destructive_commands_self_escalate() -> None:
     assert tool.assess({"command": "apt-get install ripgrep"}) is RiskLevel.R1  # installs are free
 
 
-async def test_execute_sandbox_mode_isolates() -> None:
-    result = await ExecuteCommand().run({"command": "echo sandboxed", "sandbox": True}, local_context())
+async def test_sandbox_is_fake_root_and_ephemeral() -> None:
+    if not jail.available():
+        pytest.skip("bubblewrap not available")
+    result = await ExecuteCommand().run(
+        {"command": "id -u; touch /usr/SANDBOX_TESTX && echo made-in-sandbox", "sandbox": True},
+        local_context(),
+    )
     assert result.ok and result.output["sandboxed"] is True
-    assert "sandboxed" in result.output["stdout"]
+    assert "0" in result.output["stdout"]  # fake root inside the sandbox (can install/delete)
+    assert "made-in-sandbox" in result.output["stdout"]
+    assert not Path("/usr/SANDBOX_TESTX").exists()  # discarded on exit — the host is untouched

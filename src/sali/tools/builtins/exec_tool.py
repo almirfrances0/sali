@@ -99,11 +99,12 @@ class ExecuteCommand(Tool):
 
         perms = ctx.settings.permissions
         sandbox = bool(args.get("sandbox"))
-        if sandbox and perms.jail_learning and jail.available():
-            argv = jail.build_argv(
-                argv, read_binds=[perms.exec_cwd], cwd=perms.exec_cwd,
-                allow_network=perms.exec_allow_network, deny=perms.fs_deny,
-            )
+        if sandbox:
+            if not (perms.jail_learning and jail.available()):
+                return ToolResult(ok=False, display="no sandbox",
+                                  error="the learning sandbox needs bubblewrap")
+            # Fake-root, writable-ephemeral system: install/delete freely, host untouched.
+            argv = jail.build_sandbox_argv(argv, allow_network=perms.exec_allow_network)
 
         try:
             rc, out, err = await run_argv(
