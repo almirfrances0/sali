@@ -42,6 +42,10 @@ class ModelSettings(BaseModel):
     ctx_default: int = 16_384
     ctx_max: int = 32_768
     request_timeout_s: float = 300.0  # long single-shot generations must not time out mid-page
+    # How long Ollama keeps the model resident after a call. Sali is a live resident, not a batch
+    # job — evicting the 35B after 5 min idle means the next "hey sali" pays a ~20s cold reload.
+    # Keep it warm; "-1" would pin it forever (at the cost of held VRAM).
+    keep_alive: str = "30m"
 
 
 class RuntimeSettings(BaseModel):

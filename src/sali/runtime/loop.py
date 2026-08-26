@@ -9,6 +9,7 @@ never assumed to have succeeded (rule 13).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 from collections.abc import AsyncIterator
@@ -89,6 +90,9 @@ _ANTI_LOOP_NUDGE = (
     "make the change or fix directly NOW, or if you're genuinely stuck, stop and tell Almir plainly "
     "what you found and what's blocking you. Don't read or list anything you've already looked at.)"
 )
+# The SAME (tool, args) call failing identically this many times → stop dispatching it and hand the
+# failure back as a factual result, so a wrong call (e.g. a hallucinated path) can't be retried forever.
+_MAX_TOOL_FAILURES = 2
 
 # A tool call sometimes leaks out as *text* instead of a parsed call (the model emits the JSON
 # itself). We must never leave Almir staring at raw JSON, so we detect it and ask for a clean redo.
@@ -247,13 +251,18 @@ class AgentLoop:
         )
         return note, through
 
-    async def _stalled(self, user_input: str, response: str) -> bool:
+    async def _stalled(
+        self, user_input: str, response: str, journal: RunJournal | None = None
+    ) -> bool:
         """Did Sali announce or half-do the task and stop, instead of finishing it? The model judges
         its own reply — no phrase list, no length cutoff (a stall can hide in a long reply), so Sali
-        gets pushed to continue however long the reply is. Best-effort: a failure just means no nudge."""
+        gets pushed to continue however long the reply is. Best-effort: a failure just means no nudge.
+        This costs a full inference, so the caller only invokes it when work has begun (tool_calls>0);
+        when a journal is passed we record the verdict + its latency so the tax is auditable."""
         text = response.strip()
         if not text:
             return False
+        started = self.clock.now()
         try:
             verdict = await self.provider.chat(
                 [ChatMessage(role="system", content=_STALL_JUDGE_SYSTEM),
@@ -262,7 +271,15 @@ class AgentLoop:
             )
         except Exception:  # noqa: BLE001 - a failed judgement just means no nudge, never a broken turn
             return False
-        return verdict.content.strip().upper().startswith("STALL")
+        stalled = verdict.content.strip().upper().startswith("STALL")
+        if journal is not None:
+            elapsed = int((self.clock.now() - started).total_seconds() * 1000)
+            # Observability must never break a turn.
+            with contextlib.suppress(Exception):
+                await journal.event(
+                    "stall_judge", {"verdict": "STALLED" if stalled else "DONE"}, latency_ms=elapsed
+                )
+        return stalled
 
     async def sense(self, partial: str) -> str:
         """A quiet hunch about what Almir is typing, formed the instant he pauses — retrieval
@@ -334,6 +351,7 @@ class AgentLoop:
                 follow_through = 0
                 json_recovery = 0
                 tool_sigs: dict[str, int] = {}  # signatures of tool calls seen this turn (loop guard)
+                failed_sigs: dict[str, tuple[int, str]] = {}  # sig -> (failures, last redacted error)
                 repeats_at_last_nudge = 0
 
                 while iteration < max_iter and tokens_used < budget:
@@ -393,11 +411,13 @@ class AgentLoop:
                             yield LoopEvent("status", "let me redo that")
                             iteration += 1
                             continue
-                        # If Sali announced or half-did the task and stopped — even AFTER some tool
-                        # calls (the "created the folder, now continuing…" stall) — push it to
-                        # finish. Bounded so it can never spin; the model judges its own reply.
-                        if (follow_through < _MAX_FOLLOW_THROUGH
-                                and await self._stalled(user_input, res.content)):
+                        # Did Sali do PART of a task and then stop ("made the folder, now
+                        # continuing…")? Only meaningful once real work has begun this turn, so we
+                        # gate on tool_calls > 0 — a purely conversational reply (a greeting, a
+                        # recall answered from memory) is taken at face value and never pays for the
+                        # extra self-judge inference. Bounded so it can never spin; model judges itself.
+                        if (tool_calls > 0 and follow_through < _MAX_FOLLOW_THROUGH
+                                and await self._stalled(user_input, res.content, journal)):
                             follow_through += 1
                             messages.append(ChatMessage(role="assistant", content=res.content))
                             messages.append(ChatMessage(role="user", content=_FOLLOW_THROUGH_NUDGE))
@@ -413,14 +433,27 @@ class AgentLoop:
                     for call in res.tool_calls:
                         tool_calls += 1
                         sig = f"{call.name}:{json.dumps(call.arguments, sort_keys=True, default=str)}"
-                        tool_sigs[sig] = tool_sigs.get(sig, 0) + 1
                         yield LoopEvent("tool", call.name,
                                         {"phase": "start", "name": call.name, "args": call.arguments})
+                        broken = failed_sigs.get(sig)
+                        if broken and broken[0] >= _MAX_TOOL_FAILURES:
+                            # This exact call already failed the same way — don't run it again. Hand
+                            # the failure back as a factual result so Sali changes course, not loops.
+                            await journal.event("tool_circuit_break",
+                                                {"tool": call.name, "failures": broken[0]})
+                            yield LoopEvent("tool", call.name, {"phase": "done", "name": call.name,
+                                            "ok": False, "summary": "already failed — not retried"})
+                            messages.append(_circuit_broken_message(call.name, broken[0], broken[1]))
+                            continue
+                        tool_sigs[sig] = tool_sigs.get(sig, 0) + 1  # count executed calls only
                         tool_msg, ok, summary = await self._handle_tool(conn, journal, grants, call)
                         # A clean, persistent progress line: what was done + a short result.
                         yield LoopEvent("tool", call.name, {"phase": "done", "name": call.name,
                                                             "ok": ok, "summary": summary})
                         messages.append(tool_msg)
+                        if not ok:  # remember the failure (redacted — the summary is raw error text)
+                            prev = failed_sigs.get(sig, (0, ""))[0]
+                            failed_sigs[sig] = (prev + 1, str(redact_obj(summary)))
                     # Going in circles? Break the investigate-forever loop with a course-correction.
                     repeats = sum(count - 1 for count in tool_sigs.values() if count > 1)
                     if repeats - repeats_at_last_nudge >= _LOOP_REPEATS:
@@ -776,3 +809,11 @@ def _tool_message(tool_name: str, payload: dict[str, Any]) -> ChatMessage:
     if len(content) > _TOOL_OUTPUT_CAP:
         content = content[:_TOOL_OUTPUT_CAP] + f"… [truncated; {len(content)} bytes total]"
     return ChatMessage(role="tool", name=tool_name, content=content)
+
+
+def _circuit_broken_message(tool_name: str, failures: int, error: str) -> ChatMessage:
+    """A factual tool result (not a coaching paragraph) saying this exact call keeps failing and was
+    not run again — enough for the model to try something different."""
+    return _tool_message(
+        tool_name, {"ok": False, "refused": True, "failures": failures, "error": error}
+    )

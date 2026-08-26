@@ -12,7 +12,7 @@ from sali.core.ids import new_id
 from sali.provider.base import ChatResult, ToolCall
 from sali.provider.fake import FakeModelProvider
 from sali.retrieval.service import RetrievalService
-from sali.runtime.loop import AgentLoop
+from sali.runtime.loop import _MAX_TOOL_FAILURES, AgentLoop
 from sali.security.confirm import AutoAllowConfirmer
 from sali.security.policy import PolicyEngine
 from sali.tools.registry import default_registry
@@ -148,26 +148,25 @@ async def test_astream_emits_tool_events(live_pool: Any) -> None:
     assert len(starts) == 1 and starts[0].data["name"] == "memory_info"
 
 
-async def test_loop_follows_through_on_announced_action(live_pool: Any) -> None:
-    # Sali narrates an action but calls nothing (the reported bug). The loop asks Sali to judge its
-    # own reply (STALLED), then nudges it to actually do it in the SAME turn — no re-prompt needed.
+async def test_zero_tool_reply_is_taken_at_face_value(live_pool: Any) -> None:
+    # A purely conversational reply — a greeting, or a first-step announcement with no work started
+    # yet — is taken at face value: NO self-judge inference, NO follow-through nudge. This is the
+    # deliberate trade that keeps greetings/recall instant (the stall-judge is a full inference).
+    # Partial-work stalls (tool_calls>0) ARE still caught — see the next test.
     fake = FakeModelProvider(
         responses=[
-            ChatResult("Let's start by checking your memory.", None, [], 5, 3, "fake"),  # announces
-            ChatResult("STALLED", None, [], 1, 1, "fake"),                                # self-judgement
-            ChatResult("", None, [ToolCall("memory_info", {})], 4, 2, "fake"),            # follows through
-            ChatResult("You've got plenty of memory free.", None, [], 4, 3, "fake"),      # answers
+            ChatResult("Let's start by checking your memory.", None, [], 5, 3, "fake"),
         ]
     )
     result = await _loop(live_pool, fake).run("check my memory")
-    assert result.tool_calls == 1  # it followed through and actually ran the tool
-    assert "plenty of memory free" in result.text
+    assert result.tool_calls == 0
+    assert result.text == "Let's start by checking your memory."
     async with live_pool.acquire() as c:
+        judged = await c.fetchval(
+            "SELECT count(*) FROM run_events WHERE run_id=$1 AND kind='stall_judge'", result.run_id)
         followed = await c.fetchval(
-            "SELECT count(*) FROM run_events WHERE run_id=$1 AND kind='follow_through'",
-            result.run_id,
-        )
-        assert followed == 1  # the nudge was journaled exactly once
+            "SELECT count(*) FROM run_events WHERE run_id=$1 AND kind='follow_through'", result.run_id)
+        assert judged == 0 and followed == 0  # a zero-tool turn never pays for the judge
 
 
 async def test_loop_follows_through_after_partial_work(live_pool: Any) -> None:
@@ -215,6 +214,33 @@ async def test_loop_breaks_a_repeated_tool_loop(live_pool: Any) -> None:
             "SELECT count(*) FROM run_events WHERE run_id=$1 AND kind='loop_break'", result.run_id
         )
         assert breaks >= 1  # the loop was detected and broken
+
+
+async def test_repeated_failing_tool_is_circuit_broken(live_pool: Any) -> None:
+    # The observed memory-hunting bug: the model retried the SAME failing call (list_directory at a
+    # path that doesn't exist) over and over. After _MAX_TOOL_FAILURES identical failures the loop
+    # refuses to dispatch it again and hands the failure back as a factual result, so it can't loop.
+    bad = ToolCall("list_directory", {"path": "/home/sali/memory"})  # nonexistent → always fails
+    fake = FakeModelProvider(
+        responses=[
+            ChatResult("", None, [bad], 3, 2, "fake"),   # 1st dispatch → fails
+            ChatResult("", None, [bad], 3, 2, "fake"),   # 2nd dispatch → fails
+            ChatResult("", None, [bad], 3, 2, "fake"),   # 3rd → circuit-broken, NOT dispatched
+            ChatResult("That folder isn't there — I'll answer from what I already know.", None, [], 3, 3, "fake"),
+            ChatResult("DONE", None, [], 1, 1, "fake"),   # self-judge on the tool_calls>0 final reply
+        ]
+    )
+    result = await _loop(live_pool, fake).run("look in my memory folder")
+    assert "isn't there" in result.text
+    async with live_pool.acquire() as c:
+        dispatched = await c.fetchval(
+            "SELECT count(*) FROM tool_execution WHERE run_id=$1 AND tool_name='list_directory'",
+            result.run_id)
+        breaks = await c.fetchval(
+            "SELECT count(*) FROM run_events WHERE run_id=$1 AND kind='tool_circuit_break'",
+            result.run_id)
+        assert dispatched == _MAX_TOOL_FAILURES  # executed exactly twice, then refused
+        assert breaks >= 1
 
 
 async def test_loop_does_not_nudge_a_complete_answer(live_pool: Any) -> None:

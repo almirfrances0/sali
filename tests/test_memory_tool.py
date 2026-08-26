@@ -35,8 +35,10 @@ async def test_remember_maps_source_and_records_provenance() -> None:
     assert note and "github.com" in note  # provenance recorded (§10)
 
     await RememberFact().run({"content": "Almir prefers Neovim", "source": "user"}, ctx)
-    assert sink.calls[1][1] is MemorySource.USER_EXPLICIT  # Almir said it → strong
-    assert sink.calls[1][3] > imp  # user-stated is weighted higher than a web finding
+    # The model can't mint USER_EXPLICIT — a fact it chooses to keep from the chat is CONVERSATION,
+    # and NOT weighted above a web finding (golden rule: never treat an LLM reply as ground truth).
+    assert sink.calls[1][1] is MemorySource.CONVERSATION
+    assert sink.calls[1][3] <= imp
 
     await RememberFact().run({"content": "probably worth trying X", "source": "inference"}, ctx)
     assert sink.calls[2][1] is MemorySource.INFERENCE  # Sali's own conclusion → weaker

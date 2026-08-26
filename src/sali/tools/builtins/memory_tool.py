@@ -2,8 +2,9 @@
 
 Learning from the web or a conversation shouldn't vanish when the turn ends. When Sali decides a
 fact is worth keeping, it calls this — and the fact is stored with honest PROVENANCE: an online
-finding is an EXTERNAL_SOURCE observation ("reported by <domain>"), something Almir stated is
-USER_EXPLICIT (strong), and Sali's own conclusion is INFERENCE (weaker, per the confidence model).
+finding is an EXTERNAL_SOURCE observation ("reported by <domain>"), something that came up with
+Almir is CONVERSATION (the model curating what it heard — NOT ground truth; USER_EXPLICIT is
+reserved for Almir's actual captured message), and Sali's own conclusion is INFERENCE (weaker).
 This is explicit, never automatic (§11), so stale web knowledge can't silently become fact.
 """
 
@@ -18,7 +19,10 @@ from sali.tools.context import ToolContext
 from sali.tools.registry import ToolRegistry
 
 _SOURCE = {
-    "user": (MemorySource.USER_EXPLICIT, 0.85),   # Almir said it — strong
+    # A model-initiated remember is Sali curating what it heard, not Almir asserting a fact — so it
+    # can never mint USER_EXPLICIT (that stays for Almir's actual captured message). It lands as
+    # CONVERSATION (priority 30 < a web finding's 40), honouring "never treat an LLM reply as truth".
+    "user": (MemorySource.CONVERSATION, 0.6),      # came up with Almir — not asserted ground truth
     "web": (MemorySource.EXTERNAL_SOURCE, 0.6),    # found online — provenance required
     "inference": (MemorySource.INFERENCE, 0.4),    # Sali's own conclusion — weaker
 }
@@ -27,9 +31,9 @@ _SOURCE = {
 class RememberFact(Tool):
     name = "remember"
     description = (
-        "Save a fact worth keeping so you recall it later. Set source: 'user' if Almir told you, "
-        "'web' if you found it online (pass the url for provenance), or 'inference' for your own "
-        "conclusion. Online facts are stored as 'reported by <source>', not as settled truth."
+        "Save a fact worth keeping so you recall it later. Set source: 'user' if it came up with "
+        "Almir, 'web' if you found it online (pass the url for provenance), or 'inference' for your "
+        "own conclusion. Online facts are stored as 'reported by <source>', not as settled truth."
     )
     parameters = {
         "type": "object",

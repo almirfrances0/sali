@@ -72,7 +72,7 @@ class OllamaProvider:
         try:
             resp = await self._client.chat(
                 model=self.s.chat_model, messages=payload, tools=ollama_tools, options=opts,
-                think=think, stream=False, keep_alive="5m",
+                think=think, stream=False, keep_alive=self.s.keep_alive,
             )
         except Exception as exc:  # noqa: BLE001 - surfaced as a typed provider error
             raise ProviderError(f"ollama chat failed: {exc}") from exc
@@ -105,7 +105,7 @@ class OllamaProvider:
         try:
             stream = await self._client.chat(
                 model=self.s.chat_model, messages=payload, tools=ollama_tools, options=opts,
-                think=think, stream=True, keep_alive="5m",
+                think=think, stream=True, keep_alive=self.s.keep_alive,
             )
             async for part in stream:
                 msg = part.message
