@@ -517,6 +517,21 @@ class AgentLoop:
                     self._maybe_learn()  # fold raw activity into episodes/procedures — off-thread
                 except Exception as exc:  # noqa: BLE001 - housekeeping, never fail a done turn
                     self.log.warning("post_turn_housekeeping_failed", error=str(exc))
+            except asyncio.CancelledError:
+                # Interrupted (Ctrl-C, WebSocket disconnect, shutdown). Don't leave the run stuck as
+                # 'running' with an orphaned 'executing' tool row — mark both aborted, then let the
+                # cancellation propagate. Best-effort: suppress ordinary errors, never swallow the
+                # cancellation itself.
+                with contextlib.suppress(Exception):
+                    await conn.execute(
+                        "UPDATE tool_execution SET status='aborted', finished_at=now() "
+                        "WHERE run_id=$1 AND status='executing'",
+                        journal.run_id,
+                    )
+                    await journal.event("run.interrupted", {})
+                    await journal.set_state(RunState.ABORTED)
+                    await journal.finish("aborted")
+                raise
             except Exception as exc:
                 self.log.error("run_failed", run_id=str(journal.run_id), error=str(exc))
                 await journal.event("run.error", {"error": str(exc)})

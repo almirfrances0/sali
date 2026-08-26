@@ -243,6 +243,29 @@ async def test_repeated_failing_tool_is_circuit_broken(live_pool: Any) -> None:
         assert breaks >= 1
 
 
+async def test_interrupted_turn_is_marked_aborted_not_left_running(live_pool: Any) -> None:
+    # A cancelled turn (Ctrl-C / WebSocket disconnect) must NOT leave the run stuck as 'running' —
+    # it's marked aborted and the cancellation still propagates, so state never leaks.
+    import asyncio
+
+    class _CancelStream(FakeModelProvider):
+        async def chat_stream(self, *args: Any, **kwargs: Any) -> Any:
+            raise asyncio.CancelledError
+            yield  # pragma: no cover - makes this an async generator
+
+    sid = new_id()
+    loop = _loop(live_pool, _CancelStream())
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in loop.astream("do something", session_id=sid):
+            pass
+
+    async with live_pool.acquire() as c:
+        row = await c.fetchrow(
+            "SELECT status, state FROM agent_runs WHERE session_id=$1 ORDER BY started_at DESC LIMIT 1",
+            sid)
+    assert row["status"] == "aborted" and row["state"] == "aborted"
+
+
 async def test_loop_does_not_nudge_a_complete_answer(live_pool: Any) -> None:
     # A short answer that Sali judges DONE must NOT be nudged — it just finalizes.
     fake = FakeModelProvider(

@@ -44,7 +44,7 @@ class Kernel:
         from sali.tools.registry import default_registry
 
         pool = await self.pool()
-        return AgentLoop(
+        loop = AgentLoop(
             pool=pool,
             provider=self.provider,
             retrieval=RetrievalService(pool, self.provider),
@@ -55,6 +55,16 @@ class Kernel:
             settings=self.settings,
             learning=LearningService(pool, self.provider),  # so memory actually ACCRUES (§17-19)
         )
+        # Clean up any run a prior process left 'running' (hard crash / kill): mark it aborted so it
+        # doesn't linger. Best-effort — a recovery hiccup must never block starting a session. No
+        # turn is in flight yet, so this can't touch the run we're about to do.
+        try:
+            recovered = await loop.recover()
+            if recovered:
+                self.log.info("recovered_orphan_runs", count=len(recovered))
+        except Exception as exc:  # noqa: BLE001 - startup recovery is best-effort
+            self.log.warning("startup_recover_failed", error=str(exc))
+        return loop
 
     async def close(self) -> None:
         if self._pool is not None:
