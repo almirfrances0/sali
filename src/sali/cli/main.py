@@ -254,6 +254,68 @@ async def _show_run(settings: Settings, run_id: str) -> None:
 
 
 @app.command()
+def remember(
+    text: str = typer.Argument(..., help="A fact to teach Sali."),
+    layer: str = typer.Option("semantic", help="Memory layer (semantic/preference/episodic/identity)."),
+) -> None:
+    """Teach Sali a fact — persisted with provenance (user_explicit) and embedded for recall."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    asyncio.run(_remember(settings, text, layer))
+
+
+async def _remember(settings: Settings, text: str, layer: str) -> None:
+    from sali.core.enums import MemoryLayer, MemorySource
+    from sali.db.pool import create_pool
+    from sali.memory.service import MemoryService
+    from sali.provider.registry import build_provider
+
+    pool = await create_pool(settings)
+    provider = build_provider(settings)
+    service = MemoryService(pool, provider)
+    try:
+        memory = await service.remember(
+            layer=MemoryLayer(layer), content=text, source=MemorySource.USER_EXPLICIT
+        )
+        await service.embed_pending()
+        console.print(f"[green]Remembered[/] (confidence {memory.confidence:.2f}): {text}")
+    finally:
+        await pool.close()
+
+
+@app.command()
+def recall(query: str = typer.Argument(..., help="What to look up.")) -> None:
+    """Show what Sali retrieves for a query — memories (with confidence) and graph relationships."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    asyncio.run(_recall(settings, query))
+
+
+async def _recall(settings: Settings, query: str) -> None:
+    from sali.db.pool import create_pool
+    from sali.provider.registry import build_provider
+    from sali.retrieval.router import classify
+    from sali.retrieval.service import RetrievalService
+
+    pool = await create_pool(settings)
+    provider = build_provider(settings)
+    service = RetrievalService(pool, provider)
+    try:
+        plan = classify(query)
+        bundle = await service.gather(query, plan, k=6)
+        console.print(f"[dim]intent={plan.intent} · needs_live={plan.needs_live}[/]")
+        if not bundle.memories and not bundle.graph_facts:
+            console.print("[dim]Nothing relevant stored yet — teach Sali with `sali remember`.[/]")
+        for hit in bundle.memories:
+            tag = f"conf {hit.effective_confidence:.2f}" + (" · STALE" if hit.stale else "")
+            console.print(f"[cyan]memory[/] ([dim]{tag}[/]) {hit.memory.content}")
+        for fact in bundle.graph_facts:
+            console.print(f"[magenta]graph[/]  {fact.src} --{fact.rel}--> {fact.dst}")
+    finally:
+        await pool.close()
+
+
+@app.command()
 def chat(think: bool = typer.Option(False, "--think", help="Show the model's reasoning.")) -> None:
     """Direct model chat — a preview with no memory or tools (use `sali agent` for the full loop)."""
     settings = load_settings()
