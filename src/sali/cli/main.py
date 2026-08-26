@@ -182,6 +182,9 @@ async def _stream_turn(loop: Any, text: str, session: UUID) -> None:
 
     # Shared state between the producer (astream) and the paced renderer.
     st: dict[str, Any] = {"target": "", "shown": 0, "activity": "…", "done": False, "error": None}
+    # One spinner, reused: a Spinner animates off its own start time, so recreating it every
+    # frame would pin it to frame 0 (a frozen dot). Keep it and just swap the label.
+    spinner = Spinner("dots", style="cyan")
 
     def render() -> Group:
         parts: list[Any] = []
@@ -189,7 +192,8 @@ async def _stream_turn(loop: Any, text: str, session: UUID) -> None:
         if shown:
             parts.append(Text.assemble(("sali › ", "bold green"), shown))
         if st["activity"] is not None:
-            parts.append(Spinner("dots", text=Text(f" {st['activity']}", style="dim cyan")))
+            spinner.update(text=Text(f" {st['activity']}", style="dim cyan"))
+            parts.append(spinner)
         return Group(*parts)
 
     with Live(render(), console=console, auto_refresh=False, transient=False) as live:

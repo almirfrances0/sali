@@ -12,9 +12,19 @@ import structlog
 _configured = False
 
 
+# Third-party libraries that log HTTP traffic (the Ollama calls) at INFO — pure noise in the
+# terminal, and they garble the input line / punch through the live animation. Keep them quiet
+# unless we're explicitly at DEBUG.
+_NOISY = ("httpx", "httpcore", "ollama", "urllib3", "asyncio", "asyncpg")
+
+
 def configure_logging(level: str = "INFO") -> None:
     global _configured
-    logging.basicConfig(format="%(message)s", level=getattr(logging, level.upper(), logging.INFO))
+    resolved = getattr(logging, level.upper(), logging.INFO)
+    logging.basicConfig(format="%(message)s", level=resolved)
+    quiet = max(resolved, logging.WARNING)  # never below WARNING, even if the app runs at INFO
+    for name in _NOISY:
+        logging.getLogger(name).setLevel(quiet)
     structlog.configure(
         processors=[
             structlog.processors.add_log_level,
