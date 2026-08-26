@@ -77,16 +77,31 @@ async def test_learns_procedure_only_with_repeated_evidence(db_conn: Any) -> Non
     assert row["source"] == "inference"  # learned, so honestly weaker than a first-hand observation
 
 
-async def test_records_failures_and_does_not_duplicate(db_conn: Any) -> None:
+async def test_records_only_fixed_failures_and_does_not_duplicate(db_conn: Any) -> None:
     run = uuid4()
+    t0 = datetime.now(UTC) - timedelta(minutes=1)  # recent, so it's inside the recording window
     await db_conn.execute(
         "INSERT INTO agent_runs (run_id, session_id, user_input, state, status) "
         "VALUES ($1,$2,'deploy the app','done','completed')", run, uuid4(),
     )
+    # A bare one-off failure with no later fix is NOT a lesson (§18 = failure→correction) — skipped.
     await db_conn.execute(
         "INSERT INTO tool_execution (run_id, tool_name, status, danger_level, plan, success, error, started_at) "
-        "VALUES ($1,'execute_command','verified_failure'::tool_status,0,$2,false,$3, now())",
-        run, {"args": {"command": "docker compose up -d"}}, "container failed health check",
+        "VALUES ($1,'read_file','verified_failure'::tool_status,0,$2,false,'no such file',$3)",
+        run, {"args": {"path": "/nope"}}, t0,
+    )
+    assert await record_failures(db_conn) == 0  # bare failure → not recorded
+
+    # A failure that a LATER step in the same run fixed IS recorded — the lesson is the correction.
+    await db_conn.execute(
+        "INSERT INTO tool_execution (run_id, tool_name, status, danger_level, plan, success, error, started_at) "
+        "VALUES ($1,'execute_command','verified_failure'::tool_status,0,$2,false,$3,$4)",
+        run, {"args": {"command": "docker compose up -d"}}, "container failed health check", t0,
+    )
+    await db_conn.execute(
+        "INSERT INTO tool_execution (run_id, tool_name, status, danger_level, plan, success, started_at) "
+        "VALUES ($1,'execute_command','verified_success'::tool_status,0,$2,true,$3)",
+        run, {"args": {"command": "docker compose --env-file .env up -d"}}, t0 + timedelta(seconds=5),
     )
     assert await record_failures(db_conn) == 1
     row = await db_conn.fetchrow(
@@ -94,8 +109,8 @@ async def test_records_failures_and_does_not_duplicate(db_conn: Any) -> None:
         "AND valid_until IS NULL"
     )
     assert "docker compose up" in row["content"] and "health check" in row["content"]
-    assert "deploy the app" in row["content"]  # carries the objective for future retrieval
-    assert await record_failures(db_conn) == 0  # idempotent — the same failure isn't re-recorded
+    assert "What fixed it" in row["content"] and "--env-file" in row["content"]  # the correction
+    assert await record_failures(db_conn) == 0  # idempotent — the same lesson isn't re-recorded
 
 
 async def test_relearning_a_procedure_reuses_the_name_and_does_not_churn(db_conn: Any) -> None:
@@ -116,7 +131,7 @@ async def test_relearning_a_procedure_reuses_the_name_and_does_not_churn(db_conn
 
 async def test_failure_records_the_fix_when_a_later_step_succeeded(db_conn: Any) -> None:
     run = uuid4()
-    base = datetime(2026, 2, 1, tzinfo=UTC)
+    base = datetime.now(UTC) - timedelta(minutes=1)  # recent, inside the recording window
     await db_conn.execute(
         "INSERT INTO tool_execution (run_id,tool_name,status,danger_level,plan,success,error,started_at) "
         "VALUES ($1,'execute_command','verified_failure'::tool_status,0,$2,false,'missing env var',$3)",

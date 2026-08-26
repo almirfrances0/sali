@@ -23,8 +23,10 @@ async def record_failures(conn: Any, *, limit: int = 50) -> int:
     rows = await conn.fetch(
         "SELECT te.id, te.run_id, te.tool_name, te.error, te.plan, te.started_at, r.user_input "
         "FROM tool_execution te LEFT JOIN agent_runs r ON r.run_id = te.run_id "
-        "WHERE te.status = 'verified_failure' AND NOT EXISTS ("
-        "  SELECT 1 FROM memory m WHERE m.claim_key = 'failure:' || te.id::text "
+        # Only RECENT failures — old dev-time failures are noise, not lessons. Bounded so the whole
+        # historical backlog isn't turned into hundreds of episodic memories.
+        "WHERE te.status = 'verified_failure' AND te.started_at > now() - interval '2 days' "
+        "  AND NOT EXISTS (SELECT 1 FROM memory m WHERE m.claim_key = 'failure:' || te.id::text "
         "    AND m.valid_until IS NULL) "
         "ORDER BY te.started_at DESC LIMIT $1",
         limit,
@@ -42,15 +44,25 @@ async def record_failures(conn: Any, *, limit: int = 50) -> int:
 
         doing = f" running `{command}`" if command else ""
         because = f" — {row['error'][:200]}" if row["error"] else ""
-        task = f" (task: {row['user_input'][:120]})" if row["user_input"] else ""
-        content = f"A past attempt failed: the {row['tool_name']} tool{doing} failed{because}.{task}"
+        # Content is the failure SIGNATURE (tool + command + error) — NOT the per-turn task, which
+        # varies and would record the same recurring failure dozens of times (a bloat of near-dupes,
+        # and the (layer, content_hash) collision Almir kept seeing). The task goes in the note.
         learned_fix = bool(fix_command and fix_command != command)
-        if learned_fix:
-            content += f" What fixed it: `{fix_command}`."
+        if not learned_fix:
+            continue  # §18 is failure→CORRECTION — a bare one-off error is noise, not a lesson
+        content = (f"A past attempt failed: the {row['tool_name']} tool{doing} failed{because}. "
+                   f"What fixed it: `{fix_command}`.")
+        note = f"task: {row['user_input'][:120]}" if row["user_input"] else None
+        # Record each distinct failure→fix once (dedup by content signature) — same lesson, one memory.
+        if await conn.fetchval(
+            "SELECT 1 FROM memory WHERE layer = 'episodic'::memory_layer "
+            "AND content_hash = digest($1, 'sha256') AND valid_until IS NULL LIMIT 1", content,
+        ):
+            continue
         await memory_writer.remember(
             conn, layer=MemoryLayer.EPISODIC, content=content,
             source=MemorySource.SYSTEM_OBSERVATION, functional=True,
-            claim_key=f"failure:{row['id']}", importance=0.6 if learned_fix else 0.5, obs_conf=1.0,
+            claim_key=f"failure:{row['id']}", importance=0.6, obs_conf=1.0, note=note,
         )
         count += 1
     return count
