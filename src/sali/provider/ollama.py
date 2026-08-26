@@ -7,13 +7,14 @@ below the model's advertised 262144 — unusable under 12 GB VRAM (fix H1/§M).
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any
 
 from ollama import AsyncClient
 
 from sali.config.settings import ModelSettings
 from sali.core.errors import ProviderError
-from sali.provider.base import ChatMessage, ChatResult, ToolCall, ToolSpec
+from sali.provider.base import ChatChunk, ChatMessage, ChatResult, ToolCall, ToolSpec
 from sali.provider.presets import DETERMINISTIC, SamplingPreset
 
 
@@ -22,15 +23,13 @@ class OllamaProvider:
         self.s = settings
         self._client = AsyncClient(host=settings.host)
 
-    async def chat(
+    def _build(
         self,
         messages: list[ChatMessage],
-        *,
-        tools: list[ToolSpec] | None = None,
-        options: dict[str, Any] | None = None,
-        think: bool = False,
-        preset: SamplingPreset = DETERMINISTIC,
-    ) -> ChatResult:
+        tools: list[ToolSpec] | None,
+        options: dict[str, Any] | None,
+        preset: SamplingPreset,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None, dict[str, Any]]:
         opts: dict[str, Any] = preset.to_options()
         opts["num_ctx"] = min(self.s.ctx_default, self.s.ctx_max)
         if options:
@@ -49,29 +48,29 @@ class OllamaProvider:
 
         ollama_tools = (
             [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters,
-                    },
-                }
+                {"type": "function", "function": {"name": t.name, "description": t.description,
+                                                  "parameters": t.parameters}}
                 for t in tools
             ]
             if tools
             else None
         )
+        return payload, ollama_tools, opts
 
+    async def chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: list[ToolSpec] | None = None,
+        options: dict[str, Any] | None = None,
+        think: bool = False,
+        preset: SamplingPreset = DETERMINISTIC,
+    ) -> ChatResult:
+        payload, ollama_tools, opts = self._build(messages, tools, options, preset)
         try:
             resp = await self._client.chat(
-                model=self.s.chat_model,
-                messages=payload,
-                tools=ollama_tools,
-                options=opts,
-                think=think,
-                stream=False,
-                keep_alive="5m",
+                model=self.s.chat_model, messages=payload, tools=ollama_tools, options=opts,
+                think=think, stream=False, keep_alive="5m",
             )
         except Exception as exc:  # noqa: BLE001 - surfaced as a typed provider error
             raise ProviderError(f"ollama chat failed: {exc}") from exc
@@ -82,19 +81,59 @@ class OllamaProvider:
             for tc in (msg.tool_calls or [])
         ]
         return ChatResult(
-            content=msg.content or "",
-            thinking=getattr(msg, "thinking", None),
-            tool_calls=calls,
-            tokens_in=resp.prompt_eval_count or 0,
-            tokens_out=resp.eval_count or 0,
+            content=msg.content or "", thinking=getattr(msg, "thinking", None), tool_calls=calls,
+            tokens_in=resp.prompt_eval_count or 0, tokens_out=resp.eval_count or 0,
             model=self.s.chat_model,
+        )
+
+    async def chat_stream(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: list[ToolSpec] | None = None,
+        options: dict[str, Any] | None = None,
+        think: bool = False,
+        preset: SamplingPreset = DETERMINISTIC,
+    ) -> AsyncIterator[ChatChunk]:
+        payload, ollama_tools, opts = self._build(messages, tools, options, preset)
+        content_acc = ""
+        thinking_acc = ""
+        calls: list[ToolCall] = []
+        tokens_in = tokens_out = 0
+        try:
+            stream = await self._client.chat(
+                model=self.s.chat_model, messages=payload, tools=ollama_tools, options=opts,
+                think=think, stream=True, keep_alive="5m",
+            )
+            async for part in stream:
+                msg = part.message
+                if msg.content:
+                    content_acc += msg.content
+                    yield ChatChunk(content=msg.content)
+                delta = getattr(msg, "thinking", None)
+                if delta:
+                    thinking_acc += delta
+                    yield ChatChunk(thinking=delta)
+                for tc in (msg.tool_calls or []):
+                    calls.append(ToolCall(name=tc.function.name, arguments=dict(tc.function.arguments or {})))
+                if getattr(part, "done", False):
+                    tokens_in = part.prompt_eval_count or 0
+                    tokens_out = part.eval_count or 0
+        except Exception as exc:  # noqa: BLE001
+            raise ProviderError(f"ollama chat stream failed: {exc}") from exc
+
+        yield ChatChunk(
+            done=True,
+            result=ChatResult(
+                content=content_acc, thinking=thinking_acc or None, tool_calls=calls,
+                tokens_in=tokens_in, tokens_out=tokens_out, model=self.s.chat_model,
+            ),
         )
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         try:
             resp = await self._client.embed(
-                model=self.s.embed_model,
-                input=texts,
+                model=self.s.embed_model, input=texts,
                 options={"num_gpu": self.s.embed_num_gpu},  # CPU-only (fix H1/§M)
             )
         except Exception as exc:  # noqa: BLE001

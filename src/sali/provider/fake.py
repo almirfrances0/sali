@@ -10,9 +10,10 @@ from __future__ import annotations
 import hashlib
 import math
 import random
+from collections.abc import AsyncIterator
 from typing import Any
 
-from sali.provider.base import ChatMessage, ChatResult, ToolSpec
+from sali.provider.base import ChatChunk, ChatMessage, ChatResult, ToolSpec
 
 
 class FakeModelProvider:
@@ -41,6 +42,20 @@ class FakeModelProvider:
             tokens_out=3,
             model="fake",
         )
+
+    async def chat_stream(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: list[ToolSpec] | None = None,
+        options: dict[str, Any] | None = None,
+        think: bool = False,
+    ) -> AsyncIterator[ChatChunk]:
+        result = await self.chat(messages, tools=tools, options=options, think=think)
+        for word in result.content.split(" "):
+            if word:
+                yield ChatChunk(content=word + " ")
+        yield ChatChunk(done=True, result=result)
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         return [self._vector(t) for t in texts]

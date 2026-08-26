@@ -153,10 +153,49 @@ def agent(
     asyncio.run(_agent(settings, message))
 
 
-async def _turn(loop: Any, text: str, session: UUID) -> str:
-    with console.status("[dim]thinking…[/]", spinner="dots"):
-        result = await loop.run(text, session_id=session)
-    return str(result.text)
+def _fmt_tool(data: dict[str, Any]) -> str:
+    args = data.get("args") or {}
+    value = args.get("command") or args.get("path") or args.get("repo")
+    if value is None and args:
+        value = next(iter(args.values()), "")
+    return str(value or "")[:70]
+
+
+async def _stream_turn(loop: Any, text: str, session: UUID) -> None:
+    """Render one turn live: a status/thinking animation, then the answer streaming in."""
+    from rich.console import Group
+    from rich.live import Live
+    from rich.spinner import Spinner
+    from rich.text import Text
+
+    buffer = ""
+    activity: str | None = "…"
+
+    def render() -> Group:
+        parts: list[Any] = []
+        if buffer:
+            parts.append(Text.assemble(("sali › ", "bold green"), buffer))
+        if activity is not None:
+            parts.append(Spinner("dots", text=Text(f" {activity}", style="dim cyan")))
+        return Group(*parts)
+
+    with Live(render(), console=console, refresh_per_second=16, transient=False) as live:
+        async for event in loop.astream(text, session_id=session):
+            if event.kind == "status":
+                activity = f"{event.text}…"
+            elif event.kind == "tool":
+                if event.data.get("phase") == "start":
+                    activity = f"running {event.data['name']} {_fmt_tool(event.data)}".rstrip()
+                else:
+                    live.console.print(f"[dim]  · {event.data['name']}[/]")
+                    activity = "thinking…"
+            elif event.kind == "token":
+                buffer += event.text
+                activity = None  # the answer is streaming now — drop the spinner
+            elif event.kind == "final":
+                buffer = event.text or buffer
+                activity = None
+            live.update(render())
 
 
 async def _agent(settings: Settings, message: str | None) -> None:
@@ -168,7 +207,7 @@ async def _agent(settings: Settings, message: str | None) -> None:
     session = _persistent_session()  # always the same continuous conversation
     try:
         if message:
-            console.print(await _turn(loop, message, session))
+            await _stream_turn(loop, message, session)
             return
         console.print("[dim]talking to Sali — Ctrl-D to leave. It remembers.[/]")
         while True:
@@ -179,8 +218,7 @@ async def _agent(settings: Settings, message: str | None) -> None:
                 return
             if not text.strip():
                 continue
-            reply = await _turn(loop, text, session)
-            console.print(f"[bold green]sali ›[/] {reply}")
+            await _stream_turn(loop, text, session)
     finally:
         await kernel.close()
 

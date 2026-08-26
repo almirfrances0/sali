@@ -8,6 +8,7 @@ import pytest
 
 from sali.config.settings import DbSettings, ModelSettings, Settings
 from sali.context.engine import ContextEngine
+from sali.core.ids import new_id
 from sali.provider.base import ChatResult, ToolCall
 from sali.provider.fake import FakeModelProvider
 from sali.retrieval.service import RetrievalService
@@ -119,3 +120,29 @@ async def test_loop_recover_surfaces_interrupted_run(live_pool: Any) -> None:
     async with live_pool.acquire() as c:
         status = await c.fetchval("SELECT status FROM agent_runs WHERE run_id=$1", run_id)
         assert status == "aborted"
+
+
+async def test_astream_streams_tokens_then_final(live_pool: Any) -> None:
+    fake = FakeModelProvider(responses=[ChatResult("hello there friend", None, [], 3, 3, "fake")])
+    kinds: list[str] = []
+    final_text = ""
+    async for event in _loop(live_pool, fake).astream("hi", session_id=new_id()):
+        kinds.append(event.kind)
+        if event.kind == "final":
+            final_text = event.text
+    assert "token" in kinds and "final" in kinds  # the answer streamed, then finalized
+    assert final_text == "hello there friend"
+
+
+async def test_astream_emits_tool_events(live_pool: Any) -> None:
+    fake = FakeModelProvider(
+        responses=[
+            ChatResult("", None, [ToolCall("memory_info", {})], 3, 2, "fake"),
+            ChatResult("plenty free", None, [], 3, 3, "fake"),
+        ]
+    )
+    starts = [
+        e async for e in _loop(live_pool, fake).astream("ram?", session_id=new_id())
+        if e.kind == "tool" and e.data.get("phase") == "start"
+    ]
+    assert len(starts) == 1 and starts[0].data["name"] == "memory_info"

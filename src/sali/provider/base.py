@@ -6,6 +6,7 @@ so swapping Ollama for another engine is a single registry edit (engineering rul
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -49,6 +50,16 @@ class ChatResult:
     model: str
 
 
+@dataclass(slots=True)
+class ChatChunk:
+    """A streamed piece of a response: a content/thinking delta, and on ``done`` the full result."""
+
+    content: str = ""
+    thinking: str = ""
+    done: bool = False
+    result: ChatResult | None = None
+
+
 @runtime_checkable
 class ModelProvider(Protocol):
     """Everything Sali needs from a reasoning backend."""
@@ -61,6 +72,15 @@ class ModelProvider(Protocol):
         options: dict[str, Any] | None = None,
         think: bool = False,
     ) -> ChatResult: ...
+
+    def chat_stream(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: list[ToolSpec] | None = None,
+        options: dict[str, Any] | None = None,
+        think: bool = False,
+    ) -> AsyncIterator[ChatChunk]: ...
 
     async def embed(self, texts: list[str]) -> list[list[float]]: ...
 

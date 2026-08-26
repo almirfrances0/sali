@@ -10,7 +10,8 @@ never assumed to have succeeded (rule 13).
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
@@ -18,10 +19,11 @@ from sali.config.settings import Settings
 from sali.context.engine import LIVE_NOTE, ContextEngine
 from sali.core.clock import Clock, SystemClock
 from sali.core.enums import MemorySource
+from sali.core.errors import ProviderError
 from sali.core.ids import new_id
 from sali.memory.writer import observe
 from sali.obs.log import get_logger
-from sali.provider.base import ChatMessage, ModelProvider, ToolCall
+from sali.provider.base import ChatMessage, ChatResult, ModelProvider, ToolCall
 from sali.retrieval.router import classify
 from sali.retrieval.service import RetrievalService
 from sali.runtime.journal import RunJournal
@@ -46,6 +48,15 @@ class AgentResult:
     text: str
     iterations: int
     tool_calls: int
+
+
+@dataclass(slots=True)
+class LoopEvent:
+    """A streamed moment of a turn, for live rendering (terminal or WebSocket)."""
+
+    kind: str  # 'status' | 'token' | 'thinking' | 'tool' | 'final' | 'error'
+    text: str = ""
+    data: dict[str, Any] = field(default_factory=dict)
 
 
 class AgentLoop:
@@ -74,126 +85,136 @@ class AgentLoop:
         self.log = get_logger("sali.loop")
 
     async def run(self, user_input: str, session_id: UUID | None = None) -> AgentResult:
-        """Run one turn. Pass a stable ``session_id`` across turns for a continuous conversation."""
+        """Run one turn to completion (non-streaming) by consuming the event stream."""
+        final: LoopEvent | None = None
+        async for event in self.astream(user_input, session_id):
+            if event.kind == "final":
+                final = event
+        if final is None:  # pragma: no cover - astream always yields final or raises
+            raise RuntimeError("agent loop produced no final event")
+        return AgentResult(
+            run_id=UUID(final.data["run_id"]), text=final.text,
+            iterations=int(final.data["iterations"]), tool_calls=int(final.data["tool_calls"]),
+        )
+
+    async def astream(
+        self, user_input: str, session_id: UUID | None = None
+    ) -> AsyncIterator[LoopEvent]:
+        """Drive one turn, streaming status/token/thinking/tool events as they happen. This is
+        the real core; ``run`` is a thin consumer. Everything is journaled exactly as before."""
         session_id = session_id or new_id()
+        grants = SessionGrants()
         async with self.pool.acquire() as conn:  # journal + tool + persistence connection
             await self._ensure_conversation(conn, session_id)
-            history = await self._load_history(conn, session_id)  # prior turns (excludes this one)
+            history = await self._load_history(conn, session_id)
             await self._append_message(conn, session_id, "user", user_input)
             journal = await RunJournal.start(conn, session_id, user_input)
             try:
-                result = await self._drive(conn, journal, user_input, session_id, history)
-                await self._append_message(
-                    conn, session_id, "assistant", result.text, model=self.settings.model.chat_model
+                yield LoopEvent("status", "remembering")
+                await journal.set_state(RunState.RETRIEVE)
+                plan = classify(user_input)
+                bundle = await self.retrieval.gather(user_input, plan, k=5)
+                await journal.event(
+                    "retrieve",
+                    {"intent": plan.intent, "memories": len(bundle.memories),
+                     "graph": len(bundle.graph_facts), "recent": len(bundle.recent),
+                     "needs_live": plan.needs_live},
                 )
+
+                await journal.set_state(RunState.BUILD_CONTEXT)
+                specs = self.registry.advertise()
+                assembled = self.context.assemble(
+                    user_input, bundle, specs,
+                    live_note=LIVE_NOTE if plan.needs_live else None, history=history,
+                )
+                messages = list(assembled.messages)
+                await journal.event(
+                    "context",
+                    {"included": assembled.included, "dropped": assembled.dropped,
+                     "est_tokens": assembled.est_tokens, "conflicts": len(assembled.conflicts)},
+                )
+
+                max_iter = self.settings.runtime.max_iterations
+                budget = self.settings.runtime.token_budget_per_run
+                tokens_used = 0
+                tool_calls = 0
+                final_text = ""
+                iteration = 0
+
+                while iteration < max_iter and tokens_used < budget:
+                    await journal.set_state(RunState.REASON_PLAN, iteration=iteration)
+                    yield LoopEvent("status", "thinking")
+                    started = self.clock.now()
+                    res: ChatResult | None = None
+                    async for chunk in self.provider.chat_stream(
+                        messages, tools=specs or None, options=_VOICE
+                    ):
+                        if chunk.thinking:
+                            yield LoopEvent("thinking", chunk.thinking)
+                        if chunk.content:
+                            yield LoopEvent("token", chunk.content)
+                        if chunk.done:
+                            res = chunk.result
+                    if res is None:
+                        raise ProviderError("model stream ended without a result")
+                    latency = int((self.clock.now() - started).total_seconds() * 1000)
+                    tokens_used += res.tokens_in + res.tokens_out
+                    await journal.event(
+                        "llm_call", {"model": res.model, "tool_calls": len(res.tool_calls)},
+                        latency_ms=latency, tokens_in=res.tokens_in, tokens_out=res.tokens_out,
+                    )
+                    if not res.tool_calls:
+                        final_text = res.content
+                        break
+                    messages.append(
+                        ChatMessage(role="assistant", content=res.content, tool_calls=res.tool_calls)
+                    )
+                    for call in res.tool_calls:
+                        tool_calls += 1
+                        yield LoopEvent("tool", call.name,
+                                        {"phase": "start", "name": call.name, "args": call.arguments})
+                        tool_msg = await self._handle_tool(conn, journal, grants, call)
+                        yield LoopEvent("tool", call.name, {"phase": "done", "name": call.name})
+                        messages.append(tool_msg)
+                    iteration += 1
+                else:
+                    if not final_text:  # ran long — let Sali wrap up in its own voice, streamed
+                        yield LoopEvent("status", "wrapping up")
+                        messages.append(ChatMessage(
+                            role="user",
+                            content="(You've done plenty here — wrap up now in your own words, no more tools.)",
+                        ))
+                        acc = ""
+                        async for chunk in self.provider.chat_stream(messages, options=_VOICE):
+                            if chunk.content:
+                                acc += chunk.content
+                                yield LoopEvent("token", chunk.content)
+                        final_text = acc.strip() or "Let me stop here for now."
+
+                await journal.set_state(RunState.LEARN)
+                async with self.pool.acquire() as learn_conn:
+                    await observe(learn_conn, kind="turn", content=user_input,
+                                  source=MemorySource.CONVERSATION, session_id=session_id)
+                await self._append_message(
+                    conn, session_id, "assistant", final_text, model=self.settings.model.chat_model
+                )
+                await journal.set_state(RunState.RESPOND)
+                await journal.event("respond", {"chars": len(final_text)})
                 await journal.set_state(RunState.DONE)
                 await journal.finish("completed")
                 await self._emit(
                     conn, "conversation.turn", session_id,
-                    {"run_id": str(journal.run_id), "tools": result.tool_calls},
-                    subject_type="conversation",
+                    {"run_id": str(journal.run_id), "tools": tool_calls}, subject_type="conversation",
                 )
-                return result
+                yield LoopEvent("final", final_text, {
+                    "run_id": str(journal.run_id), "iterations": iteration, "tool_calls": tool_calls,
+                })
             except Exception as exc:
                 self.log.error("run_failed", run_id=str(journal.run_id), error=str(exc))
                 await journal.event("run.error", {"error": str(exc)})
                 await journal.set_state(RunState.FAILED)
                 await journal.finish("failed")
                 raise
-
-    async def _drive(
-        self, conn: Any, journal: RunJournal, user_input: str, session_id: UUID,
-        history: list[tuple[str, str]],
-    ) -> AgentResult:
-        grants = SessionGrants()
-
-        await journal.set_state(RunState.RETRIEVE)
-        plan = classify(user_input)
-        bundle = await self.retrieval.gather(user_input, plan, k=5)
-        await journal.event(
-            "retrieve",
-            {
-                "intent": plan.intent,
-                "memories": len(bundle.memories),
-                "graph": len(bundle.graph_facts),
-                "recent": len(bundle.recent),
-                "needs_live": plan.needs_live,
-            },
-        )
-
-        await journal.set_state(RunState.BUILD_CONTEXT)
-        specs = self.registry.advertise()
-        assembled = self.context.assemble(
-            user_input, bundle, specs,
-            live_note=LIVE_NOTE if plan.needs_live else None,
-            history=history,
-        )
-        messages = list(assembled.messages)
-        await journal.event(
-            "context",
-            {
-                "included": assembled.included,
-                "dropped": assembled.dropped,
-                "est_tokens": assembled.est_tokens,
-                "conflicts": len(assembled.conflicts),
-            },
-        )
-
-        max_iter = self.settings.runtime.max_iterations
-        budget = self.settings.runtime.token_budget_per_run
-        tokens_used = 0
-        tool_calls = 0
-        final_text = ""
-        iteration = 0
-
-        while iteration < max_iter and tokens_used < budget:
-            await journal.set_state(RunState.REASON_PLAN, iteration=iteration)
-            started = self.clock.now()
-            res = await self.provider.chat(messages, tools=specs or None, options=_VOICE)
-            latency = int((self.clock.now() - started).total_seconds() * 1000)
-            tokens_used += res.tokens_in + res.tokens_out
-            await journal.event(
-                "llm_call",
-                {"model": res.model, "tool_calls": len(res.tool_calls)},
-                latency_ms=latency, tokens_in=res.tokens_in, tokens_out=res.tokens_out,
-            )
-            if not res.tool_calls:
-                final_text = res.content
-                break
-            messages.append(
-                ChatMessage(role="assistant", content=res.content, tool_calls=res.tool_calls)
-            )
-            for call in res.tool_calls:
-                tool_calls += 1
-                messages.append(await self._handle_tool(conn, journal, grants, call))
-            iteration += 1
-        else:
-            # Ran long — don't dead-end with a robotic message; let Sali wrap up in its own voice.
-            if not final_text:
-                messages.append(
-                    ChatMessage(
-                        role="user",
-                        content="(You've done plenty here — wrap up now in your own words, no more tools.)",
-                    )
-                )
-                closing = await self.provider.chat(messages, options=_VOICE)
-                final_text = closing.content.strip() or "Let me stop here for now."
-
-        await journal.set_state(RunState.LEARN)
-        async with self.pool.acquire() as learn_conn:
-            await observe(
-                learn_conn,
-                kind="turn",
-                content=user_input,
-                source=MemorySource.CONVERSATION,
-                session_id=session_id,
-            )
-
-        await journal.set_state(RunState.RESPOND)
-        await journal.event("respond", {"chars": len(final_text)})
-        return AgentResult(
-            run_id=journal.run_id, text=final_text, iterations=iteration, tool_calls=tool_calls
-        )
 
     async def _handle_tool(
         self, conn: Any, journal: RunJournal, grants: SessionGrants, call: ToolCall
