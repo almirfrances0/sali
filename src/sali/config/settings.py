@@ -109,6 +109,16 @@ def _default_fs_deny() -> list[str]:
     ]
 
 
+def _default_fs_readonly() -> list[str]:
+    # Sali may READ its own installation — inspect its code, understand itself (sali3 §15) — but must
+    # not write, move, rename, or delete it, so it can never corrupt its own runtime (sali3 §14).
+    return [str(Path(__file__).resolve().parents[3])]  # the repo root, e.g. ~/Desktop/sali
+
+
+def _default_workspace() -> str:
+    return str(Path.home() / "Desktop" / "sali-works")
+
+
 class PermissionsSettings(BaseModel):
     # The whole machine is open to Sali: it can read and create files anywhere. The real guards
     # are the OS's own permissions (it runs as Almir, not root), the small fs_deny set below, and
@@ -116,6 +126,11 @@ class PermissionsSettings(BaseModel):
     fs_read_roots: list[str] = Field(default_factory=lambda: ["/"])
     fs_write_roots: list[str] = Field(default_factory=lambda: ["/"])
     fs_deny: list[str] = Field(default_factory=_default_fs_deny)
+    # Readable but NEVER writable — Sali's own installation (sali3 §14-17): self-inspection without
+    # self-corruption. A write/delete under one of these is refused before it even reaches the tool.
+    fs_readonly: list[str] = Field(default_factory=_default_fs_readonly)
+    # Sali's own working area (sali3 §13): full, unconfirmed CRUD lives here.
+    workspace: str = Field(default_factory=_default_workspace)
     exec_cwd: str = Field(default_factory=lambda: str(Path.home()))
     exec_allow_network: bool = True  # Sali runs freely, including networked commands (installs)
     jail_learning: bool = True  # an isolated sandbox is available for learning-time experiments

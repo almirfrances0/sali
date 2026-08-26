@@ -44,6 +44,34 @@ def test_pathguard_confines_and_denies(tmp_path: Path) -> None:
     assert guard.check_write(tmp_path / "repo" / ".git" / "config")
 
 
+def test_pathguard_protects_salis_own_install_but_allows_reading_it(tmp_path: Path) -> None:
+    # sali3 §14-17: Sali can READ its own installation (self-inspection) but never write/delete it.
+    install = tmp_path / "sali"
+    install.mkdir()
+    (install / "kernel.py").write_text("# sali core")
+    works = tmp_path / "sali-works"
+    works.mkdir()
+    guard = PathGuard(PermissionsSettings(
+        fs_read_roots=[str(tmp_path)], fs_write_roots=[str(tmp_path)],
+        fs_readonly=[str(install)], workspace=str(works)))
+
+    assert guard.check_read(install / "kernel.py")  # inspect itself — allowed
+    with pytest.raises(PathViolation):
+        guard.check_write(install / "kernel.py")  # modify its runtime — denied
+    with pytest.raises(PathViolation):
+        guard.check_write(install / "new.py")  # create inside the install — denied too
+    assert guard.check_write(works / "scratch.txt")  # its workspace — free
+
+
+def test_workspace_deletes_run_free_but_system_deletes_confirm() -> None:
+    # sali3 §17,19: deleting in sali-works is ordinary (R1); deleting outside self-escalates to R4.
+    from pathlib import Path as _P
+
+    works = _P.home() / "Desktop" / "sali-works"
+    assert DeleteFile().assess({"path": str(works / "junk.log")}) is RiskLevel.R1
+    assert DeleteFile().assess({"path": "/etc/hosts"}) is RiskLevel.R4  # system path → confirm
+
+
 # ---- filesystem tools -----------------------------------------------------------------
 async def test_create_read_modify_delete_within_root(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)

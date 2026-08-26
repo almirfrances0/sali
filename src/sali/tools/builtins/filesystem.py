@@ -234,7 +234,12 @@ class DeleteFile(Tool):
             target = str(Path(str(args.get("path", ""))).expanduser().resolve())
         except (OSError, ValueError, RuntimeError):
             return RiskLevel.R4  # can't resolve → treat as risky, pause to confirm
-        scratch = ("/tmp/", "/var/tmp/", str(Path.home() / ".local" / "share" / "sali" / "workspace"))
+        # Free-to-delete zones (no confirm): scratch dirs + Sali's own workspace (sali3 §13,17).
+        scratch = (
+            "/tmp/", "/var/tmp/",
+            str(Path.home() / ".local" / "share" / "sali" / "workspace") + "/",
+            str(Path.home() / "Desktop" / "sali-works") + "/",
+        )
         return RiskLevel.R1 if any(target.startswith(s) for s in scratch) else RiskLevel.R4
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:

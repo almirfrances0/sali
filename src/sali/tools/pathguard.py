@@ -31,11 +31,16 @@ class PathGuard:
         self.read_roots = [_resolve(p) for p in perms.fs_read_roots]
         self.write_roots = [_resolve(p) for p in perms.fs_write_roots]
         self.deny = [_resolve(p) for p in perms.fs_deny]
+        self.readonly = [_resolve(p) for p in perms.fs_readonly]
 
     def _check(self, path: str | Path, roots: list[Path], mode: str) -> Path:
         resolved = _resolve(path)
         if _under(resolved, self.deny):
             raise PathViolation(f"{mode} denied: {resolved} is under a protected path")
+        if mode == "write" and _under(resolved, self.readonly):
+            raise PathViolation(
+                f"write denied: {resolved} is inside Sali's own installation (read-only — Sali can "
+                "inspect its code but not modify its runtime)")
         if not _under(resolved, roots):
             raise PathViolation(f"{mode} denied: {resolved} is outside the allowed roots")
         return resolved
@@ -44,6 +49,6 @@ class PathGuard:
         return self._check(path, self.read_roots, "read")
 
     def check_write(self, path: str | Path) -> Path:
-        # Sali writes freely in its home (including its own repos); only fs_deny (credentials,
-        # the separate salix project) is off-limits, enforced in _check.
+        # Sali writes freely in its home (including its own repos); off-limits are fs_deny
+        # (credentials, salix) and fs_readonly (its own installation) — both enforced in _check.
         return self._check(path, self.write_roots, "write")
