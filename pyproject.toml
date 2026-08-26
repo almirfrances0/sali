@@ -24,6 +24,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "websockets>=13",
+    "cryptography>=44",  # encrypted secret vault (sali3 §27-29)
 ]
 
 [project.optional-dependencies]
@@ -80,7 +81,7 @@ exclude = "src/sali/perception/_atspi_probe\\.py"
 # treated as untyped so type-checking passes whether or not the extra is installed.
 module = [
     "asyncpg.*", "ollama.*", "jsonschema.*", "uvicorn.*", "websockets.*",
-    "pypdf.*", "icalendar.*", "playwright.*", "keyring.*",
+    "pypdf.*", "icalendar.*", "playwright.*", "keyring.*", "cryptography.*",
 ]
 ignore_missing_imports = true
 

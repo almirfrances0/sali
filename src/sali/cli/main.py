@@ -31,25 +31,64 @@ app.add_typer(secrets_cli, name="secrets")
 
 @secrets_cli.command("set")
 def secrets_set(ref: str) -> None:
-    """Store a secret (e.g. 'mail.personal.password') into ~/.config/sali/secrets.toml (0600)."""
+    """Store a secret (e.g. 'mail.personal.password'), ENCRYPTED at rest in ~/.config/sali/vault.json."""
     from sali.config.secrets import SecretStore
+    from sali.config.vault import VaultError
 
     value = typer.prompt(f"value for {ref}", hide_input=True)
-    SecretStore().set(ref, value)
-    console.print(f"[green]stored[/] {ref} [dim](value not shown; file is 0600, never in the DB)[/]")
+    try:
+        SecretStore().set(ref, value)
+    except VaultError as exc:
+        raise typer.BadParameter(f"vault refused the write (no secret was lost): {exc}") from exc
+    console.print(f"[green]stored[/] {ref} [dim](encrypted at rest; value never shown, never in the DB)[/]")
 
 
 @secrets_cli.command("list")
 def secrets_list() -> None:
     """List the secret NAMES that are configured (never the values)."""
     from sali.config.secrets import SecretStore
+    from sali.config.vault import VaultError
 
-    refs = SecretStore().refs()
+    try:
+        refs = SecretStore().refs()
+    except VaultError as exc:
+        raise typer.BadParameter(f"vault is unreadable: {exc}") from exc
     if not refs:
         console.print("[dim]No secrets set.[/]")
         return
     for ref in refs:
         console.print(f"• {ref}")
+
+
+@secrets_cli.command("rm")
+def secrets_rm(ref: str) -> None:
+    """Delete a secret from the encrypted vault."""
+    from sali.config.secrets import SecretStore
+    from sali.config.vault import VaultError
+
+    try:
+        removed = SecretStore().delete(ref)
+    except VaultError as exc:
+        raise typer.BadParameter(f"vault refused the delete (no secret was lost): {exc}") from exc
+    console.print(f"[green]removed[/] {ref}" if removed else f"[yellow]not in the vault:[/] {ref}")
+
+
+@secrets_cli.command("migrate")
+def secrets_migrate() -> None:
+    """Move legacy plaintext secrets (~/.config/sali/secrets.toml) into the encrypted vault."""
+    from sali.config.secrets import SecretStore
+    from sali.config.vault import VaultError
+
+    try:
+        migrated = SecretStore().migrate_legacy()
+    except VaultError as exc:
+        raise typer.BadParameter(f"vault refused the migration (no secret was lost): {exc}") from exc
+    if not migrated:
+        console.print("[dim]Nothing to migrate (no legacy plaintext secrets, or all already in the vault).[/]")
+        return
+    for ref in migrated:
+        console.print(f"[green]encrypted[/] {ref}")
+    console.print("[dim]Verify with `sali secrets list`, then delete ~/.config/sali/secrets.toml.[/]")
 
 
 @app.command()

@@ -6,7 +6,7 @@ from typing import Any
 
 from sali.core.enums import Capability, RiskLevel
 from sali.security.policy import Action, PolicyEngine, SessionGrants
-from sali.security.redact import redact, redact_obj
+from sali.security.redact import looks_like_secret, redact, redact_obj
 from sali.tools.base import Tool, ToolResult
 from sali.tools.builtins.system import MemoryInfo
 
@@ -95,3 +95,11 @@ def test_redaction_leaves_benign_attached_flags_alone() -> None:
     # Command-anchored patterns must NOT eat innocent flags — those stay legible in logs.
     for benign in ("tar -pxzf archive.tar", "mkdir -p /tmp/sali", "ps aux -p 1234", "grep -n foo"):
         assert redact(benign) == benign
+
+
+def test_looks_like_secret_detects_and_ignores() -> None:
+    assert looks_like_secret("token=ghp_" + "a" * 30)
+    assert looks_like_secret("reach me at almir@example.com")
+    assert looks_like_secret("mysql -phunter2 db")
+    assert not looks_like_secret("just an ordinary note about the project")
+    assert not looks_like_secret("mkdir -p /tmp/sali")

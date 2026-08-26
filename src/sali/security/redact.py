@@ -29,6 +29,13 @@ def redact(text: str) -> str:
     return text
 
 
+def looks_like_secret(text: str) -> bool:
+    """True if `text` contains something the redactor recognizes as a secret (§28 secret detection).
+    Cheap and conservative — the same patterns redact() scrubs — for guarding a write ("that looks
+    like a credential; store it in the vault, don't put it in memory") before anything is persisted."""
+    return redact(text) != text
+
+
 def redact_obj(obj: Any) -> Any:
     """Recursively redact strings inside dicts/lists; also masks keys named like secrets."""
     if isinstance(obj, str):

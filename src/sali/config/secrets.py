@@ -3,9 +3,10 @@
 Secrets (SSH is delegated to ssh-agent; this is for email/CalDAV app-passwords, site logins) are
 referenced by a dotted key like "mail.personal.password". Resolution order:
   1. env  SALI_SECRET__<KEY>   (KEY = ref upper-cased, '.'→'_' — matches the SALI_ settings convention)
-  2. ~/.config/sali/secrets.toml   (flat quoted keys; REFUSED unless 0600, so an app-password can't
-     sit group/other-readable)
-  3. the OS keyring, if the optional `keyring` package is importable.
+  2. the ENCRYPTED VAULT (~/.config/sali/vault.json) — where `set()` now writes, encrypted at rest.
+  3. ~/.config/sali/secrets.toml   (legacy PLAINTEXT, read-only fallback; REFUSED unless 0600). Move
+     it into the vault with `sali secrets migrate`, then delete it.
+  4. the OS keyring, if the optional `keyring` package is importable.
 The value is never logged, never persisted to the DB, and redact_obj already masks it at every
 boundary. Postgres holds only non-secret inventory plus the ref name (a pointer), never the value.
 """
@@ -17,6 +18,8 @@ import os
 import stat
 import tomllib
 from pathlib import Path
+
+from sali.config.vault import Vault
 
 log = logging.getLogger("sali.secrets")
 
@@ -41,16 +44,21 @@ def _env_key(ref: str) -> str:
 
 
 class SecretStore:
-    """Resolves secrets from env → 0600 secrets.toml → keyring. Constructed once and shared."""
+    """Resolves secrets from env → encrypted vault → legacy plaintext → keyring. `set()` writes to
+    the encrypted vault. Constructed once and shared; inject a `vault` in tests for isolation."""
 
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(self, path: Path | None = None, vault: Vault | None = None) -> None:
         self._path = path or _SECRETS_PATH
+        self._vault = vault if vault is not None else Vault()
 
     def get(self, ref: str) -> str | None:
         env = os.environ.get(_ENV_PREFIX + _env_key(ref))
         if env is not None:
             return env
-        from_file = self._from_file(ref)
+        from_vault = self._vault.get(ref)
+        if from_vault is not None:
+            return from_vault
+        from_file = self._from_file(ref)  # legacy plaintext, read-only fallback
         if from_file is not None:
             return from_file
         return self._from_keyring(ref)
@@ -65,19 +73,27 @@ class SecretStore:
         return self.get(ref) is not None
 
     def set(self, ref: str, value: str) -> None:
-        """Write a secret into ~/.config/sali/secrets.toml with 0600 (dir 0700). CLI use only."""
-        self._path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        data = self._load_file() or {}
-        data[ref] = value
-        body = "".join(f'"{k}" = "{_toml_escape(str(v))}"\n' for k, v in sorted(data.items()))
-        fd = os.open(self._path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(body)
-        os.chmod(self._path, 0o600)  # in case the file pre-existed with looser perms
+        """Store a secret ENCRYPTED at rest in the vault (~/.config/sali/vault.json). CLI use only."""
+        self._vault.set(ref, value)
+
+    def delete(self, ref: str) -> bool:
+        """Remove a secret from the vault. Returns False if it wasn't there."""
+        return self._vault.delete(ref)
 
     def refs(self) -> list[str]:
-        """The ref NAMES configured in the file (never values) — for `sali secrets list`."""
-        return sorted((self._load_file() or {}).keys())
+        """The ref NAMES configured (never values) — vault + any legacy plaintext, for `secrets list`."""
+        legacy = set((self._load_file() or {}).keys())
+        return sorted(set(self._vault.refs()) | legacy)
+
+    def migrate_legacy(self) -> list[str]:
+        """Move any legacy plaintext secrets into the encrypted vault (skipping refs already there).
+        Returns the refs migrated. Leaves the plaintext file untouched — verify, then delete it."""
+        migrated = []
+        for ref, value in (self._load_file() or {}).items():
+            if not self._vault.has(ref):
+                self._vault.set(ref, str(value))
+                migrated.append(ref)
+        return sorted(migrated)
 
     def _from_file(self, ref: str) -> str | None:
         data = self._load_file()
@@ -137,6 +153,5 @@ class FakeSecretStore:
     def refs(self) -> list[str]:
         return sorted(self._secrets.keys())
 
-
-def _toml_escape(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    def delete(self, ref: str) -> bool:
+        return self._secrets.pop(ref, None) is not None
