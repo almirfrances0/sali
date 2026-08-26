@@ -13,10 +13,15 @@ from sali.core.enums import MemoryLayer, MemorySource
 from sali.memory import writer as memory_writer
 
 
+def _command_of(plan: Any) -> str | None:
+    return (plan.get("args") or {}).get("command") if isinstance(plan, dict) else None
+
+
 async def record_failures(conn: Any, *, limit: int = 50) -> int:
-    """Record recent verified failures not yet captured. Caller owns the transaction."""
+    """Record recent verified failures not yet captured — and, when a later step in the same run
+    fixed it, the correction too (§18's diagnosis→correction). Caller owns the transaction."""
     rows = await conn.fetch(
-        "SELECT te.id, te.tool_name, te.error, te.plan, r.user_input "
+        "SELECT te.id, te.run_id, te.tool_name, te.error, te.plan, te.started_at, r.user_input "
         "FROM tool_execution te LEFT JOIN agent_runs r ON r.run_id = te.run_id "
         "WHERE te.status = 'verified_failure' AND NOT EXISTS ("
         "  SELECT 1 FROM memory m WHERE m.claim_key = 'failure:' || te.id::text "
@@ -26,16 +31,26 @@ async def record_failures(conn: Any, *, limit: int = 50) -> int:
     )
     count = 0
     for row in rows:
-        plan = row["plan"] or {}
-        command = (plan.get("args") or {}).get("command") if isinstance(plan, dict) else None
+        command = _command_of(row["plan"])
+        # The correction: the next successful call of the same tool later in the same run.
+        fix = await conn.fetchrow(
+            "SELECT plan FROM tool_execution WHERE run_id=$1 AND tool_name=$2 "
+            "  AND status='verified_success' AND started_at > $3 ORDER BY started_at LIMIT 1",
+            row["run_id"], row["tool_name"], row["started_at"],
+        )
+        fix_command = _command_of(fix["plan"]) if fix else None
+
         doing = f" running `{command}`" if command else ""
         because = f" — {row['error'][:200]}" if row["error"] else ""
         task = f" (task: {row['user_input'][:120]})" if row["user_input"] else ""
         content = f"A past attempt failed: the {row['tool_name']} tool{doing} failed{because}.{task}"
+        learned_fix = bool(fix_command and fix_command != command)
+        if learned_fix:
+            content += f" What fixed it: `{fix_command}`."
         await memory_writer.remember(
             conn, layer=MemoryLayer.EPISODIC, content=content,
             source=MemorySource.SYSTEM_OBSERVATION, functional=True,
-            claim_key=f"failure:{row['id']}", importance=0.5, obs_conf=1.0,
+            claim_key=f"failure:{row['id']}", importance=0.6 if learned_fix else 0.5, obs_conf=1.0,
         )
         count += 1
     return count

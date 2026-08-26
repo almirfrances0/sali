@@ -171,6 +171,22 @@ async def test_daemon_surfaces_only_meaningful_changes() -> None:
     assert changes == [["software:htop"]]  # the no-change cycle did NOT fire on_change
 
 
+async def test_daemon_on_tick_fires_every_cycle() -> None:
+    from uuid import uuid4
+
+    from sali.twin.daemon import TwinDaemon
+    from sali.twin.sync import SyncResult
+
+    stub = _StubService([SyncResult(uuid4(), 1, [], []), SyncResult(uuid4(), 1, [], [])])
+    ticks: list[int] = []
+
+    async def on_tick(cycle: int) -> None:
+        ticks.append(cycle)
+
+    await TwinDaemon(stub, interval=0.01).run(max_cycles=2, on_tick=on_tick)
+    assert ticks == [1, 2]  # learning piggybacks on this — one call per observe cycle
+
+
 async def test_daemon_survives_a_failing_cycle() -> None:
     from uuid import uuid4
 

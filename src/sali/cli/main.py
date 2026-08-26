@@ -478,7 +478,11 @@ async def _learn(settings: Settings) -> None:
                               + " → ".join(p.steps))
         if result.failures_recorded:
             console.print(f"[yellow]Noted {result.failures_recorded} past failure(s)[/] to learn from.")
-        if not result.procedures and not result.failures_recorded:
+        if result.episodes_created:
+            console.print("[green]Folded recent activity into an episode.[/]")
+        if result.stm_pruned:
+            console.print(f"[dim]Pruned {result.stm_pruned} stale short-term observation(s).[/]")
+        if not result.did_something:
             console.print("[dim]Nothing new to consolidate — Sali learns from repeated activity.[/]")
     finally:
         await pool.close()
@@ -646,8 +650,15 @@ def observe(
     asyncio.run(_observe(settings, interval))
 
 
+# How often (in observe cycles) the background service also consolidates learning. Learning is
+# heavier (a model call), so it runs far less often than observation.
+_LEARN_EVERY = 10
+
+
 async def _observe(settings: Settings, interval: int) -> None:
     from sali.db.pool import create_pool
+    from sali.learning.service import LearningService
+    from sali.provider.registry import build_provider
     from sali.twin.daemon import TwinDaemon
 
     pool = await create_pool(settings)
@@ -655,6 +666,7 @@ async def _observe(settings: Settings, interval: int) -> None:
         _twin_service(pool, settings), interval=float(interval),
         exclude_projects=tuple(settings.permissions.fs_deny),
     )
+    learning = LearningService(pool, build_provider(settings))
 
     async def on_change(result: Any) -> None:
         for key in result.added:
@@ -662,10 +674,22 @@ async def _observe(settings: Settings, interval: int) -> None:
         for key in result.removed:
             console.print(f"[yellow]  - {key}[/]")
 
-    console.print(f"[dim]watching the machine every {interval}s — Ctrl-C to stop[/]")
+    async def on_tick(cycle: int) -> None:
+        if cycle % _LEARN_EVERY != 0:
+            return
+        result = await learning.consolidate()  # §17-19: procedures, failures, episodes
+        for proc in result.procedures:
+            console.print(f"[magenta]  learned procedure:[/] {proc.name} ([dim]{proc.evidence}×[/])")
+        if result.failures_recorded:
+            console.print(f"[dim]  noted {result.failures_recorded} past failure(s)[/]")
+        if result.episodes_created:
+            console.print("[dim]  folded recent activity into an episode[/]")
+
+    every = interval * _LEARN_EVERY
+    console.print(f"[dim]watching every {interval}s, learning every ~{every}s — Ctrl-C to stop[/]")
     stop = asyncio.Event()
     try:
-        await daemon.run(stop=stop, on_change=on_change)
+        await daemon.run(stop=stop, on_change=on_change, on_tick=on_tick)
     except (KeyboardInterrupt, asyncio.CancelledError):
         stop.set()
     finally:

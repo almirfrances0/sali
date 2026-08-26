@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 
+from sali.learning.episodes import consolidate_stm, prune_stm
 from sali.learning.failures import record_failures
 from sali.learning.mining import normalize_command, sequences_by_run, signature
 from sali.learning.procedures import learn_procedures
@@ -95,3 +96,54 @@ async def test_records_failures_and_does_not_duplicate(db_conn: Any) -> None:
     assert "docker compose up" in row["content"] and "health check" in row["content"]
     assert "deploy the app" in row["content"]  # carries the objective for future retrieval
     assert await record_failures(db_conn) == 0  # idempotent — the same failure isn't re-recorded
+
+
+async def test_failure_records_the_fix_when_a_later_step_succeeded(db_conn: Any) -> None:
+    run = uuid4()
+    base = datetime(2026, 2, 1, tzinfo=UTC)
+    await db_conn.execute(
+        "INSERT INTO tool_execution (run_id,tool_name,status,danger_level,plan,success,error,started_at) "
+        "VALUES ($1,'execute_command','verified_failure'::tool_status,0,$2,false,'missing env var',$3)",
+        run, {"args": {"command": "docker compose up -d"}}, base,
+    )
+    await db_conn.execute(
+        "INSERT INTO tool_execution (run_id,tool_name,status,danger_level,plan,success,started_at) "
+        "VALUES ($1,'execute_command','verified_success'::tool_status,0,$2,true,$3)",
+        run, {"args": {"command": "docker compose --env-file .env up -d"}}, base + timedelta(seconds=5),
+    )
+    assert await record_failures(db_conn) == 1
+    row = await db_conn.fetchrow(
+        "SELECT content FROM memory WHERE layer='episodic' AND claim_key LIKE 'failure:%' "
+        "AND valid_until IS NULL"
+    )
+    assert "What fixed it" in row["content"] and "--env-file" in row["content"]  # §18 correction
+
+
+async def test_consolidate_stm_folds_into_one_episode_and_clears_raw(db_conn: Any) -> None:
+    for i in range(6):
+        await db_conn.execute(
+            "INSERT INTO stm_observation (kind, content, source) "
+            "VALUES ('turn',$1,'conversation'::memory_source)", f"Almir asked about topic {i}",
+        )
+    fake = FakeModelProvider(responses=[ChatResult("Almir explored a few topics.", None, [], 3, 3, "fake")])
+    assert await consolidate_stm(db_conn, fake, min_obs=5) == 1
+    ep = await db_conn.fetchrow(
+        "SELECT content FROM memory WHERE layer='episodic' AND valid_until IS NULL "
+        "ORDER BY created_at DESC LIMIT 1"
+    )
+    assert "explored a few topics" in ep["content"]
+    live = await db_conn.fetchval("SELECT count(*) FROM stm_observation WHERE expires_at > now()")
+    assert live == 0  # the raw observations were folded away
+
+
+async def test_consolidate_stm_skips_below_threshold_and_prune_drops_expired(db_conn: Any) -> None:
+    await db_conn.execute(
+        "INSERT INTO stm_observation (kind, content, source) "
+        "VALUES ('turn','just one','conversation'::memory_source)"
+    )
+    assert await consolidate_stm(db_conn, FakeModelProvider(), min_obs=5) == 0  # too few → no episode
+    await db_conn.execute(
+        "INSERT INTO stm_observation (kind, content, source, expires_at) "
+        "VALUES ('turn','stale','conversation'::memory_source, now() - interval '1 hour')"
+    )
+    assert await prune_stm(db_conn) == 1  # only the expired one is dropped

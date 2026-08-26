@@ -54,16 +54,20 @@ class TwinDaemon:
 
     async def run(
         self, *, stop: asyncio.Event | None = None, max_cycles: int | None = None,
-        on_change: OnChange | None = None,
+        on_change: OnChange | None = None, on_tick: Callable[[int], Awaitable[None]] | None = None,
     ) -> int:
         """Loop until ``stop`` is set (or ``max_cycles`` reached). A failing cycle is logged and
-        skipped — a transient observation error never kills the watcher. Returns cycles run."""
+        skipped — a transient observation error never kills the watcher. Returns cycles run.
+        ``on_tick`` fires every cycle (with the cycle number) — used to piggyback periodic work
+        like learning consolidation on the same background service."""
         stop = stop or asyncio.Event()
         while not stop.is_set():
             try:
                 result = await self.tick()
                 if (result.added or result.removed) and on_change is not None:
                     await on_change(result)
+                if on_tick is not None:
+                    await on_tick(self.cycles)
             except Exception as exc:  # noqa: BLE001 - a bad cycle must not stop the watcher
                 log.warning("twin_tick_failed", error=str(exc))
             if max_cycles is not None and self.cycles >= max_cycles:

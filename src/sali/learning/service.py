@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from sali.learning.episodes import consolidate_stm, prune_stm
 from sali.learning.failures import record_failures
 from sali.learning.model import ConsolidationResult
 from sali.learning.procedures import learn_procedures
@@ -26,18 +27,25 @@ class LearningService:
         self.provider = provider
 
     async def consolidate(self, *, threshold: int = 2) -> ConsolidationResult:
-        """One consolidation pass: learn procedures (evidence-gated) + record failures, then embed."""
+        """One consolidation pass (§17-19): learn procedures (evidence-gated), record failures +
+        their fixes, fold short-term observations into an episode, prune stale raw — then embed."""
         async with self.pool.acquire() as conn, conn.transaction():
             procedures = await learn_procedures(conn, self.provider, threshold=threshold)
             failures = await record_failures(conn)
+            episodes = await consolidate_stm(conn, self.provider)
+            pruned = await prune_stm(conn)
             for proc in procedures:
                 await _emit(conn, "learning.procedure",
                             {"name": proc.name, "evidence": proc.evidence})
             if failures:
                 await _emit(conn, "learning.failure", {"count": failures})
+            if episodes:
+                await _emit(conn, "learning.episode", {"count": episodes})
         await embed_worker.embed_pending(self.pool, self.provider)  # make the new memories usable
-        log.info("consolidated", procedures=len(procedures), failures=failures)
-        return ConsolidationResult(procedures=procedures, failures_recorded=failures)
+        log.info("consolidated", procedures=len(procedures), failures=failures,
+                 episodes=episodes, pruned=pruned)
+        return ConsolidationResult(procedures=procedures, failures_recorded=failures,
+                                   episodes_created=episodes, stm_pruned=pruned)
 
     async def procedures(self) -> list[dict[str, Any]]:
         """The procedures Sali has learned so far (most-evidenced first)."""

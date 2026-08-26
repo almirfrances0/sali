@@ -23,3 +23,9 @@ class ConsolidationResult:
 
     procedures: list[LearnedProcedure] = field(default_factory=list)
     failures_recorded: int = 0
+    episodes_created: int = 0
+    stm_pruned: int = 0
+
+    @property
+    def did_something(self) -> bool:
+        return bool(self.procedures or self.failures_recorded or self.episodes_created)
