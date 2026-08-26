@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from sali.twin.memories import build_twin_memories, write_twin_memories
 from sali.twin.model import TwinEntity, TwinSnapshot
 from sali.twin.observers import observe_cpu, observe_machine, observe_memory
 from sali.twin.service import TwinService
@@ -81,6 +82,32 @@ async def test_sync_populates_graph_and_diffs_changes(db_conn: Any) -> None:
         "SELECT count(*) FROM event WHERE event_type='twin.entity_removed'"
     )
     assert added_events == 1 and removed_events == 1
+
+
+def test_build_twin_memories_covers_facets() -> None:
+    snap = _snap([
+        TwinEntity("hardware", "hw:cpu", "i9-11900K", {}, "has"),
+        TwinEntity("hardware", "hw:gpu", "RTX 4070", {}, "has"),
+        TwinEntity("software", "software:ollama", "Ollama 0.32", {}, "runs"),
+        TwinEntity("model", "model:sali:latest", "sali:latest", {}, "has_model"),
+        TwinEntity("project", "project:sali", "sali", {"path": "/home/almir/Desktop/sali"}, "hosts"),
+    ])
+    mems = dict(build_twin_memories(snap))
+    assert "RTX 4070" in mems["twin:machine"] and "i9-11900K" in mems["twin:machine"]
+    assert "Ollama 0.32" in mems["twin:software"]
+    assert "sali:latest" in mems["twin:models"]
+    assert "/home/almir/Desktop/sali" in mems["twin:projects"]
+
+
+async def test_twin_memories_are_functional_and_stay_current(db_conn: Any) -> None:
+    # Re-observation supersedes the prior value (functional claim) — no duplicate pile-up.
+    await write_twin_memories(db_conn, _snap([TwinEntity("hardware", "hw:gpu", "RTX 4070", {}, "has")]))
+    await write_twin_memories(db_conn, _snap([TwinEntity("hardware", "hw:gpu", "RTX 5090", {}, "has")]))
+    rows = await db_conn.fetch(
+        "SELECT content FROM memory WHERE claim_key='twin:machine' AND valid_until IS NULL"
+    )
+    assert len(rows) == 1  # exactly one current machine fact
+    assert "RTX 5090" in rows[0]["content"] and "RTX 4070" not in rows[0]["content"]
 
 
 async def test_tree_renders_structure(live_pool: Any) -> None:

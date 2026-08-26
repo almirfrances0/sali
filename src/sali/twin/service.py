@@ -8,11 +8,15 @@ Models / Projects under the machine.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sali.obs.log import get_logger
+from sali.twin.memories import write_twin_memories
 from sali.twin.observers import build_snapshot
 from sali.twin.sync import SyncResult, sync_snapshot
+
+if TYPE_CHECKING:
+    from sali.memory.service import MemoryService
 
 log = get_logger("sali.twin.service")
 
@@ -28,14 +32,21 @@ _GROUPS: tuple[tuple[str, str], ...] = (
 
 
 class TwinService:
-    def __init__(self, pool: Any) -> None:
+    def __init__(self, pool: Any, memory: MemoryService | None = None) -> None:
         self.pool = pool
+        self.memory = memory  # when given, refresh also writes+embeds system-env memories
 
     async def refresh(self, *, exclude_projects: tuple[str, ...] = ()) -> SyncResult:
-        """Observe the machine and reconcile the snapshot into the graph (one transaction)."""
+        """Observe the machine, reconcile the snapshot into the graph, and (if a memory service
+        is wired) record the same facts as retrievable system-env memories — one transaction for
+        the writes, then embedding so the agent can ground machine questions from the twin."""
         snapshot = await build_snapshot(exclude_projects=exclude_projects)
         async with self.pool.acquire() as conn, conn.transaction():
             result = await sync_snapshot(conn, snapshot)
+            if self.memory is not None:
+                await write_twin_memories(conn, snapshot)
+        if self.memory is not None:
+            await self.memory.embed_pending()  # make the new/updated facts searchable
         log.info("twin_refreshed", entities=result.entities,
                  added=len(result.added), removed=len(result.removed))
         return result

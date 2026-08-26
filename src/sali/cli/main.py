@@ -442,10 +442,15 @@ def twin(
 
 async def _twin(settings: Settings, refresh: bool) -> None:
     from sali.db.pool import create_pool
+    from sali.memory.service import MemoryService
+    from sali.provider.registry import build_provider
     from sali.twin.service import TwinService
 
     pool = await create_pool(settings)
-    service = TwinService(pool)
+    # A memory service so a refresh also records the machine as retrievable system-env facts,
+    # letting the agent ground "what GPU / how much RAM / what's installed" from the twin.
+    memory = MemoryService(pool, build_provider(settings))
+    service = TwinService(pool, memory=memory)
     try:
         if refresh:
             with console.status("[cyan]observing the machine…[/]"):
