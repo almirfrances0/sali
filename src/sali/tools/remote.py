@@ -12,11 +12,21 @@ password passed inline once is persisted to the vault so the next login just wor
 from __future__ import annotations
 
 import contextlib
+import os
 import re
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from sali.tools.exec import CommandTimeout, minimal_env, run_argv
+
+
+def _ssh_env() -> dict[str, str]:
+    # The scrubbed env PLUS the agent socket, so ssh-agent keys work (minimal_env drops it otherwise).
+    env = dict(minimal_env())
+    sock = os.environ.get("SSH_AUTH_SOCK")
+    if sock:
+        env["SSH_AUTH_SOCK"] = sock
+    return env
 
 # ssh's own failure (connection refused, auth denied, CHANGED host key) is rc 255 — distinct from the
 # remote command's exit code, which may be non-zero for ordinary reasons (grep found nothing, etc.).
@@ -70,48 +80,62 @@ class RemoteRunner(Protocol):
 
 
 class SshRunner:
-    """Drives /usr/bin/ssh and /usr/bin/scp. Key auth by default; for password hosts it resolves the
-    password from the encrypted vault (or persists one passed inline) and feeds `sshpass -e`."""
+    """Drives /usr/bin/ssh and /usr/bin/scp. Key auth by default (ssh-agent + ~/.ssh); for password
+    hosts it resolves the password from the encrypted vault (or persists one that just authenticated)
+    and feeds `sshpass -e`. The single-operation cap comes from settings (`ssh.command_timeout`)."""
 
-    def __init__(self, connect_timeout: int = 10, secrets: SecretResolver | None = None) -> None:
+    def __init__(self, connect_timeout: int = 10, command_timeout: float = 120.0,
+                 secrets: SecretResolver | None = None) -> None:
         self._connect_timeout = connect_timeout
+        self._command_timeout = command_timeout
         self._secrets = secrets
 
-    async def run(self, host: str, command: str, *, timeout: float = 60.0,
+    async def run(self, host: str, command: str, *, timeout: float | None = None,
                   password: str | None = None) -> RemoteResult:
-        pw = self._password(host, password)
+        pw = self._resolve(host, password)
         if pw is not None:
             argv = ["sshpass", "-e", "ssh", *_pw_opts(self._connect_timeout), host, command]
-            return await self._exec(host, argv, timeout, env={**minimal_env(), "SSHPASS": pw})
-        argv = ["ssh", *_ssh_opts(self._connect_timeout), host, command]
-        return await self._exec(host, argv, timeout)
+            res = await self._exec(host, argv, timeout, env={**_ssh_env(), "SSHPASS": pw})
+        else:
+            argv = ["ssh", *_ssh_opts(self._connect_timeout), host, command]
+            res = await self._exec(host, argv, timeout, env=_ssh_env())
+        self._persist(host, password, res)
+        return res
 
-    async def put(self, host: str, local: str, remote: str, *, timeout: float = 120.0,
+    async def put(self, host: str, local: str, remote: str, *, timeout: float | None = None,
                   password: str | None = None) -> RemoteResult:
-        pw = self._password(host, password)
+        pw = self._resolve(host, password)
+        cap = timeout if timeout is not None else max(self._command_timeout, 300.0)  # files take longer
         if pw is not None:
             argv = ["sshpass", "-e", "scp", *_pw_opts(self._connect_timeout), local, f"{host}:{remote}"]
-            return await self._exec(host, argv, timeout, env={**minimal_env(), "SSHPASS": pw})
-        argv = ["scp", *_ssh_opts(self._connect_timeout), local, f"{host}:{remote}"]
-        return await self._exec(host, argv, timeout)
+            res = await self._exec(host, argv, cap, env={**_ssh_env(), "SSHPASS": pw})
+        else:
+            argv = ["scp", *_ssh_opts(self._connect_timeout), local, f"{host}:{remote}"]
+            res = await self._exec(host, argv, cap, env=_ssh_env())
+        self._persist(host, password, res)
+        return res
 
-    def _password(self, host: str, inline: str | None) -> str | None:
-        """The password to use: an inline one (also persisted to the vault for next time), else the
-        vault's stored one for this host, else None (→ key auth). Never touches the command line."""
-        if self._secrets is None:
-            return inline
+    def _resolve(self, host: str, inline: str | None) -> str | None:
+        """The password to use: an inline one, else the vault's stored one, else None (→ key auth).
+        Persistence happens only AFTER auth succeeds (see _persist), never on the command line."""
         if inline:
-            with contextlib.suppress(Exception):  # persist encrypted; a vault hiccup mustn't block login
-                self._secrets.set(password_ref(host), inline)
             return inline
-        return self._secrets.get(password_ref(host))
+        return self._secrets.get(password_ref(host)) if self._secrets is not None else None
 
-    async def _exec(self, host: str, argv: list[str], timeout: float,
+    def _persist(self, host: str, inline: str | None, res: RemoteResult) -> None:
+        # Save an inline password to the vault only once it actually authenticated (rc != 255), so a
+        # typo'd password never overwrites a working stored one.
+        if inline and self._secrets is not None and res.returncode != _SSH_FAIL:
+            with contextlib.suppress(Exception):  # a vault hiccup mustn't fail an otherwise-good login
+                self._secrets.set(password_ref(host), inline)
+
+    async def _exec(self, host: str, argv: list[str], timeout: float | None,
                     env: dict[str, str] | None = None) -> RemoteResult:
+        cap = timeout if timeout is not None else self._command_timeout
         try:
-            rc, out, err = await run_argv(argv, timeout=timeout, env=env)
+            rc, out, err = await run_argv(argv, timeout=cap, env=env)
         except CommandTimeout:
-            return RemoteResult(host, _SSH_FAIL, "", f"{argv[0]} timed out after {timeout:.0f}s")
+            return RemoteResult(host, _SSH_FAIL, "", f"{argv[0]} timed out after {cap:.0f}s")
         except FileNotFoundError as exc:
             return RemoteResult(host, _SSH_FAIL, "", str(exc))
         return RemoteResult(host, rc, out, err)
@@ -145,4 +169,5 @@ def build_remote_runner(ssh_settings: Any, secrets: SecretResolver | None = None
     """Pick the runner from settings — the single edge that names a concrete backend (fake in CI)."""
     if getattr(ssh_settings, "backend", "ssh") == "fake":
         return FakeRemoteRunner()
-    return SshRunner(connect_timeout=getattr(ssh_settings, "connect_timeout", 10), secrets=secrets)
+    return SshRunner(connect_timeout=getattr(ssh_settings, "connect_timeout", 10),
+                     command_timeout=getattr(ssh_settings, "command_timeout", 120.0), secrets=secrets)

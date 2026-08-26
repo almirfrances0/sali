@@ -47,8 +47,10 @@ async def _git(ctx: ToolContext, repo: str, sub: list[str], *, write: bool = Fal
     except PathViolation as exc:
         return ToolResult(ok=False, display="denied", error=str(exc))
     try:
+        # git is a TRUSTED tool (not jailed learning) — no rlimits, and a generous timeout so a real
+        # `git pull`/`git log` on a large repo isn't killed by a 64 MB file cap or a 20s CPU limit.
         rc, out, err = await run_argv(
-            ["git", *_HARDEN, "-C", str(path), *sub], timeout=15.0, env=_git_env(), limits=True
+            ["git", *_HARDEN, "-C", str(path), *sub], timeout=90.0, env=_git_env()
         )
     except CommandTimeout as exc:
         return ToolResult(ok=False, display="git timeout", error=str(exc))
@@ -119,6 +121,7 @@ class GitPull(Tool):
     risk_level = RiskLevel.R3
     capabilities = frozenset({Capability.NETWORK, Capability.WRITE})
     idempotent = False
+    timeout_s = 120.0  # a pull can fetch a lot; exceed the runner's 90s internal git timeout
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         return await _git(ctx, args["repo"], ["pull", "--ff-only"], write=True)

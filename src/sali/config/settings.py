@@ -60,7 +60,7 @@ class SshSettings(BaseModel):
     # no passwords are ever stored. 'fake' selects the in-memory runner for tests (no socket).
     backend: Literal["ssh", "fake"] = "ssh"
     connect_timeout: int = 10  # seconds — ssh -o ConnectTimeout, fails fast, never hangs
-    command_timeout: float = 60.0  # seconds — cap on a single remote command
+    command_timeout: float = 120.0  # seconds — cap on a single remote command (a VPS analysis runs long)
 
 
 class MailAccountConfig(BaseModel):

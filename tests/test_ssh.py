@@ -137,3 +137,39 @@ async def test_ssh_tool_passes_password_through_to_the_runner() -> None:
     res = await SshRun().run(
         {"host": "vps", "command": "uname", "password": "maxmasaka"}, ctx)
     assert res.ok and runner.passwords == ["maxmasaka"]  # routed to the runner, not into the command
+
+
+async def test_ssh_put_reports_failure_on_nonzero_scp() -> None:
+    class _PutFail:
+        async def put(self, host: str, local: str, remote: str, *, timeout: float = 120.0,
+                      password: str | None = None) -> RemoteResult:
+            return RemoteResult(host, 1, "", "scp: /srv/a: Permission denied")
+
+    ctx = ToolContext(settings=Settings(), clock=SystemClock(), remote=_PutFail())  # type: ignore[arg-type]
+    res = await SshPut().run({"local": "/tmp/a", "host": "vps", "remote": "/srv/a"}, ctx)
+    assert not res.ok and "exit 1" in res.display  # a failed copy is never reported as success
+
+
+async def test_wrong_password_does_not_overwrite_a_good_stored_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_run_argv(argv: list[str], *, timeout: float = 8.0,
+                            env: dict[str, str] | None = None) -> tuple[int, str, str]:
+        return (255, "", "Permission denied")  # auth failed
+
+    monkeypatch.setattr("sali.tools.remote.run_argv", fake_run_argv)
+    store = FakeSecretStore({"ssh.1_2_3_4.password": "goodpw"})
+    await SshRunner(secrets=store).run("almir@1.2.3.4", "whoami", password="typo")
+    assert store.get("ssh.1_2_3_4.password") == "goodpw"  # a failed login didn't clobber the good one
+
+
+async def test_key_auth_env_carries_the_agent_socket(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_run_argv(argv: list[str], *, timeout: float = 8.0,
+                            env: dict[str, str] | None = None) -> tuple[int, str, str]:
+        captured["env"] = env or {}
+        return (0, "", "")
+
+    monkeypatch.setattr("sali.tools.remote.run_argv", fake_run_argv)
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/run/user/1000/keyring/ssh")
+    await SshRunner(secrets=FakeSecretStore()).run("keyhost", "uptime")
+    assert captured["env"]["SSH_AUTH_SOCK"] == "/run/user/1000/keyring/ssh"  # ssh-agent reachable again

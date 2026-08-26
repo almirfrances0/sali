@@ -18,6 +18,7 @@ from sali.tools.registry import ToolRegistry
 
 class IngestDocument(Tool):
     name = "ingest_document"
+    timeout_s = 900.0  # chunk + embed a whole document (many local model calls) — never cut it short
     description = (
         "Read a document (text, markdown, code, csv/json, or a PDF) into your memory so you can "
         "recall and cite its content later. Give the file path. Re-ingesting an unchanged file does "

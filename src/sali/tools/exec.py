@@ -88,6 +88,13 @@ async def run_argv(
         _killpg(proc.pid)
         await proc.wait()
         raise CommandTimeout(f"{argv[0]} timed out after {timeout}s") from exc
+    except asyncio.CancelledError:
+        # An OUTER cancel (e.g. the dispatch backstop firing) must not orphan the child's process
+        # group — kill it before propagating, or the ssh/git/scp subprocess leaks.
+        _killpg(proc.pid)
+        with contextlib.suppress(Exception):
+            await proc.wait()
+        raise
 
     await proc.wait()
     return proc.returncode or 0, out_buf.decode("utf-8", "replace"), err_buf.decode("utf-8", "replace")

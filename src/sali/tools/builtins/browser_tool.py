@@ -32,6 +32,7 @@ def _err(exc: Exception) -> str:
 
 class BrowserOpen(Tool):
     name = "browser_open"
+    timeout_s = 90.0  # a page load / browser launch can be slow; don't cut navigation short
     description = ("Open a web page in your browser and return its readable text. Only http/https. "
                   "You're already logged into sites Almir is logged into.")
     parameters = {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}

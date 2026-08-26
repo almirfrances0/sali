@@ -66,7 +66,7 @@ _KEEP_RECENT = 6
 # Intra-turn context folding: when the *working* prompt for a single task nears the model's
 # window, fold everything done so far into a compact progress note and carry on — so a long,
 # many-step job continues on its own instead of dead-ending on the context limit.
-_CTX_HEADROOM = 0.65  # fold once the estimated prompt passes this fraction of the window
+_CTX_HEADROOM = 0.78  # use more of the window before folding (the fold still prevents overflow)
 _CTX_MARGIN = 8       # per-message token overhead added to the estimate
 _FOLD_INSTRUCTION = (
     "You are Sali, in the middle of a task. Fold everything you've done so far on THIS task into "
@@ -524,7 +524,8 @@ class AgentLoop:
                         tool_calls += 1
                         sig = f"{call.name}:{json.dumps(call.arguments, sort_keys=True, default=str)}"
                         yield LoopEvent("tool", call.name,
-                                        {"phase": "start", "name": call.name, "args": call.arguments})
+                                        {"phase": "start", "name": call.name,
+                                         "args": redact_obj(call.arguments)})  # never stream a secret
                         broken = failed_sigs.get(sig)
                         if broken and broken[0] >= _MAX_TOOL_FAILURES:
                             # This exact call already failed the same way — don't run it again. Hand
@@ -948,10 +949,10 @@ class AgentLoop:
         )
 
 
-# No single tool result may swallow the whole context window: a read/command can be 64 KiB
-# (~the entire window), which would crowd out everything else and confuse the model into
-# re-fetching. Bound what feeds back to it; the full result still lives in the durable record.
-_TOOL_OUTPUT_CAP = 12_000
+# No single tool result may swallow the whole context window, but Sali is powerful and should SEE
+# most of a file/command/ssh output — 12 KB was cutting real reads. Give it a generous slice; the
+# fold guard still prevents overflow, and the full result always lives in the durable record.
+_TOOL_OUTPUT_CAP = 24_000
 
 
 def _tool_message(tool_name: str, payload: dict[str, Any]) -> ChatMessage:

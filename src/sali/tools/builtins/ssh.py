@@ -60,6 +60,7 @@ class SshRun(Tool):
     risk_level = RiskLevel.R1
     capabilities = frozenset({Capability.EXECUTE, Capability.NETWORK})
     idempotent = False
+    timeout_s = 600.0  # outer backstop only; the real cap is the runner's ssh.command_timeout
 
     def assess(self, args: dict[str, Any]) -> RiskLevel:
         return RiskLevel.R4 if _is_destructive_remote(args.get("command")) else RiskLevel.R1
@@ -101,6 +102,7 @@ class SshPut(Tool):
     risk_level = RiskLevel.R2  # a remote write; auto-allowed under the freedom policy
     capabilities = frozenset({Capability.EXECUTE, Capability.NETWORK, Capability.WRITE})
     idempotent = False
+    timeout_s = 600.0  # outer backstop; scp of a large file can take a while
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         if ctx.remote is None:
@@ -111,11 +113,14 @@ class SshPut(Tool):
             return ToolResult(ok=False, display="need local, host, remote",
                               error="local, host and remote are all required")
         res = await ctx.remote.put(host, local, remote, password=password)
+        # For scp the exit code IS the verdict (unlike ssh_run, where a non-zero remote rc is data):
+        # only rc 0 means the file actually landed. Never report a failed copy as success.
+        ok = res.returncode == 0
         return ToolResult(
-            ok=res.ok,
+            ok=ok,
             output={"host": host, "returncode": res.returncode, "remote": remote},
-            display=f"copied to {host}:{remote}" if res.ok else f"{host}: scp failed",
-            error=None if res.ok else (res.stderr.strip()[:300] or "scp failed"),
+            display=f"copied to {host}:{remote}" if ok else f"{host}: scp failed (exit {res.returncode})",
+            error=None if ok else (res.stderr.strip()[:300] or f"scp exit {res.returncode}"),
         )
 
 

@@ -46,7 +46,10 @@ class Tool(ABC):
     # so an unclassified (e.g. discovered) tool is denied by default, never auto-allowed.
     risk_level: ClassVar[RiskLevel] = RiskLevel.R4
     capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.READ})
-    timeout_s: ClassVar[float] = 10.0
+    # Outer backstop only (dispatch adds +2s). Generous by default so an I/O/network tool isn't
+    # cut below its own internal timeout; local tools finish in milliseconds regardless. Tools with
+    # genuinely long work (ssh, ingest, browser) raise it further.
+    timeout_s: ClassVar[float] = 45.0
     idempotent: ClassVar[bool] = True
     available: ClassVar[bool] = True  # discover-on-install tools flip this off
 

@@ -122,8 +122,10 @@ class ExecuteCommand(Tool):
             argv = jail.build_sandbox_argv(argv, allow_network=perms.exec_allow_network)
 
         try:
+            # 1 MiB before the flood-kill (was 256 KiB) — a real log/build/journalctl dump shouldn't
+            # be SIGKILLed mid-run; the loop still truncates what the model sees to _TOOL_OUTPUT_CAP.
             rc, out, err = await run_argv(
-                argv, timeout=self.timeout_s, env=_safe_env(), max_output=256 * 1024
+                argv, timeout=self.timeout_s, env=_safe_env(), max_output=1024 * 1024
             )
         except CommandTimeout as exc:
             return ToolResult(ok=False, display="timeout", error=str(exc))
