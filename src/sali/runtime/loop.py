@@ -24,6 +24,7 @@ from sali.core.clock import Clock, SystemClock
 from sali.core.enums import MemoryLayer, MemorySource
 from sali.core.errors import ProviderError
 from sali.core.ids import new_id
+from sali.graph.service import GraphService
 from sali.learning.episodes import prune_stm
 from sali.memory.writer import observe
 from sali.obs.log import get_logger
@@ -226,6 +227,7 @@ class AgentLoop:
         self.clock = clock or SystemClock()
         self.log = get_logger("sali.loop")
         self._memory_sink = _MemorySink(retrieval.memory)  # lets the remember tool save durably
+        self._graph = GraphService(pool)  # lets the relate tool write conversational edges
         self._consolidating: asyncio.Task[Any] | None = None
         self._last_consolidate: Any = None
 
@@ -568,7 +570,7 @@ class AgentLoop:
         await journal.set_state(RunState.EXECUTE_TOOL)
         started = self.clock.now()
         ctx = ToolContext(settings=self.settings, clock=self.clock, pool=self.pool,
-                          memory=self._memory_sink)
+                          memory=self._memory_sink, graph=self._graph)
         result = await dispatch.run_tool(tool, call.arguments, ctx)
 
         await journal.set_state(RunState.OBSERVE)

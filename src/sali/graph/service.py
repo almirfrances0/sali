@@ -25,6 +25,31 @@ class GraphService:
         async with self.pool.acquire() as conn:
             return await _writer.relate(conn, **kwargs)
 
+    async def link(
+        self, *, subject: str, relation: str, obj: str, source: MemorySource,
+        confidence: float = 0.6,
+    ) -> Edge:
+        """Assert a relationship stated in conversation: ensure both endpoints exist (generic
+        'entity' nodes keyed by lowercased name, so the same thing mentioned twice is one node) and
+        relate them — all in ONE transaction. This is the conversational→graph write path: without
+        it, relationships Almir states never become edges Sali can traverse later."""
+        def _key(name: str) -> str:
+            return f"entity:{name.strip().lower()}"
+
+        rel = relation.strip().lower().replace(" ", "_")
+        async with self.pool.acquire() as conn, conn.transaction():
+            src = await _writer.ensure_node(
+                conn, node_type="entity", name=subject.strip(), canonical_key=_key(subject),
+                source=source, confidence=confidence,
+            )
+            dst = await _writer.ensure_node(
+                conn, node_type="entity", name=obj.strip(), canonical_key=_key(obj),
+                source=source, confidence=confidence,
+            )
+            return await _writer.relate(
+                conn, src_id=src.id, dst_id=dst.id, rel_type=rel, source=source, confidence=confidence,
+            )
+
     async def set_fact(self, **kwargs: Any) -> tuple[Edge, ContradictionOutcome | None]:
         async with self.pool.acquire() as conn:
             return await _writer.set_fact(conn, **kwargs)

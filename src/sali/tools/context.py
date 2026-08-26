@@ -28,6 +28,17 @@ class MemorySink(Protocol):
     ) -> None: ...
 
 
+class GraphSink(Protocol):
+    """How a tool records a relationship (subject --relation--> object) into Sali's knowledge graph.
+    Concrete impl (GraphService) is injected by the runtime; tools see only this capability, so the
+    graph layer stays out of the tools layer's imports (same inversion as MemorySink)."""
+
+    async def link(
+        self, *, subject: str, relation: str, obj: str, source: MemorySource,
+        confidence: float = 0.6,
+    ) -> Any: ...  # concrete returns the Edge; tools ignore it
+
+
 @dataclass(slots=True)
 class ToolContext:
     settings: Settings
@@ -35,6 +46,7 @@ class ToolContext:
     pool: Any = None
     session_id: UUID | None = None
     memory: MemorySink | None = None  # injected by the loop; None in tests / pool-less probes
+    graph: GraphSink | None = None  # injected by the loop; lets a tool assert a relationship
 
     @property
     def paths(self) -> PathGuard:

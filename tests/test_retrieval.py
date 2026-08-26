@@ -78,3 +78,19 @@ async def test_gather_reinforces_recalled_memories(live_pool: Any) -> None:
             "SELECT access_count, last_accessed, last_verified FROM memory WHERE id=$1", mem.id)
     assert row["access_count"] == 1 and row["last_accessed"] is not None
     assert row["last_verified"] == before["last_verified"]  # recall did NOT re-verify
+
+
+async def test_link_creates_a_retrievable_relationship(live_pool: Any) -> None:
+    # The conversational→graph write path: a relationship stated in chat becomes an edge Sali can
+    # traverse later — so a relational question answers from STRUCTURE, not text similarity.
+    from sali.graph.service import GraphService
+
+    await GraphService(live_pool).link(
+        subject="Salix Studio", relation="deployed on", obj="VPS-99",
+        source=MemorySource.CONVERSATION,
+    )
+    service = RetrievalService(live_pool, FakeModelProvider())
+    plan = classify("what is Salix Studio connected to?")
+    bundle = await service.gather("what is Salix Studio connected to?", plan)
+    assert any(f.src == "Salix Studio" and f.rel == "deployed_on" and f.dst == "VPS-99"
+               for f in bundle.graph_facts)
