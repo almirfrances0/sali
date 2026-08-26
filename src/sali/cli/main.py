@@ -28,6 +28,46 @@ console = Console()
 secrets_cli = typer.Typer(help="Manage Sali's secrets — never stored in the database.")
 app.add_typer(secrets_cli, name="secrets")
 
+memory_cli = typer.Typer(help="Inspect Sali's memory.")
+app.add_typer(memory_cli, name="memory")
+
+
+@memory_cli.command("status")
+def memory_status() -> None:
+    """Show the health of Sali's memory — counts by layer, graph size, and soft spots (§49)."""
+    settings = load_settings()
+    configure_logging("ERROR")
+    asyncio.run(_memory_status(settings))
+
+
+async def _memory_status(settings: Settings) -> None:
+    from sali.kernel import Kernel
+    from sali.memory import diagnostics
+
+    kernel = Kernel.create(settings)
+    try:
+        h = await diagnostics.health(await kernel.pool())
+    finally:
+        await kernel.close()
+    m, g, c = h["memory"], h["graph"], h["contradictions"]
+    console.print(f"[bold]Memory[/] — {m['current']} current, {m['superseded']} superseded")
+    for layer, n in m["by_layer"].items():
+        console.print(f"  {layer:12s} {n}")
+    console.print(f"[bold]Graph[/] — {g['nodes']} nodes, {g['edges']} edges "
+                  f"({g['historical_edges']} historical), {g['orphan_nodes']} orphans")
+    console.print(f"[bold]Contradictions[/] — {c['total']} total, {c['open']} open  "
+                  f"[bold]Events[/] — {h['events']}")
+    soft = []
+    if m["unverified"]:
+        soft.append(f"{m['unverified']} unverified")
+    if m["low_confidence"]:
+        soft.append(f"{m['low_confidence']} low-confidence")
+    if m["embed_backlog"]:
+        soft.append(f"{m['embed_backlog']} awaiting embedding")
+    if g["orphan_nodes"]:
+        soft.append(f"{g['orphan_nodes']} orphan nodes")
+    console.print("[yellow]Soft spots:[/] " + (", ".join(soft) if soft else "none — memory is healthy"))
+
 
 @secrets_cli.command("set")
 def secrets_set(ref: str) -> None:
