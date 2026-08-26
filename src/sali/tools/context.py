@@ -29,6 +29,18 @@ class MemorySink(Protocol):
     ) -> None: ...
 
 
+class RecallSink(Protocol):
+    """How a tool ACTIVELY queries Sali's memory (spec §34,§55,§56) — search, graph traversal,
+    history, procedures, incidents. Read-only; returns JSON-ready dicts (with provenance + confidence
+    + freshness, so the model never has to guess), so the tools layer stays free of memory/graph
+    types. The concrete impl is injected by the runtime over the retrieval + graph engines."""
+
+    async def search(self, query: str, *, layer: str | None = None, k: int = 6) -> list[dict[str, Any]]: ...
+    async def related(self, entity: str, *, hops: int = 1) -> dict[str, Any]: ...
+    async def entity(self, name: str) -> dict[str, Any]: ...
+    async def history(self, entity: str, relation: str) -> dict[str, Any]: ...
+
+
 class GraphSink(Protocol):
     """How a tool records a relationship (subject --relation--> object) into Sali's knowledge graph.
     Concrete impl (GraphService) is injected by the runtime; tools see only this capability, so the
@@ -112,6 +124,7 @@ class ToolContext:
     pool: Any = None
     session_id: UUID | None = None
     memory: MemorySink | None = None  # injected by the loop; None in tests / pool-less probes
+    recall: RecallSink | None = None  # injected by the loop; lets a tool actively query memory (§34)
     graph: GraphSink | None = None  # injected by the loop; lets a tool assert a relationship
     tasks: TaskSink | None = None  # injected by the loop; lets a tool run a persistent task
     schedules: ScheduleSink | None = None  # injected by the loop; lets a tool set up recurring work

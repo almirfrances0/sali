@@ -73,11 +73,36 @@ class GraphService:
                 conn, start_id, max_depth=max_depth, rel_types=rel_types, as_of=as_of
             )
 
+    async def find_by_name(self, name: str, *, limit: int = 5) -> list[Node]:
+        """Minimal entity resolution (§18): map a surface form ('my VPS', 'project-x', 'Ollama') to
+        CURRENT nodes whose name or canonical key matches. Ordered by confidence then recency."""
+        from sali.graph.models import row_to_node
+
+        term = name.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        if not term:
+            return []
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM graph_node WHERE valid_until IS NULL "
+                "AND (name ILIKE $1 OR canonical_key ILIKE $1) "
+                "ORDER BY confidence DESC, last_seen DESC LIMIT $2",
+                f"%{term}%", limit,
+            )
+        return [row_to_node(r) for r in rows]
+
     async def get_node(
         self, node_type: str, canonical_key: str, *, as_of: datetime | None = None
     ) -> Node | None:
         async with self.pool.acquire() as conn:
             return await _traverse.get_node(conn, node_type, canonical_key, as_of=as_of)
+
+    async def names_for(self, ids: Sequence[UUID]) -> dict[UUID, str]:
+        """Resolve node ids to names in one query — for naming the targets of a history timeline."""
+        if not ids:
+            return {}
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT id, name FROM graph_node WHERE id = ANY($1)", list(ids))
+        return {r["id"]: r["name"] for r in rows}
 
     async def history(self, src_id: UUID, rel_type: str) -> list[Edge]:
         """The full timeline of a functional slot — current and superseded, oldest first."""

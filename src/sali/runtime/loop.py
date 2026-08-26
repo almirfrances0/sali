@@ -215,6 +215,74 @@ class _MemorySink:
         await self._service.embed_pending()
 
 
+class _RecallSink:
+    """Active memory recall for Sali's memory tools (§34,§55,§56): hybrid search, graph traversal, and
+    history — every result carries provenance + confidence + a staleness flag so the model reasons
+    over evidence and never has to invent a memory (§47). Read-only, over the retrieval + graph engines."""
+
+    def __init__(self, memory: Any, graph: Any) -> None:  # MemoryService, GraphService
+        self._memory = memory
+        self._graph = graph
+
+    async def search(self, query: str, *, layer: str | None = None, k: int = 6) -> list[dict[str, Any]]:
+        # For a layer-filtered read, pull a wider slate then keep the top-k of that layer.
+        hits = await self._memory.retrieve(query, k=k if layer is None else max(k * 4, 24))
+        if layer is not None:
+            hits = [h for h in hits if h.memory.layer.value == layer]
+        out: list[dict[str, Any]] = []
+        for h in hits[:k]:
+            m = h.memory
+            out.append({
+                "content": m.content, "layer": m.layer.value, "source": m.source.value,
+                "confidence": round(h.effective_confidence, 2), "stale": h.stale,
+                "recorded": m.valid_from.date().isoformat() if m.valid_from else None,
+            })
+        return out
+
+    async def related(self, entity: str, *, hops: int = 1) -> dict[str, Any]:
+        nodes = await self._graph.find_by_name(entity, limit=3)
+        if not nodes:
+            return {"entity": entity, "found": False, "relations": []}
+        node = nodes[0]
+        relations: list[dict[str, Any]] = []
+        if hops <= 1:
+            for hop in await self._graph.neighbors(node.id):
+                relations.append({"relation": hop["rel_type"], "target": hop["node"].name,
+                                  "type": hop["node"].node_type, "confidence": round(hop["confidence"], 2)})
+        else:
+            for r in await self._graph.traverse(node.id, max_depth=min(hops, 4)):
+                if r["depth"] > 0:
+                    relations.append({"target": r["name"], "type": r["node_type"], "hops": r["depth"]})
+        return {"entity": entity, "found": True, "resolved": node.name, "type": node.node_type,
+                "relations": relations[:24]}
+
+    async def entity(self, name: str) -> dict[str, Any]:
+        nodes = await self._graph.find_by_name(name, limit=3)
+        if not nodes:
+            return {"name": name, "found": False}
+        node = nodes[0]
+        neighbours = await self._graph.neighbors(node.id)
+        return {"name": node.name, "found": True, "type": node.node_type,
+                "confidence": round(node.confidence, 2), "props": redact_obj(dict(node.props)),
+                "relations": [{"relation": h["rel_type"], "target": h["node"].name} for h in neighbours[:24]]}
+
+    async def history(self, entity: str, relation: str) -> dict[str, Any]:
+        nodes = await self._graph.find_by_name(entity, limit=1)
+        if not nodes:
+            return {"entity": entity, "found": False, "timeline": []}
+        node = nodes[0]
+        rel = relation.strip().lower().replace(" ", "_")
+        edges = await self._graph.history(node.id, rel)
+        names = await self._graph.names_for([e.dst_id for e in edges])
+        timeline = [{
+            "value": names.get(e.dst_id, str(e.dst_id)),
+            "from": e.valid_from.date().isoformat() if e.valid_from else None,
+            "until": e.valid_until.date().isoformat() if e.valid_until else None,
+            "current": e.valid_until is None,
+        } for e in edges]
+        return {"entity": node.name, "relation": rel, "found": bool(timeline), "timeline": timeline}
+
+
 class _VisionSink:
     """Bridges the see_screen tool to the LOCAL vision model. The screenshot bytes go only to the
     provider (local Ollama) and are never stored — the tools layer never imports the provider."""
@@ -271,6 +339,7 @@ class AgentLoop:
         self.log = get_logger("sali.loop")
         self._memory_sink = _MemorySink(retrieval.memory)  # lets the remember tool save durably
         self._graph = GraphService(pool)  # lets the relate tool write conversational edges
+        self._recall = _RecallSink(retrieval.memory, self._graph)  # lets memory tools actively query (§34)
         self._tasks = TaskStore(pool)  # persistent multi-step tasks (§24), resumed across restarts
         self._schedules = ScheduleStore(pool, self.clock)  # recurring work (§44)
         self._documents = IngestService(pool, provider)  # document ingestion → memory (§44)
@@ -717,7 +786,8 @@ class AgentLoop:
         await journal.set_state(RunState.EXECUTE_TOOL)
         started = self.clock.now()
         ctx = ToolContext(settings=self.settings, clock=self.clock, pool=self.pool,
-                          memory=self._memory_sink, graph=self._graph, tasks=self._tasks,
+                          memory=self._memory_sink, recall=self._recall, graph=self._graph,
+                          tasks=self._tasks,
                           schedules=self._schedules, documents=self._documents, remote=self._remote,
                           comms=self._comms, browser=self._browser, vision=self._vision,
                           perception=self._perception)
