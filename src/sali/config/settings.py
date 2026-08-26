@@ -55,6 +55,14 @@ class RuntimeSettings(BaseModel):
     token_budget_per_run: int = 400_000
 
 
+class SshSettings(BaseModel):
+    # Remote work goes over the system ssh, reusing Almir's ~/.ssh (keys, config aliases, agent) —
+    # no passwords are ever stored. 'fake' selects the in-memory runner for tests (no socket).
+    backend: Literal["ssh", "fake"] = "ssh"
+    connect_timeout: int = 10  # seconds — ssh -o ConnectTimeout, fails fast, never hangs
+    command_timeout: float = 60.0  # seconds — cap on a single remote command
+
+
 def _default_fs_deny() -> list[str]:
     # This machine is Sali's home — it's open to it. Only credentials and the separate
     # `salix` project stay protected by default (a light guard the owner can remove).
@@ -90,6 +98,7 @@ class Settings(BaseSettings):
     model: ModelSettings = Field(default_factory=ModelSettings)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
     permissions: PermissionsSettings = Field(default_factory=PermissionsSettings)
+    ssh: SshSettings = Field(default_factory=SshSettings)
 
     @classmethod
     def settings_customise_sources(

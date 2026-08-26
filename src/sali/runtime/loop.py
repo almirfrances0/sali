@@ -43,6 +43,7 @@ from sali.tools import dispatch
 from sali.tools.base import VerifyResult
 from sali.tools.context import ToolContext
 from sali.tools.registry import ToolRegistry
+from sali.tools.remote import build_remote_runner
 from sali.twin import awareness as twin_awareness
 
 # Warmer sampling so Sali sounds like a person, not a deterministic tool. Tool-calling is
@@ -238,6 +239,7 @@ class AgentLoop:
         self._tasks = TaskStore(pool)  # persistent multi-step tasks (§24), resumed across restarts
         self._schedules = ScheduleStore(pool, self.clock)  # recurring work (§44)
         self._documents = IngestService(pool, provider)  # document ingestion → memory (§44)
+        self._remote = build_remote_runner(settings.ssh)  # remote hosts over ssh (§44)
         self._consolidating: asyncio.Task[Any] | None = None
         self._last_consolidate: Any = None
 
@@ -613,7 +615,7 @@ class AgentLoop:
         started = self.clock.now()
         ctx = ToolContext(settings=self.settings, clock=self.clock, pool=self.pool,
                           memory=self._memory_sink, graph=self._graph, tasks=self._tasks,
-                          schedules=self._schedules, documents=self._documents)
+                          schedules=self._schedules, documents=self._documents, remote=self._remote)
         result = await dispatch.run_tool(tool, call.arguments, ctx)
 
         await journal.set_state(RunState.OBSERVE)

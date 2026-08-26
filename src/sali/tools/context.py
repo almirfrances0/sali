@@ -15,6 +15,7 @@ from sali.config.settings import Settings
 from sali.core.clock import Clock, SystemClock
 from sali.core.enums import MemorySource
 from sali.tools.pathguard import PathGuard
+from sali.tools.remote import RemoteRunner
 
 
 class MemorySink(Protocol):
@@ -77,6 +78,7 @@ class ToolContext:
     tasks: TaskSink | None = None  # injected by the loop; lets a tool run a persistent task
     schedules: ScheduleSink | None = None  # injected by the loop; lets a tool set up recurring work
     documents: IngestSink | None = None  # injected by the loop; lets a tool ingest a document
+    remote: RemoteRunner | None = None  # injected by the loop; lets a tool run on a remote host
 
     @property
     def paths(self) -> PathGuard:
