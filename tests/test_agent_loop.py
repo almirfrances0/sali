@@ -235,14 +235,15 @@ async def test_loop_does_not_nudge_a_complete_answer(live_pool: Any) -> None:
         assert followed == 0
 
 
-async def test_stalled_is_structural_then_model_judged() -> None:
-    # No phrase list: a long reply is assumed complete (no model call at all); a short one is put to
-    # the model, which judges its own reply.
+async def test_stalled_is_model_judged_with_no_length_cutoff() -> None:
+    # No phrase list, no length cutoff: every non-empty tool-less reply is put to the model, so a
+    # stall hiding at the end of a LONG explanation is still caught.
     stalled = _loop(None, FakeModelProvider(responses=[ChatResult("STALLED", None, [], 1, 1, "fake")]))
-    assert await stalled._stalled("deploy the app", "x " * 700) is False  # very long → not checked
-    assert await stalled._stalled("deploy the app", "Let's start.") is True  # short → judged a stall
+    long_stall = "Here's the situation. " * 120 + "Let me write it all out now."  # ~2700 chars
+    assert await stalled._stalled("build it", long_stall) is True  # long → still judged & caught
+    assert await stalled._stalled("hi", "   ") is False  # empty → no model call at all
     done = _loop(None, FakeModelProvider(responses=[ChatResult("DONE", None, [], 1, 1, "fake")]))
-    assert await done._stalled("say hi", "Hey Almir!") is False  # short → judged complete
+    assert await done._stalled("say hi", "Hey Almir!") is False  # judged complete
 
 
 def test_looks_like_leaked_tool_call() -> None:

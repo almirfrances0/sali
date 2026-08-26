@@ -109,11 +109,10 @@ def _looks_like_leaked_tool_call(text: str) -> bool:
     return stripped.startswith(("{", "[")) and bool(_LEAKED_TOOL_JSON.match(stripped))
 
 
-# Stall detection is structural, not a phrase list: only a SHORT, tool-less first reply is even a
-# candidate (a substantial answer is assumed complete and never checked), and then the reasoning
-# engine judges its OWN reply — did it act, or only announce and stop? This is what the model is
-# for (judgement, not parsing), and it can't drift out of date the way a verb list does.
-_STALL_MAX_CHARS = 1200  # generous: a stall can be a long explanation ending in "let me do X"
+# Stall detection is structural, not a phrase list, and has NO length cutoff: a stall can hide at
+# the end of a long explanation ("…let me now write all the files"), so every tool-less reply is
+# put to the model, which judges its OWN reply — did it finish, or only announce/half-do it? This
+# is what the model is for (judgement, not parsing), and it can't drift out of date like a verb list.
 _STALL_JUDGE_SYSTEM = (
     "Almir asked you to do something and you just replied. Judge your OWN reply against the FULL "
     "task: did you actually finish everything he asked and give him the result — or did you only "
@@ -199,11 +198,11 @@ class AgentLoop:
         return note, through
 
     async def _stalled(self, user_input: str, response: str) -> bool:
-        """Did Sali announce an action and stop, instead of doing it? Structural pre-filter (only a
-        short, tool-less reply is a candidate — a substantial answer is taken as complete), then the
-        model judges its own reply. No hardcoded phrases, so it never drifts out of date."""
+        """Did Sali announce or half-do the task and stop, instead of finishing it? The model judges
+        its own reply — no phrase list, no length cutoff (a stall can hide in a long reply), so Sali
+        gets pushed to continue however long the reply is. Best-effort: a failure just means no nudge."""
         text = response.strip()
-        if not text or len(text) > _STALL_MAX_CHARS:
+        if not text:
             return False
         try:
             verdict = await self.provider.chat(
