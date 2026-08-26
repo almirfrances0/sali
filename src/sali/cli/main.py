@@ -490,15 +490,92 @@ async def _twin(settings: Settings, refresh: bool) -> None:
         await pool.close()
 
 
+_SERVICE_NAME = "sali-observe.service"
+
+
+def _unit_path() -> Path:
+    return Path.home() / ".config" / "systemd" / "user" / _SERVICE_NAME
+
+
+def _install_observe_service(interval: int) -> None:
+    """Install + enable a systemd *user* service so `sali observe` runs in the background — no
+    root (Sali runs as Almir). Survives across sessions once linger is enabled."""
+    import shutil
+    import subprocess
+    import sys
+
+    sali_bin = Path(sys.executable).parent / "sali"
+    if not sali_bin.exists():
+        found = shutil.which("sali")
+        if not found:
+            console.print("[red]Can't find the `sali` executable — install with `make install` first.[/]")
+            raise typer.Exit(1)
+        sali_bin = Path(found)
+    workdir = Path.cwd()
+    unit = f"""[Unit]
+Description=Sali — desktop observation (keeps the digital twin current)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={sali_bin} observe --interval {interval}
+WorkingDirectory={workdir}
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=default.target
+"""
+    path = _unit_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(unit, encoding="utf-8")
+    if shutil.which("systemctl") is None:
+        console.print(f"[yellow]Wrote {path}, but systemctl isn't available to enable it.[/]")
+        return
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+    result = subprocess.run(
+        ["systemctl", "--user", "enable", "--now", _SERVICE_NAME], capture_output=True, text=True
+    )
+    if result.returncode == 0:
+        console.print(f"[green]Sali is now watching in the background[/] (every {interval}s).")
+        console.print(f"[dim]  unit: {path}[/]")
+        console.print("[dim]  logs: journalctl --user -u sali-observe -f[/]")
+        console.print("[dim]  keep it running after logout: loginctl enable-linger[/]")
+    else:
+        console.print(f"[yellow]Wrote the unit but couldn't enable it:[/] {result.stderr.strip()}")
+
+
+def _uninstall_observe_service() -> None:
+    import shutil
+    import subprocess
+
+    if shutil.which("systemctl") is not None:
+        subprocess.run(["systemctl", "--user", "disable", "--now", _SERVICE_NAME], check=False)
+    path = _unit_path()
+    if path.exists():
+        path.unlink()
+    console.print("[green]Background observation stopped and removed.[/]")
+
+
 @app.command()
 def observe(
     interval: int = typer.Option(180, help="Seconds between observation cycles."),
+    install: bool = typer.Option(False, "--install", help="Run it in the background via systemd (user service)."),
+    uninstall: bool = typer.Option(False, "--uninstall", help="Stop and remove the background service."),
 ) -> None:
     """Watch the machine: re-observe on a loop and surface meaningful changes (§16). Ctrl-C stops.
 
     Cheap by design — routine cycles change nothing and cost no reasoning; only genuine
     structural changes (a package installed, a project appeared, a service gone) are surfaced.
+    Use --install to run it continuously in the background as a systemd user service.
     """
+    if uninstall:
+        _uninstall_observe_service()
+        return
+    if install:
+        _install_observe_service(interval)
+        return
     settings = load_settings()
     configure_logging("WARNING")
     asyncio.run(_observe(settings, interval))

@@ -65,6 +65,11 @@ async def sync_snapshot(
 
     added = sorted(seen - before)
     removed = sorted(before - seen)
+    # An entity that's no longer here: end the machine's "currently has" edge to it (the node
+    # stays as history). Otherwise a deleted project/service lingers as if still present.
+    for key in removed:
+        await _close_edge(conn, machine.id, key)
+
     await _emit(conn, "twin.synced", machine.id,
                 {"entities": len(snapshot.entities), "added": len(added), "removed": len(removed)})
     # First discovery is bulk — don't itemize it as events; only surface genuine later changes.
@@ -75,6 +80,16 @@ async def sync_snapshot(
         await _emit(conn, "twin.entity_removed", machine.id, {"key": key})
     return SyncResult(machine_id=machine.id, entities=len(snapshot.entities),
                       added=added, removed=removed)
+
+
+async def _close_edge(conn: Any, machine_id: UUID, key: str) -> None:
+    """End the current machine→entity relationship for an entity that's gone (temporal close)."""
+    await conn.execute(
+        "UPDATE graph_edge SET valid_until = now() "
+        "WHERE src_id=$1 AND valid_until IS NULL AND superseded_by IS NULL AND dst_id = ("
+        "  SELECT id FROM graph_node WHERE canonical_key=$2 AND valid_until IS NULL LIMIT 1)",
+        machine_id, key,
+    )
 
 
 async def _emit(conn: Any, event_type: str, subject_id: UUID, payload: dict[str, Any]) -> None:

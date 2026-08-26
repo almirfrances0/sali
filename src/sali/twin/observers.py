@@ -196,12 +196,95 @@ async def observe_projects(*, exclude: tuple[str, ...] = ()) -> list[TwinEntity]
     return entities
 
 
+# ---- services / network / containers / python envs -------------------------------------------
+# A short curated set of services worth knowing the state of — descriptive, not a capability
+# gate. Only the ones actually running are surfaced.
+_SERVICES = ("postgresql", "ollama", "docker", "ssh", "cron", "NetworkManager")
+
+
+async def observe_services() -> list[TwinEntity]:
+    entities: list[TwinEntity] = []
+    if shutil.which("systemctl") is None:
+        return entities
+    for unit in _SERVICES:
+        if (await _run("systemctl", "is-active", unit)).strip() == "active":
+            entities.append(TwinEntity(kind="service", key=f"service:{unit}",
+                                       name=f"{unit} (running)", props={"state": "active"},
+                                       relation="runs"))
+    return entities
+
+
+async def observe_network() -> list[TwinEntity]:
+    entities: list[TwinEntity] = []
+    net = Path("/sys/class/net")
+    if not net.is_dir():
+        return entities
+    for iface in sorted(p.name for p in net.iterdir()):
+        if iface == "lo":
+            continue
+        if _read(f"/sys/class/net/{iface}/operstate").strip() != "up":
+            continue
+        ip = ""
+        addr = await _run("ip", "-o", "-4", "addr", "show", iface)
+        for tok in addr.split():
+            if "/" in tok and tok[0].isdigit():
+                ip = tok
+                break
+        entities.append(TwinEntity(kind="network", key=f"net:{iface}", name=f"{iface} (up)",
+                                   props={"ip": ip} if ip else {}, relation="has"))
+    return entities
+
+
+async def observe_containers() -> list[TwinEntity]:
+    out = await _run("docker", "ps", "--format", "{{.Names}}\t{{.Image}}")
+    if not out:
+        return []
+    entities: list[TwinEntity] = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        cname = parts[0].strip()
+        if not cname:
+            continue
+        image = parts[1].strip() if len(parts) > 1 else ""
+        entities.append(TwinEntity(kind="container", key=f"container:{cname}",
+                                   name=f"{cname} ({image})" if image else cname,
+                                   props={"image": image}, relation="runs"))
+    return entities
+
+
+def observe_python_envs(*, exclude: tuple[str, ...] = ()) -> list[TwinEntity]:
+    home = Path.home()
+    if not home.is_dir():
+        return []
+    excluded = {Path(p).expanduser().resolve() for p in exclude}
+    entities: list[TwinEntity] = []
+    roots = [home, *[d for d in home.iterdir() if d.is_dir() and not d.name.startswith(".")]]
+    for root in roots[:40]:
+        for cfg in list(root.glob("*/.venv/pyvenv.cfg"))[:40] + list(root.glob("*/venv/pyvenv.cfg"))[:40]:
+            venv = cfg.parent.resolve()
+            project = venv.parent
+            if any(project == e or e in project.parents for e in excluded):
+                continue
+            pyver = next((ln.split("=", 1)[1].strip() for ln in _read(str(cfg)).splitlines()
+                          if ln.lower().startswith("version")), "")
+            entities.append(TwinEntity(kind="environment", key=f"pyenv:{venv}",
+                                       name=f"venv: {project.name}" + (f" (py {pyver})" if pyver else ""),
+                                       props={"path": str(venv), "python": pyver}, relation="has"))
+            if len(entities) >= 30:
+                return entities
+    return entities
+
+
 async def build_snapshot(*, exclude_projects: tuple[str, ...] = ()) -> TwinSnapshot:
     """Run every observer concurrently and assemble the whole-machine structural snapshot."""
     key, name, mprops = observe_machine()
+    # Two gathers (asyncio.gather's precise-tuple typing tops out at 6) — still concurrent.
     kernel, gpu, software, models, projects = await asyncio.gather(
-        observe_os_kernel(), observe_gpu(), observe_software(),
-        observe_ollama_models(), observe_projects(exclude=exclude_projects),
+        observe_os_kernel(), observe_gpu(), observe_software(), observe_ollama_models(),
+        observe_projects(exclude=exclude_projects),
+    )
+    services, network, containers = await asyncio.gather(
+        observe_services(), observe_network(), observe_containers(),
     )
     mprops.update(kernel)
     entities: list[TwinEntity] = []
@@ -212,4 +295,8 @@ async def build_snapshot(*, exclude_projects: tuple[str, ...] = ()) -> TwinSnaps
     entities += software
     entities += models
     entities += projects
+    entities += services
+    entities += network
+    entities += containers
+    entities += observe_python_envs(exclude=exclude_projects)
     return TwinSnapshot(machine_key=key, machine_name=name, machine_props=mprops, entities=entities)

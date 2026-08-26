@@ -24,8 +24,10 @@ log = get_logger("sali.twin.service")
 _GROUPS: tuple[tuple[str, str], ...] = (
     ("hardware", "Hardware"),
     ("software", "Software"),
-    ("model", "Models"),
     ("service", "Services"),
+    ("container", "Containers"),
+    ("model", "Models"),
+    ("environment", "Environments"),
     ("network", "Network"),
     ("project", "Projects"),
 )

@@ -8,7 +8,14 @@ import pytest
 
 from sali.twin.memories import build_twin_memories, write_twin_memories
 from sali.twin.model import TwinEntity, TwinSnapshot
-from sali.twin.observers import observe_cpu, observe_machine, observe_memory
+from sali.twin.observers import (
+    observe_cpu,
+    observe_machine,
+    observe_memory,
+    observe_network,
+    observe_python_envs,
+    observe_services,
+)
 from sali.twin.service import TwinService
 from sali.twin.sync import sync_snapshot
 
@@ -26,6 +33,17 @@ def test_observe_memory_and_cpu_from_proc() -> None:
     cpu = observe_cpu()
     if cpu is not None:  # present on real hardware; tolerate odd/container CPUs
         assert cpu.key == "hw:cpu" and cpu.kind == "hardware"
+
+
+async def test_richer_observers_are_well_typed_and_defensive() -> None:
+    # Env-dependent (systemctl/network/venvs may or may not be present) — assert only shape.
+    for ents, kind in (
+        (await observe_services(), "service"),
+        (await observe_network(), "network"),
+        (observe_python_envs(), "environment"),
+    ):
+        assert isinstance(ents, list)
+        assert all(e.kind == kind and e.key and e.name for e in ents)
 
 
 # ---- graph reconciliation + event-driven diff -------------------------------------------------
@@ -66,6 +84,14 @@ async def test_sync_populates_graph_and_diffs_changes(db_conn: Any) -> None:
     r2 = await sync_snapshot(db_conn, second)
     assert "model:sali:latest" in r2.added  # genuinely new → surfaced
     assert "project:sali" in r2.removed  # disappeared → surfaced
+
+    # A removed entity's edge is closed, so it no longer shows as current (node stays as history).
+    current_keys = await db_conn.fetch(
+        "SELECT n.canonical_key FROM graph_edge e JOIN graph_node n ON n.id=e.dst_id "
+        "WHERE e.src_id=$1 AND e.valid_until IS NULL", machine["id"]
+    )
+    keys = {r["canonical_key"] for r in current_keys}
+    assert "project:sali" not in keys and "model:sali:latest" in keys
 
     # The refreshed version won new-wins.
     ver = await db_conn.fetchval(
