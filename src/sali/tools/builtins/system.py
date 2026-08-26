@@ -12,7 +12,9 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from sali.core.enums import RiskLevel
 from sali.tools.base import Tool, ToolResult
+from sali.tools.context import ToolContext
 from sali.tools.exec import CommandTimeout, run_argv
 from sali.tools.registry import ToolRegistry
 
@@ -23,8 +25,9 @@ class SystemInfo(Tool):
     name = "system_info"
     description = "Operating system, kernel, and architecture of this machine."
     parameters = _NO_ARGS
+    risk_level = RiskLevel.R0
 
-    async def run(self, args: dict[str, Any]) -> ToolResult:
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         uname = platform.uname()
         distro = ""
         try:
@@ -47,8 +50,9 @@ class MemoryInfo(Tool):
     name = "memory_info"
     description = "Current RAM and swap usage (total/available/used), in MiB."
     parameters = _NO_ARGS
+    risk_level = RiskLevel.R0
 
-    async def run(self, args: dict[str, Any]) -> ToolResult:
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         fields: dict[str, int] = {}
         for line in Path("/proc/meminfo").read_text().splitlines():
             key, _, rest = line.partition(":")
@@ -73,8 +77,9 @@ class DiskInfo(Tool):
         "properties": {"path": {"type": "string", "description": "Mount point to inspect."}},
         "required": [],
     }
+    risk_level = RiskLevel.R0
 
-    async def run(self, args: dict[str, Any]) -> ToolResult:
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         path = str(args.get("path") or "/")
         usage = shutil.disk_usage(path)
         gib = 1024**3
@@ -92,9 +97,10 @@ class GpuInfo(Tool):
     name = "gpu_info"
     description = "NVIDIA GPU name, VRAM (used/total MiB), utilization, and temperature."
     parameters = _NO_ARGS
+    risk_level = RiskLevel.R0
     timeout_s = 8.0
 
-    async def run(self, args: dict[str, Any]) -> ToolResult:
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         argv = [
             "nvidia-smi",
             "--query-gpu=name,memory.total,memory.used,utilization.gpu,temperature.gpu",

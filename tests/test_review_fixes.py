@@ -9,7 +9,7 @@ import pytest
 
 from sali.config.settings import DbSettings, ModelSettings, Settings
 from sali.context.engine import ContextEngine
-from sali.core.enums import FreshnessPolicy, MemoryLayer, MemorySource
+from sali.core.enums import FreshnessPolicy, MemoryLayer, MemorySource, RiskLevel
 from sali.core.ids import new_id
 from sali.memory import writer as mem_writer
 from sali.memory.decay import FRESHNESS_MAX_AGE
@@ -52,8 +52,9 @@ def _loop(
 class _FailingTool(Tool):
     name = "always_fails"
     description = "test-only"
+    risk_level = RiskLevel.R0
 
-    async def run(self, args: dict[str, Any]) -> ToolResult:
+    async def run(self, args: dict[str, Any], ctx: Any) -> ToolResult:
         return ToolResult(ok=False, output={}, display="nope", error="boom")
 
 

@@ -114,8 +114,8 @@ async def test_loop_recover_surfaces_interrupted_run(live_pool: Any) -> None:
 
     assert len(resolved) == 1
     assert resolved[0]["was_state"] == "execute_tool"
-    # git_pull is unknown to the R0 registry → idempotency unknown → surface, never re-run.
-    assert resolved[0]["action"] == "abort_surface"
+    # git_pull is a known, non-idempotent tool → verify against reality, never blind re-run (M15).
+    assert resolved[0]["action"] == "verify_then_continue"
     async with live_pool.acquire() as c:
         status = await c.fetchval("SELECT status FROM agent_runs WHERE run_id=$1", run_id)
         assert status == "aborted"

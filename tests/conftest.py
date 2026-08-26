@@ -70,6 +70,14 @@ def fake_provider() -> Iterator[FakeModelProvider]:
     yield FakeModelProvider()
 
 
+@pytest.fixture
+def tctx() -> Any:
+    """A pool-less ToolContext for testing tools directly."""
+    from sali.tools.context import local_context
+
+    return local_context()
+
+
 _LOOP_TABLES = (
     "tool_audit, tool_execution, run_events, agent_runs, message, conversation, "
     "memory_evidence, memory, stm_observation, event, graph_edge, graph_node, contradiction"

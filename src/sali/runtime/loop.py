@@ -30,6 +30,7 @@ from sali.security.confirm import Confirmer
 from sali.security.policy import Action, PolicyEngine, SessionGrants
 from sali.security.redact import redact_obj
 from sali.tools import dispatch
+from sali.tools.context import ToolContext
 from sali.tools.registry import ToolRegistry
 
 
@@ -223,7 +224,8 @@ class AgentLoop:
         )
         await journal.set_state(RunState.EXECUTE_TOOL)
         started = self.clock.now()
-        result = await dispatch.run_tool(tool, call.arguments)
+        ctx = ToolContext(settings=self.settings, clock=self.clock, pool=self.pool)
+        result = await dispatch.run_tool(tool, call.arguments, ctx)
 
         await journal.set_state(RunState.OBSERVE)
         await journal.set_state(RunState.VERIFY)

@@ -11,10 +11,13 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from sali.core.enums import Capability, RiskLevel
 from sali.provider.base import ToolSpec
+
+if TYPE_CHECKING:
+    from sali.tools.context import ToolContext
 
 
 class ToolValidationError(Exception):
@@ -39,14 +42,16 @@ class Tool(ABC):
     name: ClassVar[str]
     description: ClassVar[str]
     parameters: ClassVar[dict[str, Any]] = {"type": "object", "properties": {}, "required": []}
-    risk_level: ClassVar[RiskLevel] = RiskLevel.R0
+    # Fail CLOSED: a tool that forgets to declare its risk is treated as the most dangerous,
+    # so an unclassified (e.g. discovered) tool is denied by default, never auto-allowed.
+    risk_level: ClassVar[RiskLevel] = RiskLevel.R4
     capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.READ})
     timeout_s: ClassVar[float] = 10.0
     idempotent: ClassVar[bool] = True
     available: ClassVar[bool] = True  # discover-on-install tools flip this off
 
     @abstractmethod
-    async def run(self, args: dict[str, Any]) -> ToolResult: ...
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult: ...
 
     async def verify(self, args: dict[str, Any], result: ToolResult) -> VerifyResult:
         """Default post-condition: the tool succeeded and returned something."""

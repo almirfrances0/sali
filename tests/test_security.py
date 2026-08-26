@@ -17,7 +17,7 @@ class _Destructive(Tool):
     risk_level = RiskLevel.R4
     capabilities = frozenset({Capability.DESTRUCTIVE})
 
-    async def run(self, args: dict[str, Any]) -> ToolResult:
+    async def run(self, args: dict[str, Any], ctx: Any) -> ToolResult:
         return ToolResult(ok=True, output={"done": True})
 
 
@@ -27,7 +27,7 @@ class _LowRiskDestructive(Tool):
     risk_level = RiskLevel.R1
     capabilities = frozenset({Capability.DESTRUCTIVE})
 
-    async def run(self, args: dict[str, Any]) -> ToolResult:
+    async def run(self, args: dict[str, Any], ctx: Any) -> ToolResult:
         return ToolResult(ok=True, output={})
 
 
@@ -37,7 +37,7 @@ class _NetworkTool(Tool):
     risk_level = RiskLevel.R2
     capabilities = frozenset({Capability.NETWORK})
 
-    async def run(self, args: dict[str, Any]) -> ToolResult:
+    async def run(self, args: dict[str, Any], ctx: Any) -> ToolResult:
         return ToolResult(ok=True, output={})
 
 

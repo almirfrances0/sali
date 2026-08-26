@@ -28,7 +28,7 @@ test:
 cov:
 	$(VENV)/bin/pytest -m "not live" \
 	  --cov=sali.memory --cov=sali.graph --cov=sali.security --cov=sali.verify \
-	  --cov=sali.runtime --cov=sali.context --cov=sali.retrieval \
+	  --cov=sali.runtime --cov=sali.context --cov=sali.retrieval --cov=sali.tools \
 	  --cov-report=term-missing --cov-fail-under=85 -q
 
 # The gate: ruff + import-layers + types + tests-with-coverage.

@@ -47,6 +47,39 @@ class RuntimeSettings(BaseModel):
     token_budget_per_run: int = 24_000
 
 
+def _default_fs_deny() -> list[str]:
+    h = Path.home()
+    return [
+        str(h / ".ssh"), str(h / ".gnupg"), str(h / ".aws"), str(h / ".config" / "sali"),
+        str(h / "Desktop" / "salix"), str(h / ".bash_history"), str(h / ".zsh_history"),
+        str(h / ".netrc"), str(h / ".git-credentials"), "/etc/shadow", "/etc/gshadow",
+    ]
+
+
+def _default_exec_allowlist() -> list[str]:
+    # ONLY binaries that cannot execute further code from their arguments. Deliberately
+    # excludes git / systemctl / journalctl (they take config/alias/-c args that spawn
+    # subprocesses) — those have dedicated, scoped tools instead. Interpreters are refused too.
+    return [
+        "uname", "uptime", "df", "free", "lscpu", "lsblk", "nproc", "ip", "ss", "ps", "who",
+        "id", "date", "nvidia-smi", "stat", "du", "lsof", "hostname", "sensors",
+    ]
+
+
+class PermissionsSettings(BaseModel):
+    fs_read_roots: list[str] = Field(default_factory=lambda: [str(Path.home())])
+    # Writes default to a dedicated scratch workspace — NOT Sali's own source tree — so the
+    # model can never silently rewrite Sali's code/.git for persistence (red-team crit #3).
+    fs_write_roots: list[str] = Field(
+        default_factory=lambda: [str(Path.home() / ".local" / "share" / "sali" / "workspace")]
+    )
+    fs_deny: list[str] = Field(default_factory=_default_fs_deny)
+    exec_allowlist: list[str] = Field(default_factory=_default_exec_allowlist)
+    exec_cwd: str = Field(default_factory=lambda: str(Path.home() / "Desktop" / "sali"))
+    exec_allow_network: bool = False
+    jail: bool = True  # use bubblewrap when available
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="SALI_",
@@ -59,6 +92,7 @@ class Settings(BaseSettings):
     db: DbSettings = Field(default_factory=DbSettings)
     model: ModelSettings = Field(default_factory=ModelSettings)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
+    permissions: PermissionsSettings = Field(default_factory=PermissionsSettings)
 
     @classmethod
     def settings_customise_sources(
