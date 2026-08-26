@@ -62,6 +62,15 @@ def test_live_note_included_when_present() -> None:
     assert "go check it directly" in assembled.messages[0].content.lower()
 
 
+def test_machine_changes_included_when_present() -> None:
+    assembled = _engine().assemble(
+        "hey", RetrievalBundle(), tool_specs=[],
+        machine_changes="While Almir was away: Docker was installed.",
+    )
+    assert "machine_changes" in assembled.included
+    assert "docker was installed" in assembled.messages[0].content.lower()
+
+
 def test_user_query_always_in_messages() -> None:
     assembled = _engine().assemble("a very specific question", RetrievalBundle(), tool_specs=[])
     assert assembled.messages[-1].role == "user"

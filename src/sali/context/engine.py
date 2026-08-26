@@ -81,6 +81,7 @@ class ContextEngine:
         *,
         live_note: str | None = None,
         history: list[tuple[str, str]] | None = None,
+        machine_changes: str | None = None,
     ) -> AssembledContext:
         conflicts: list[str] = []
         sections: list[Section] = [
@@ -95,6 +96,10 @@ class ContextEngine:
             sections.append(Section("conversation", Priority.P1, convo, self._count(convo)))
         if live_note:
             sections.append(Section("live", Priority.P1, live_note, self._count(live_note)))
+        if machine_changes:
+            sections.append(
+                Section("machine_changes", Priority.P1, machine_changes, self._count(machine_changes))
+            )
         if tool_specs:
             tools_text = "Tools you can call: " + "; ".join(
                 f"{s.name} — {s.description}" for s in tool_specs

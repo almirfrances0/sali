@@ -35,6 +35,7 @@ from sali.security.redact import redact_obj
 from sali.tools import dispatch
 from sali.tools.context import ToolContext
 from sali.tools.registry import ToolRegistry
+from sali.twin import awareness as twin_awareness
 
 # Warmer sampling so Sali sounds like a person, not a deterministic tool. Tool-calling is
 # rendered structurally by the model, so it still works reliably at this temperature.
@@ -188,6 +189,24 @@ class AgentLoop:
             iterations=int(final.data["iterations"]), tool_calls=int(final.data["tool_calls"]),
         )
 
+    async def _machine_changes(self, conn: Any, journal: RunJournal) -> str | None:
+        """A one-line heads-up about machine changes Sali hasn't noticed yet (or None). Reading
+        it acknowledges it, so it's surfaced once — Sali mentions it naturally, then moves on."""
+        try:
+            phrases, through = await twin_awareness.unacknowledged_changes(conn)
+        except Exception:  # noqa: BLE001 - awareness is a nicety, never break a turn
+            return None
+        if not phrases:
+            return None
+        await twin_awareness.acknowledge(conn, through)
+        await journal.event("twin_changes", {"count": len(phrases)})
+        return (
+            "While Almir was away, some things changed on your machine: "
+            + "; ".join(phrases[:6])
+            + ". If it's worth a heads-up, mention it to him naturally and briefly, in your own "
+            "words — don't make a big deal of it."
+        )
+
     async def sense(self, partial: str) -> str:
         """A quiet hunch about what Almir is typing, formed the instant he pauses — retrieval
         only: no model call, no journal, no writes. The keystroke layer (terminal + WebSocket)
@@ -234,9 +253,13 @@ class AgentLoop:
 
                 await journal.set_state(RunState.BUILD_CONTEXT)
                 specs = self.registry.advertise()
+                # The 'interpret' branch of observation (§16): notice machine changes that
+                # happened while Almir was away, so Sali can bring them up in its own words.
+                machine_changes = await self._machine_changes(conn, journal)
                 assembled = self.context.assemble(
                     user_input, bundle, specs,
                     live_note=LIVE_NOTE if plan.needs_live else None, history=history,
+                    machine_changes=machine_changes,
                 )
                 messages = list(assembled.messages)
                 await journal.event(

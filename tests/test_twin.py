@@ -157,6 +157,37 @@ async def test_daemon_survives_a_failing_cycle() -> None:
     assert ran == 1 and stub.calls == 2  # it retried after the failure instead of dying
 
 
+# ---- the 'interpret' branch: Sali notices changes on its next turn (§16) -----------------------
+async def test_awareness_surfaces_changes_then_acknowledges(db_conn: Any) -> None:
+    from sali.twin.awareness import acknowledge, unacknowledged_changes
+
+    await sync_snapshot(db_conn, _snap([TwinEntity("software", "software:git", "Git 2.53", {}, "runs")]))
+    # A later observation: git's gone, docker appeared → both become change events.
+    await sync_snapshot(db_conn, _snap([TwinEntity("software", "software:docker", "Docker 27", {}, "runs")]))
+
+    phrases, through = await unacknowledged_changes(db_conn)
+    assert any("Docker 27" in p and "installed" in p for p in phrases)
+    assert any("Git 2.53" in p and "gone" in p for p in phrases)
+
+    await acknowledge(db_conn, through)
+    again, _ = await unacknowledged_changes(db_conn)
+    assert again == []  # surfaced once, then quiet
+
+
+async def test_awareness_dedups_add_then_remove(db_conn: Any) -> None:
+    from sali.twin.awareness import unacknowledged_changes
+
+    base = TwinEntity("software", "software:git", "Git", {}, "runs")
+    tmp = TwinEntity("project", "project:tmp", "tmp", {}, "hosts")
+    await sync_snapshot(db_conn, _snap([base]))
+    await sync_snapshot(db_conn, _snap([base, tmp]))  # tmp appears
+    await sync_snapshot(db_conn, _snap([base]))  # tmp gone again
+    phrases, _ = await unacknowledged_changes(db_conn)
+    # The add and the remove of project:tmp collapse to its final state (gone), not two mentions.
+    tmp_mentions = [p for p in phrases if "tmp" in p]
+    assert len(tmp_mentions) == 1 and "gone" in tmp_mentions[0]
+
+
 async def test_tree_renders_structure(live_pool: Any) -> None:
     snap = _snap([
         TwinEntity("hardware", "hw:gpu", "RTX 4070", {}, "has"),
