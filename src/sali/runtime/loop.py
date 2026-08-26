@@ -174,11 +174,11 @@ class _MemorySink:
 
     async def remember(
         self, content: str, *, source: MemorySource, note: str | None = None,
-        importance: float = 0.6,
+        importance: float = 0.6, needs_grounding: bool = False,
     ) -> None:
         await self._service.remember(
             layer=MemoryLayer.SEMANTIC, content=content, source=source,
-            importance=importance, note=note,
+            importance=importance, note=note, needs_grounding=needs_grounding,
         )
         await self._service.embed_pending()
 

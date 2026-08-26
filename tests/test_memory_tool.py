@@ -12,10 +12,12 @@ from sali.tools.context import ToolContext
 class _FakeSink:
     def __init__(self) -> None:
         self.calls: list[tuple[str, MemorySource, str | None, float]] = []
+        self.grounding: list[bool] = []
 
     async def remember(self, content: str, *, source: MemorySource, note: str | None = None,
-                       importance: float = 0.6) -> None:
+                       importance: float = 0.6, needs_grounding: bool = False) -> None:
         self.calls.append((content, source, note, importance))
+        self.grounding.append(needs_grounding)
 
 
 def _ctx(sink: _FakeSink | None) -> ToolContext:
@@ -33,6 +35,7 @@ async def test_remember_maps_source_and_records_provenance() -> None:
     content, source, note, imp = sink.calls[0]
     assert source is MemorySource.EXTERNAL_SOURCE  # online → external observation, not settled fact
     assert note and "github.com" in note  # provenance recorded (§10)
+    assert sink.grounding[0] is True  # a web fact is flagged needs_grounding (unverified until checked)
 
     await RememberFact().run({"content": "Almir prefers Neovim", "source": "user"}, ctx)
     # The model can't mint USER_EXPLICIT — a fact it chooses to keep from the chat is CONVERSATION,

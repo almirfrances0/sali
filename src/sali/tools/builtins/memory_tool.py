@@ -60,12 +60,16 @@ class RememberFact(Tool):
         url = str(args.get("url", "")).strip()
         note: str | None = None
         shown = ""
+        # A web fact is reported-at-a-moment, not settled truth — flag it so it surfaces as
+        # "unverified" until Sali checks it against reality (§11: online never auto-becomes fact).
+        needs_grounding = source is MemorySource.EXTERNAL_SOURCE
         if source is MemorySource.EXTERNAL_SOURCE:
             domain = urlparse(url).netloc if url else ""
             note = f"reported by {domain} — {url}" if url else "reported online"  # full provenance
             shown = f" (from {domain or 'the web'})"  # clean display
 
-        await ctx.memory.remember(content, source=source, note=note, importance=importance)
+        await ctx.memory.remember(content, source=source, note=note, importance=importance,
+                                  needs_grounding=needs_grounding)
         return ToolResult(ok=True, output={"remembered": content, "source": source.value},
                           display=f"remembered{shown}")
 
