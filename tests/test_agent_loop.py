@@ -257,7 +257,8 @@ def test_looks_like_leaked_tool_call() -> None:
 
 async def test_loop_recovers_from_leaked_tool_json(live_pool: Any) -> None:
     # The model emits a tool call as raw JSON text (parser miss). The loop must NOT hand that
-    # back as the answer — it wipes it and asks for a clean redo, then finalizes on the real reply.
+    # back as the answer — it recovers and finalizes on the real reply. Content isn't streamed, so
+    # the JSON is never shown at all.
     fake = FakeModelProvider(
         responses=[
             ChatResult('{"name": "create_file", "arguments": {"path": "/tmp/x", "content": "hi"}}',
@@ -268,7 +269,8 @@ async def test_loop_recovers_from_leaked_tool_json(live_pool: Any) -> None:
     events = [e async for e in _loop(live_pool, fake).astream("write a note", session_id=new_id())]
     final = next(e for e in events if e.kind == "final")
     assert final.text == "Done — I saved that note for you."  # never the raw JSON
-    assert any(e.kind == "reset" for e in events)  # the leaked JSON was wiped from the display
+    # the leaked JSON was never streamed as a visible token (content is revealed only when final)
+    assert not any(e.kind == "token" and "create_file" in e.text for e in events)
     async with live_pool.acquire() as c:
         recovered = await c.fetchval(
             "SELECT count(*) FROM run_events WHERE kind='json_recovery'"

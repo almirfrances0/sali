@@ -207,11 +207,17 @@ async def _stream_turn(loop: Any, text: str, session: UUID) -> None:
                         # Reasoning shows as the animation, never as text in the chat.
                         st["activity"] = "thinking…"
                     elif event.kind == "tool":
-                        # Tool work is animation only — no "· toolname" lines left in the chat.
                         if event.data.get("phase") == "start":
+                            # The current action, live in the spinner.
                             st["activity"] = f"{event.data['name']} {_fmt_tool(event.data)}".strip()
                         else:
-                            st["activity"] = "working…"  # keep the spinner up between steps
+                            # A clean, persistent progress line — what was done — so Almir can follow
+                            # along (not the reasoning). Green for done, red for a problem.
+                            ok = event.data.get("ok", True)
+                            summary = str(event.data.get("summary") or event.data.get("name", ""))
+                            mark = "[green]●[/]" if ok else "[red]●[/]"
+                            live.console.print(f"{mark} [dim]{summary}[/]")
+                            st["activity"] = "working…"
                     elif event.kind == "reset":
                         # Sali thought out loud or made a false start before acting — wipe it so the
                         # chat keeps only the clean final answer; the work itself was the animation.

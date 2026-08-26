@@ -299,16 +299,15 @@ class AgentLoop:
                     res: ChatResult | None = None
                     attempt = 0
                     while res is None:
-                        streamed = False
                         try:
+                            # We DON'T stream the model's content live: if this iteration ends in a
+                            # tool call, that content was just thinking-out-loud (never shown); only
+                            # the final answer is revealed. Thinking drives the animation, not chat.
                             async for chunk in self.provider.chat_stream(
                                 messages, tools=specs or None, options=_VOICE
                             ):
                                 if chunk.thinking:
                                     yield LoopEvent("thinking", chunk.thinking)
-                                if chunk.content:
-                                    streamed = True
-                                    yield LoopEvent("token", chunk.content)
                                 if chunk.done:
                                     res = chunk.result
                             if res is None:
@@ -320,8 +319,6 @@ class AgentLoop:
                             await journal.event(
                                 "provider_retry", {"attempt": attempt, "error": str(exc)[:200]}
                             )
-                            if streamed:
-                                yield LoopEvent("reset")  # drop any partial before re-sampling
                             yield LoopEvent("status", "let me try that again")
                     latency = int((self.clock.now() - started).total_seconds() * 1000)
                     tokens_used += res.tokens_in + res.tokens_out
@@ -330,11 +327,10 @@ class AgentLoop:
                         latency_ms=latency, tokens_in=res.tokens_in, tokens_out=res.tokens_out,
                     )
                     if not res.tool_calls:
-                        # A tool call that leaked out as raw JSON text — never leave Almir staring
-                        # at it. Wipe what streamed and ask for a clean redo (bounded).
+                        # Content that's really a leaked tool-call JSON blob — recover (it was never
+                        # shown, since we don't stream content) and ask for a clean redo.
                         if json_recovery < _MAX_JSON_RECOVERY and _looks_like_leaked_tool_call(res.content):
                             json_recovery += 1
-                            yield LoopEvent("reset")
                             messages.append(ChatMessage(role="assistant", content=res.content))
                             messages.append(ChatMessage(role="user", content=_JSON_RECOVERY_NUDGE))
                             await journal.event("json_recovery", {"attempt": json_recovery})
@@ -347,7 +343,6 @@ class AgentLoop:
                         if (follow_through < _MAX_FOLLOW_THROUGH
                                 and await self._stalled(user_input, res.content)):
                             follow_through += 1
-                            yield LoopEvent("reset")  # clear the preamble; the real answer streams fresh
                             messages.append(ChatMessage(role="assistant", content=res.content))
                             messages.append(ChatMessage(role="user", content=_FOLLOW_THROUGH_NUDGE))
                             await journal.event("follow_through", {"attempt": follow_through})
@@ -355,22 +350,21 @@ class AgentLoop:
                             iteration += 1
                             continue
                         final_text = res.content
+                        yield LoopEvent("token", res.content)  # reveal only the final answer, clean
                         break
                     messages.append(
                         ChatMessage(role="assistant", content=res.content, tool_calls=res.tool_calls)
                     )
-                    # Whatever Sali said before acting was thinking-out-loud, not the answer — wipe
-                    # it from the display so only the final response remains, clean. The work itself
-                    # shows as the animation (the tool events below), not as chat text.
-                    yield LoopEvent("reset")
                     for call in res.tool_calls:
                         tool_calls += 1
                         sig = f"{call.name}:{json.dumps(call.arguments, sort_keys=True, default=str)}"
                         tool_sigs[sig] = tool_sigs.get(sig, 0) + 1
                         yield LoopEvent("tool", call.name,
                                         {"phase": "start", "name": call.name, "args": call.arguments})
-                        tool_msg = await self._handle_tool(conn, journal, grants, call)
-                        yield LoopEvent("tool", call.name, {"phase": "done", "name": call.name})
+                        tool_msg, ok, summary = await self._handle_tool(conn, journal, grants, call)
+                        # A clean, persistent progress line: what was done + a short result.
+                        yield LoopEvent("tool", call.name, {"phase": "done", "name": call.name,
+                                                            "ok": ok, "summary": summary})
                         messages.append(tool_msg)
                     # Going in circles? Break the investigate-forever loop with a course-correction.
                     repeats = sum(count - 1 for count in tool_sigs.values() if count > 1)
@@ -430,11 +424,13 @@ class AgentLoop:
 
     async def _handle_tool(
         self, conn: Any, journal: RunJournal, grants: SessionGrants, call: ToolCall
-    ) -> ChatMessage:
+    ) -> tuple[ChatMessage, bool, str]:
+        """Run one tool; return (message-for-the-model, succeeded?, short summary) — the flag +
+        summary let the UI print a clean ✓/✗ progress line of what was actually done."""
         tool = self.registry.get(call.name)
         if tool is None:
             await journal.event("tool.unknown", {"name": call.name})
-            return _tool_message(call.name, {"error": f"unknown tool '{call.name}'"})
+            return _tool_message(call.name, {"error": f"unknown tool '{call.name}'"}), False, "unknown tool"
 
         decision = self.policy.decide(tool, call.arguments, grants)
         await journal.event(
@@ -447,7 +443,7 @@ class AgentLoop:
             await self._audit(conn, journal.run_id, tool, call.arguments, decision, None, None, None)
             await self._emit(conn, "tool.denied", journal.run_id,
                              {"tool": tool.name, "reason": decision.reason})
-            return _tool_message(tool.name, {"denied": decision.reason})
+            return _tool_message(tool.name, {"denied": decision.reason}), False, "blocked by policy"
 
         if decision.action is Action.CONFIRM:
             await journal.set_state(RunState.AWAIT_CONFIRM)
@@ -458,7 +454,7 @@ class AgentLoop:
                 )
                 await self._emit(conn, "tool.denied", journal.run_id,
                                  {"tool": tool.name, "reason": "user declined"})
-                return _tool_message(tool.name, {"denied": "user declined"})
+                return _tool_message(tool.name, {"denied": "user declined"}), False, "you declined"
 
         # Write-ahead: the 'executing' row is committed BEFORE the side effect (fix M15).
         exec_id = new_id()
@@ -507,11 +503,14 @@ class AgentLoop:
         )
 
         if success:
-            return _tool_message(
-                tool.name, {"ok": True, "output": redact_obj(result.output), "verified": True}
+            return (
+                _tool_message(tool.name, {"ok": True, "output": redact_obj(result.output),
+                                          "verified": True}),
+                True, result.display or tool.name,
             )
-        return _tool_message(
-            tool.name, {"ok": False, "error": redact_obj(result.error or verify.detail)}
+        return (
+            _tool_message(tool.name, {"ok": False, "error": redact_obj(result.error or verify.detail)}),
+            False, result.error or verify.detail or result.display or "failed",
         )
 
     async def _audit(
