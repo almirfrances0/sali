@@ -280,6 +280,7 @@ async def _agent(settings: Settings, message: str | None) -> None:
                 continue
             await _stream_turn(loop, text, session)
     finally:
+        await loop.aclose()  # shut down Sali's browser if it was launched
         await kernel.close()
 
 

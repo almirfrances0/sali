@@ -78,6 +78,17 @@ class CommsSink(Protocol):
     async def calendar_add(self, summary: str, start: Any, end: Any, *, location: str | None = None) -> str: ...
 
 
+class BrowserSink(Protocol):
+    """How a tool drives Sali's browser (§44). Concrete impl (FakeBrowser / PlaywrightFirefox) is
+    injected by the runtime; it holds Sali's own Firefox, seeded with Almir's login cookies."""
+
+    async def open(self, url: str) -> Any: ...
+    async def read(self) -> Any: ...
+    async def click(self, selector: str) -> Any: ...
+    async def fill(self, selector: str, value: str) -> Any: ...
+    async def screenshot(self, path: str) -> str: ...
+
+
 @dataclass(slots=True)
 class ToolContext:
     settings: Settings
@@ -91,6 +102,7 @@ class ToolContext:
     documents: IngestSink | None = None  # injected by the loop; lets a tool ingest a document
     remote: RemoteRunner | None = None  # injected by the loop; lets a tool run on a remote host
     comms: CommsSink | None = None  # injected by the loop; lets a tool read/send email + calendar
+    browser: BrowserSink | None = None  # injected by the loop; lets a tool drive Sali's browser
 
     @property
     def paths(self) -> PathGuard:

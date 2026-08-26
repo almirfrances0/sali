@@ -84,6 +84,15 @@ class CommsSettings(BaseModel):
     calendar: CalAccountConfig | None = None
 
 
+class BrowserSettings(BaseModel):
+    # Sali's own headless Firefox via Playwright. 'fake' selects the in-memory browser for tests.
+    backend: Literal["playwright", "fake"] = "playwright"
+    headless: bool = True
+    firefox_profile: str | None = None  # profile dir to import login cookies from; None = auto-detect
+    import_cookies: bool = True  # seed Sali's browser with Almir's Firefox session cookies
+    mem_floor_mb: int = 1500  # don't launch below this much free RAM (this box is 15GB)
+
+
 def _default_fs_deny() -> list[str]:
     # This machine is Sali's home — it's open to it. Only credentials and the separate
     # `salix` project stay protected by default (a light guard the owner can remove).
@@ -121,6 +130,7 @@ class Settings(BaseSettings):
     permissions: PermissionsSettings = Field(default_factory=PermissionsSettings)
     ssh: SshSettings = Field(default_factory=SshSettings)
     comms: CommsSettings = Field(default_factory=CommsSettings)
+    browser: BrowserSettings = Field(default_factory=BrowserSettings)
 
     @classmethod
     def settings_customise_sources(

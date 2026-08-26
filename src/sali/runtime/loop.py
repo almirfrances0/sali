@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
+from sali.browser.service import build_browser
 from sali.comms.service import CommsService
 from sali.config.secrets import SecretStore
 from sali.config.settings import Settings
@@ -243,8 +244,14 @@ class AgentLoop:
         self._documents = IngestService(pool, provider)  # document ingestion → memory (§44)
         self._remote = build_remote_runner(settings.ssh)  # remote hosts over ssh (§44)
         self._comms = CommsService(settings.comms, SecretStore())  # email + calendar (§44)
+        self._browser = build_browser(settings.browser)  # Sali's own Firefox (§44); launched lazily
         self._consolidating: asyncio.Task[Any] | None = None
         self._last_consolidate: Any = None
+
+    async def aclose(self) -> None:
+        """Release loop-lifetime resources (Sali's live browser). Best-effort; safe to call twice."""
+        with contextlib.suppress(Exception):
+            await self._browser.aclose()
 
     async def run(self, user_input: str, session_id: UUID | None = None) -> AgentResult:
         """Run one turn to completion (non-streaming) by consuming the event stream."""
@@ -619,7 +626,7 @@ class AgentLoop:
         ctx = ToolContext(settings=self.settings, clock=self.clock, pool=self.pool,
                           memory=self._memory_sink, graph=self._graph, tasks=self._tasks,
                           schedules=self._schedules, documents=self._documents, remote=self._remote,
-                          comms=self._comms)
+                          comms=self._comms, browser=self._browser)
         result = await dispatch.run_tool(tool, call.arguments, ctx)
 
         await journal.set_state(RunState.OBSERVE)

@@ -98,7 +98,7 @@ layers = [
     "sali.context",
     "sali.retrieval",
     "sali.twin | sali.learning | sali.ingest",
-    "sali.memory | sali.graph | sali.tasks | sali.scheduler | sali.comms",
+    "sali.memory | sali.graph | sali.tasks | sali.scheduler | sali.comms | sali.browser",
     "sali.security | sali.verify",
     "sali.tools",
     "sali.provider",
