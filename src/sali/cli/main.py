@@ -203,15 +203,18 @@ async def _stream_turn(loop: Any, text: str, session: UUID) -> None:
                 async for event in loop.astream(text, session_id=session):
                     if event.kind == "status":
                         st["activity"] = f"{event.text}…"
+                    elif event.kind == "thinking":
+                        # Reasoning shows as the animation, never as text in the chat.
+                        st["activity"] = "thinking…"
                     elif event.kind == "tool":
+                        # Tool work is animation only — no "· toolname" lines left in the chat.
                         if event.data.get("phase") == "start":
-                            st["activity"] = f"running {event.data['name']} {_fmt_tool(event.data)}".rstrip()
+                            st["activity"] = f"{event.data['name']} {_fmt_tool(event.data)}".strip()
                         else:
-                            live.console.print(f"[dim]  · {event.data['name']}[/]")
-                            st["activity"] = "typing…"
+                            st["activity"] = "working…"  # keep the spinner up between steps
                     elif event.kind == "reset":
-                        # A false-start (leaked JSON, or a bare "I'll do it" preamble) is being
-                        # redone — wipe what typed out so the real answer starts on a clean line.
+                        # Sali thought out loud or made a false start before acting — wipe it so the
+                        # chat keeps only the clean final answer; the work itself was the animation.
                         st["target"] = ""
                         st["shown"] = 0
                         st["activity"] = "…"

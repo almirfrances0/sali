@@ -349,6 +349,10 @@ class AgentLoop:
                     messages.append(
                         ChatMessage(role="assistant", content=res.content, tool_calls=res.tool_calls)
                     )
+                    # Whatever Sali said before acting was thinking-out-loud, not the answer — wipe
+                    # it from the display so only the final response remains, clean. The work itself
+                    # shows as the animation (the tool events below), not as chat text.
+                    yield LoopEvent("reset")
                     for call in res.tool_calls:
                         tool_calls += 1
                         yield LoopEvent("tool", call.name,
