@@ -32,12 +32,14 @@ def default_registry() -> ToolRegistry:
         git,
         graph_tool,
         memory_tool,
+        schedule_tool,
         system,
         task_tool,
         web,
     )
 
     registry = ToolRegistry()
-    for module in (system, filesystem, git, exec_tool, web, memory_tool, graph_tool, task_tool):
+    for module in (system, filesystem, git, exec_tool, web, memory_tool, graph_tool, task_tool,
+                   schedule_tool):
         module.register_builtins(registry)
     return registry

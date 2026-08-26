@@ -33,6 +33,7 @@ from sali.retrieval.router import classify
 from sali.retrieval.service import RetrievalService
 from sali.runtime.journal import RunJournal
 from sali.runtime.state import RunState, resume_action
+from sali.scheduler.store import ScheduleStore
 from sali.security.confirm import Confirmer
 from sali.security.policy import Action, PolicyEngine, SessionGrants
 from sali.security.redact import redact_obj
@@ -234,6 +235,7 @@ class AgentLoop:
         self._memory_sink = _MemorySink(retrieval.memory)  # lets the remember tool save durably
         self._graph = GraphService(pool)  # lets the relate tool write conversational edges
         self._tasks = TaskStore(pool)  # persistent multi-step tasks (§24), resumed across restarts
+        self._schedules = ScheduleStore(pool, self.clock)  # recurring work (§44)
         self._consolidating: asyncio.Task[Any] | None = None
         self._last_consolidate: Any = None
 
@@ -608,7 +610,8 @@ class AgentLoop:
         await journal.set_state(RunState.EXECUTE_TOOL)
         started = self.clock.now()
         ctx = ToolContext(settings=self.settings, clock=self.clock, pool=self.pool,
-                          memory=self._memory_sink, graph=self._graph, tasks=self._tasks)
+                          memory=self._memory_sink, graph=self._graph, tasks=self._tasks,
+                          schedules=self._schedules)
         result = await dispatch.run_tool(tool, call.arguments, ctx)
 
         await journal.set_state(RunState.OBSERVE)

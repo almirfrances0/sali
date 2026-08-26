@@ -466,6 +466,69 @@ async def _learn(settings: Settings) -> None:
 
 
 @app.command()
+def schedules() -> None:
+    """List Sali's recurring schedules (§44)."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    asyncio.run(_schedules(settings))
+
+
+async def _schedules(settings: Settings) -> None:
+    from sali.db.pool import create_pool
+    from sali.scheduler.store import ScheduleStore
+
+    pool = await create_pool(settings)
+    try:
+        rows = await ScheduleStore(pool).list_all()
+    finally:
+        await pool.close()
+    if not rows:
+        console.print("[dim]No schedules. Ask Sali to schedule something (it fires as a full turn).[/]")
+        return
+    for s in rows:
+        nxt = f" · next {s.next_run_at:%Y-%m-%d %H:%M}" if s.enabled else ""
+        console.print(f"• {s.one_line()}[dim]{nxt}[/]")
+
+
+@app.command()
+def scheduler(
+    interval: int = typer.Option(30, help="Seconds between checks for due schedules."),
+) -> None:
+    """Run the scheduler: fire due schedules as unattended Sali turns (§44). Ctrl-C stops."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    asyncio.run(_scheduler(settings, interval))
+
+
+async def _scheduler(settings: Settings, interval: int) -> None:
+    from sali.kernel import Kernel
+    from sali.scheduler.daemon import SchedulerDaemon
+    from sali.scheduler.store import ScheduleStore
+    from sali.security.confirm import AutoDenyConfirmer
+
+    kernel = Kernel.create(settings)
+    pool = await kernel.pool()
+    # Scheduled turns run with no one at the terminal, so a genuinely-destructive step is auto-declined
+    # (Sali still runs everything else freely) rather than blocking on a confirm nobody can answer.
+    loop = await kernel.agent_loop(confirmer=AutoDenyConfirmer())
+    session = persistent_session_id()
+
+    class _LoopRunner:
+        async def run(self, prompt: str) -> Any:
+            return await loop.run(prompt, session_id=session)
+
+    daemon = SchedulerDaemon(ScheduleStore(pool), _LoopRunner(), pool=pool, poll_s=float(interval))
+    console.print(f"[dim]scheduler running (checking every {interval}s) — Ctrl-C to stop[/]")
+    task = asyncio.create_task(daemon.run_forever())
+    try:
+        await task
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        daemon.stop()
+    finally:
+        await kernel.close()
+
+
+@app.command()
 def tasks() -> None:
     """Show the persistent tasks Sali has in progress (they survive restarts)."""
     settings = load_settings()

@@ -51,6 +51,14 @@ class TaskSink(Protocol):
     async def finish(self, task_id: Any, *, status: str = "done", result: str | None = None) -> None: ...
 
 
+class ScheduleSink(Protocol):
+    """How a tool sets up or cancels a recurring job (§44). Concrete impl (ScheduleStore) is injected
+    by the runtime; the schedule is durable and fires as a Sali turn at its cron/interval time."""
+
+    async def create(self, name: str, when: str, prompt: str) -> Any: ...
+    async def delete(self, name: str) -> int: ...
+
+
 @dataclass(slots=True)
 class ToolContext:
     settings: Settings
@@ -60,6 +68,7 @@ class ToolContext:
     memory: MemorySink | None = None  # injected by the loop; None in tests / pool-less probes
     graph: GraphSink | None = None  # injected by the loop; lets a tool assert a relationship
     tasks: TaskSink | None = None  # injected by the loop; lets a tool run a persistent task
+    schedules: ScheduleSink | None = None  # injected by the loop; lets a tool set up recurring work
 
     @property
     def paths(self) -> PathGuard:
