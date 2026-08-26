@@ -98,6 +98,22 @@ async def test_records_failures_and_does_not_duplicate(db_conn: Any) -> None:
     assert await record_failures(db_conn) == 0  # idempotent — the same failure isn't re-recorded
 
 
+async def test_relearning_a_procedure_reuses_the_name_and_does_not_churn(db_conn: Any) -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    for i, run in enumerate((uuid4(), uuid4())):
+        await _exec(db_conn, run, "git pull", base + timedelta(seconds=i * 10))
+        await _exec(db_conn, run, "docker compose up -d", base + timedelta(seconds=i * 10 + 1))
+    # Only ONE naming response scripted — the second pass must reuse the stored name (no model call).
+    fake = FakeModelProvider(responses=[ChatResult("Docker deploy", None, [], 3, 3, "fake")])
+    await learn_procedures(db_conn, fake, threshold=2)
+    await learn_procedures(db_conn, fake, threshold=2)  # re-consolidate
+    current = await db_conn.fetch(
+        "SELECT content FROM memory WHERE layer='procedural' AND valid_until IS NULL"
+    )
+    assert len(current) == 1  # exactly one current — no supersession churn
+    assert "Docker deploy" in current[0]["content"]  # reused the name, not a re-generated one
+
+
 async def test_failure_records_the_fix_when_a_later_step_succeeded(db_conn: Any) -> None:
     run = uuid4()
     base = datetime(2026, 2, 1, tzinfo=UTC)

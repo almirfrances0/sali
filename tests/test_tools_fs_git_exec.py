@@ -76,6 +76,8 @@ def test_delete_self_escalates_outside_scratch() -> None:
     # Scratch deletions run free; anything else escalates to R4 (confirm).
     assert DeleteFile().assess({"path": "/tmp/junk"}) is RiskLevel.R1
     assert DeleteFile().assess({"path": str(Path.home() / "important.txt")}) is RiskLevel.R4
+    # Path traversal can't disguise a home file as scratch to skip the confirm (security fix).
+    assert DeleteFile().assess({"path": "/tmp/../home/almir/important.txt"}) is RiskLevel.R4
 
 
 # ---- git --------------------------------------------------------------------------------

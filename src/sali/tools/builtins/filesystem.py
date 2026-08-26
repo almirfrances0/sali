@@ -213,7 +213,13 @@ class DeleteFile(Tool):
     idempotent = False
 
     def assess(self, args: dict[str, Any]) -> RiskLevel:
-        target = str(Path(str(args.get("path", ""))).expanduser())
+        # Resolve the REAL path first (realpath, like run()'s PathGuard) — otherwise
+        # "/tmp/../home/almir/x" or a symlink under /tmp would masquerade as scratch and
+        # slip a home-file deletion past the confirm gate.
+        try:
+            target = str(Path(str(args.get("path", ""))).expanduser().resolve())
+        except (OSError, ValueError, RuntimeError):
+            return RiskLevel.R4  # can't resolve → treat as risky, pause to confirm
         scratch = ("/tmp/", "/var/tmp/", str(Path.home() / ".local" / "share" / "sali" / "workspace"))
         return RiskLevel.R1 if any(target.startswith(s) for s in scratch) else RiskLevel.R4
 

@@ -53,14 +53,23 @@ async def learn_procedures(
     for steps, runs in sequences_by_run([dict(r) for r in rows]).items():
         if len(runs) < threshold:
             continue  # not enough evidence yet — never learn from one observation (§17)
-        name = await _name_procedure(provider, list(steps))
+        sig = signature(steps)
+        # Reuse the name we already gave this procedure. The model name is non-deterministic, so
+        # re-naming on every pass would rewrite the content under a stable claim_key — churning the
+        # memory and logging false contradictions. Same name → same content → a clean corroboration.
+        existing = await conn.fetchrow(
+            "SELECT structured FROM memory WHERE claim_key=$1 AND valid_until IS NULL",
+            f"procedure:{sig}",
+        )
+        name = (existing["structured"] or {}).get("name") if existing else None
+        if not name:
+            name = await _name_procedure(provider, list(steps))
         await memory_writer.remember(
             conn, layer=MemoryLayer.PROCEDURAL,
             content=f"{name} — Almir's usual steps: " + " → ".join(steps),
-            source=MemorySource.INFERENCE, functional=True,
-            claim_key=f"procedure:{signature(steps)}",
+            source=MemorySource.INFERENCE, functional=True, claim_key=f"procedure:{sig}",
             importance=0.7, obs_conf=min(0.9, 0.5 + 0.1 * len(runs)),
-            structured={"steps": list(steps), "evidence": len(runs)},
+            structured={"steps": list(steps), "evidence": len(runs), "name": name},
         )
         learned.append(LearnedProcedure(name=name, steps=list(steps), evidence=len(runs)))
     return learned

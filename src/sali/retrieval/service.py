@@ -49,7 +49,11 @@ class RetrievalService:
         ]
         if not words:
             return []
-        patterns = [f"%{w}%" for w in words[:6]]
+        # Escape LIKE metacharacters so a token like "sali_demo" matches a literal underscore,
+        # not ILIKE's single-char wildcard (which would over-match unrelated node names).
+        def _esc(w: str) -> str:
+            return w.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        patterns = [f"%{_esc(w)}%" for w in words[:6]]
         facts: list[GraphFact] = []
         async with self.pool.acquire() as conn:
             seeds = await conn.fetch(

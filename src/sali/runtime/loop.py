@@ -33,6 +33,7 @@ from sali.security.confirm import Confirmer
 from sali.security.policy import Action, PolicyEngine, SessionGrants
 from sali.security.redact import redact_obj
 from sali.tools import dispatch
+from sali.tools.base import VerifyResult
 from sali.tools.context import ToolContext
 from sali.tools.registry import ToolRegistry
 from sali.twin import awareness as twin_awareness
@@ -189,23 +190,24 @@ class AgentLoop:
             iterations=int(final.data["iterations"]), tool_calls=int(final.data["tool_calls"]),
         )
 
-    async def _machine_changes(self, conn: Any, journal: RunJournal) -> str | None:
-        """A one-line heads-up about machine changes Sali hasn't noticed yet (or None). Reading
-        it acknowledges it, so it's surfaced once — Sali mentions it naturally, then moves on."""
+    async def _machine_changes(self, conn: Any, journal: RunJournal) -> tuple[str | None, int | None]:
+        """A one-line heads-up about machine changes Sali hasn't noticed yet, plus the watermark
+        to acknowledge — but NOT acknowledged here: the caller acks only once the turn actually
+        reached the model, so a failed turn doesn't silently swallow the change."""
         try:
             phrases, through = await twin_awareness.unacknowledged_changes(conn)
         except Exception:  # noqa: BLE001 - awareness is a nicety, never break a turn
-            return None
+            return None, None
         if not phrases:
-            return None
-        await twin_awareness.acknowledge(conn, through)
+            return None, None
         await journal.event("twin_changes", {"count": len(phrases)})
-        return (
+        note = (
             "While Almir was away, some things changed on your machine: "
             + "; ".join(phrases[:6])
             + ". If it's worth a heads-up, mention it to him naturally and briefly, in your own "
             "words — don't make a big deal of it."
         )
+        return note, through
 
     async def sense(self, partial: str) -> str:
         """A quiet hunch about what Almir is typing, formed the instant he pauses — retrieval
@@ -255,7 +257,7 @@ class AgentLoop:
                 specs = self.registry.advertise()
                 # The 'interpret' branch of observation (§16): notice machine changes that
                 # happened while Almir was away, so Sali can bring them up in its own words.
-                machine_changes = await self._machine_changes(conn, journal)
+                machine_changes, ack_changes_through = await self._machine_changes(conn, journal)
                 assembled = self.context.assemble(
                     user_input, bundle, specs,
                     live_note=LIVE_NOTE if plan.needs_live else None, history=history,
@@ -390,7 +392,15 @@ class AgentLoop:
                 yield LoopEvent("final", final_text, {
                     "run_id": str(journal.run_id), "iterations": iteration, "tool_calls": tool_calls,
                 })
-                await self._maybe_compact(conn, session_id)  # keep the one session from ever breaking
+                # Post-completion housekeeping — the run is already DONE, so a hiccup here must
+                # NOT flip a finished turn to FAILED. Ack the machine-changes we surfaced (only
+                # now that the turn actually reached the model) and fold the session if long.
+                try:
+                    if ack_changes_through is not None:
+                        await twin_awareness.acknowledge(conn, ack_changes_through)
+                    await self._maybe_compact(conn, session_id)  # keep the one session from breaking
+                except Exception as exc:  # noqa: BLE001 - housekeeping, never fail a done turn
+                    self.log.warning("post_turn_housekeeping_failed", error=str(exc))
             except Exception as exc:
                 self.log.error("run_failed", run_id=str(journal.run_id), error=str(exc))
                 await journal.event("run.error", {"error": str(exc)})
@@ -446,7 +456,10 @@ class AgentLoop:
 
         await journal.set_state(RunState.OBSERVE)
         await journal.set_state(RunState.VERIFY)
-        verify = await tool.verify(call.arguments, result)
+        try:
+            verify = await tool.verify(call.arguments, result)
+        except Exception as exc:  # noqa: BLE001 - a raising verifier is a failed verification,
+            verify = VerifyResult(False, f"verify raised: {exc}")  # not an orphaned executing row
         duration = int((self.clock.now() - started).total_seconds() * 1000)
         success = result.ok and verify.success
 

@@ -214,13 +214,18 @@ async def observe_services() -> list[TwinEntity]:
     return entities
 
 
+# Virtual/ephemeral interfaces (Docker veth pairs, bridges, VPN taps) come and go — they are
+# runtime churn, not durable machine structure, so they don't belong in the twin.
+_EPHEMERAL_IFACES = ("veth", "br-", "docker", "virbr", "vnet", "tap", "tun", "vmnet")
+
+
 async def observe_network() -> list[TwinEntity]:
     entities: list[TwinEntity] = []
     net = Path("/sys/class/net")
     if not net.is_dir():
         return entities
     for iface in sorted(p.name for p in net.iterdir()):
-        if iface == "lo":
+        if iface == "lo" or iface.startswith(_EPHEMERAL_IFACES):
             continue
         if _read(f"/sys/class/net/{iface}/operstate").strip() != "up":
             continue

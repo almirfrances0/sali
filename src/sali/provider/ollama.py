@@ -143,7 +143,8 @@ class OllamaProvider:
         return [list(vec) for vec in resp.embeddings]
 
     def count_tokens(self, text: str) -> int:
-        # Phase-0 heuristic; a bundled HF tokenizer replaces this in Phase 4 (fix H7).
+        # Still a ~4-chars-per-token heuristic. Callers treat it as a conservative *upper bound*
+        # (context engine pads by 1.2×), so it's safe; a real tokenizer would only tighten it.
         return max(1, len(text) // 4)
 
     async def health(self) -> bool:

@@ -230,6 +230,17 @@ async def test_awareness_dedups_add_then_remove(db_conn: Any) -> None:
     assert len(tmp_mentions) == 1 and "gone" in tmp_mentions[0]
 
 
+async def test_refresh_updates_node_name_on_version_bump(db_conn: Any) -> None:
+    await sync_snapshot(db_conn, _snap([
+        TwinEntity("software", "software:ollama", "Ollama 0.32", {"version": "0.32"}, "runs")]))
+    await sync_snapshot(db_conn, _snap([
+        TwinEntity("software", "software:ollama", "Ollama 0.33", {"version": "0.33"}, "runs")]))
+    name = await db_conn.fetchval(
+        "SELECT name FROM graph_node WHERE canonical_key='software:ollama' AND valid_until IS NULL"
+    )
+    assert name == "Ollama 0.33"  # the tree won't render a stale version forever
+
+
 async def test_tree_renders_structure(live_pool: Any) -> None:
     snap = _snap([
         TwinEntity("hardware", "hw:gpu", "RTX 4070", {}, "has"),

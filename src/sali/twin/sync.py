@@ -50,7 +50,7 @@ async def sync_snapshot(
         conn, node_type="machine", name=snapshot.machine_name,
         canonical_key=snapshot.machine_key, source=source, props=snapshot.machine_props,
     )
-    await refresh_props(conn, machine.id, snapshot.machine_props)
+    await refresh_props(conn, machine.id, snapshot.machine_props, name=snapshot.machine_name)
 
     before = await _existing_entity_keys(conn, machine.id)
     seen: set[str] = set()
@@ -59,7 +59,7 @@ async def sync_snapshot(
             conn, node_type=ent.kind, name=ent.name, canonical_key=ent.key,
             source=source, props=ent.props,
         )
-        await refresh_props(conn, node.id, ent.props)
+        await refresh_props(conn, node.id, ent.props, name=ent.name)  # keep name current on upgrade
         await relate(conn, src_id=machine.id, dst_id=node.id, rel_type=ent.relation, source=source)
         seen.add(ent.key)
 

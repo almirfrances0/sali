@@ -57,16 +57,17 @@ async def ensure_node(
     return row_to_node(row)
 
 
-async def refresh_props(conn: Any, node_id: UUID, props: dict[str, Any]) -> None:
-    """Update a node's current attributes so re-observation reflects changes (a version bump,
-    a resized disk). Unlike ``ensure_node``'s additive merge (existing wins, to protect
-    established identity), this is new-wins on the given keys — the twin owns this node's state
-    and is the authority on it. Also bumps last_seen."""
-    if not props:
-        return
+async def refresh_props(
+    conn: Any, node_id: UUID, props: dict[str, Any], *, name: str | None = None
+) -> None:
+    """Update a node's current attributes (and display name) so re-observation reflects changes —
+    a version bump, a resized disk, a renamed thing. Unlike ``ensure_node``'s additive merge
+    (existing wins, to protect established identity), this is new-wins on the given keys and name:
+    the twin owns this node's state and is the authority on it. Also bumps last_seen."""
     await conn.execute(
-        "UPDATE graph_node SET props = props || $2, last_seen = now() WHERE id=$1",
-        node_id, props,
+        "UPDATE graph_node SET props = props || $2, name = COALESCE($3, name), "
+        "last_seen = now() WHERE id=$1",
+        node_id, props, name,
     )
 
 
