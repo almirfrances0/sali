@@ -117,12 +117,28 @@ def test_build_twin_memories_covers_facets() -> None:
         TwinEntity("software", "software:ollama", "Ollama 0.32", {}, "runs"),
         TwinEntity("model", "model:sali:latest", "sali:latest", {}, "has_model"),
         TwinEntity("project", "project:sali", "sali", {"path": "/home/almir/Desktop/sali"}, "hosts"),
+        TwinEntity("service", "service:nginx", "nginx (running)", {"state": "active"}, "runs"),
+        TwinEntity("container", "container:db", "db (postgres:18)", {"image": "postgres:18"}, "runs"),
+        TwinEntity("network", "net:eth0", "eth0 (up)", {"ip": "192.168.1.5/24"}, "has"),
     ])
     mems = dict(build_twin_memories(snap))
     assert "RTX 4070" in mems["twin:machine"] and "i9-11900K" in mems["twin:machine"]
+    assert "GPU:" in mems["twin:machine"] and "CPU:" in mems["twin:machine"]  # keyword anchors
     assert "Ollama 0.32" in mems["twin:software"]
     assert "sali:latest" in mems["twin:models"]
     assert "/home/almir/Desktop/sali" in mems["twin:projects"]
+    # the previously-missing volatile facets now become retrievable memories
+    assert "nginx" in mems["twin:services"]
+    assert "db" in mems["twin:containers"]
+    assert "192.168.1.5/24" in mems["twin:network"] and "IP" in mems["twin:network"]
+
+
+def test_build_twin_memories_emits_empty_membership_facets_for_retraction() -> None:
+    # No services/containers/network observed → still emit an explicit "none" so a functional
+    # re-observation retracts a previously-true value instead of leaving it current forever.
+    mems = dict(build_twin_memories(_snap([TwinEntity("hardware", "hw:gpu", "RTX 4070", {}, "has")])))
+    assert "No Docker containers" in mems["twin:containers"]
+    assert "twin:services" in mems and "twin:network" in mems
 
 
 async def test_twin_memories_are_functional_and_stay_current(db_conn: Any) -> None:

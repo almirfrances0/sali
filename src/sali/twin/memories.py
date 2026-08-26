@@ -26,17 +26,18 @@ def _find(snapshot: TwinSnapshot, key: str) -> str | None:
 
 
 def build_twin_memories(snapshot: TwinSnapshot) -> list[tuple[str, str]]:
-    """Return ``(claim_key, content)`` for each non-empty facet — the durable, retrievable
-    natural-language view of the machine. Empty facets are skipped."""
+    """Return ``(claim_key, content)`` per facet — the durable, retrievable natural-language view of
+    the machine. Static facets (software/models/projects/envs) are skipped when empty; the volatile
+    membership facets (services/containers/network) are ALWAYS emitted, with an explicit empty
+    phrasing, so a functional re-observation retracts a value that's no longer true."""
     out: list[tuple[str, str]] = []
     props = snapshot.machine_props or {}
 
-    hw_bits = [
-        b for b in (
-            _find(snapshot, "hw:cpu"), _find(snapshot, "hw:memory"),
-            _find(snapshot, "hw:gpu"), _find(snapshot, "hw:storage:root"),
-        ) if b
-    ]
+    # Each hardware bit is prefixed with its category word (CPU/RAM/GPU/disk) so a plain keyword
+    # question — "what gpu do i have" — actually matches, even when the device name ("RTX 4070")
+    # doesn't contain the word.
+    hw_labels = (("hw:cpu", "CPU"), ("hw:memory", "RAM"), ("hw:gpu", "GPU"), ("hw:storage:root", "disk"))
+    hw_bits = [f"{label}: {name}" for key, label in hw_labels if (name := _find(snapshot, key))]
     kernel = props.get("kernel", "")
     arch = props.get("arch", "")
     machine = (
@@ -60,6 +61,32 @@ def build_twin_memories(snapshot: TwinSnapshot) -> list[tuple[str, str]]:
     ]
     if projects:
         out.append(("twin:projects", "Git projects on this machine: " + ", ".join(projects) + "."))
+
+    # Membership facets that CHANGE over time (a service stops, a container exits, an interface goes
+    # down). These are ALWAYS emitted — with an explicit empty phrasing — so a functional
+    # re-observation RETRACTS the old value ("containers: X" → "no containers") instead of leaving a
+    # stale fact current forever. Category words are baked in for keyword recall.
+    services = _names(snapshot, "service")
+    out.append(("twin:services",
+                ("Services running on this machine: " + ", ".join(services) + ".") if services
+                else "No tracked services are currently running on this machine."))
+
+    containers = _names(snapshot, "container")
+    out.append(("twin:containers",
+                ("Docker containers currently running: " + ", ".join(containers) + ".") if containers
+                else "No Docker containers are currently running."))
+
+    net_bits = [
+        f"{e.name} {ip}" if (ip := e.props.get("ip")) else e.name
+        for e in snapshot.by_kind("network")
+    ]
+    out.append(("twin:network",
+                ("Network interfaces and IP addresses: " + ", ".join(net_bits) + ".") if net_bits
+                else "No active network interfaces on this machine right now."))
+
+    envs = _names(snapshot, "environment")
+    if envs:
+        out.append(("twin:environments", "Python virtual environments here: " + ", ".join(envs) + "."))
     return out
 
 
