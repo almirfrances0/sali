@@ -25,10 +25,10 @@ class ToolRegistry:
 
 
 def default_registry() -> ToolRegistry:
-    """A registry with Sali's built-in tools (system, filesystem, git, execute_command, web)."""
-    from sali.tools.builtins import exec_tool, filesystem, git, system, web
+    """Sali's built-in tools (system, filesystem, git, execute_command, web, remember)."""
+    from sali.tools.builtins import exec_tool, filesystem, git, memory_tool, system, web
 
     registry = ToolRegistry()
-    for module in (system, filesystem, git, exec_tool, web):
+    for module in (system, filesystem, git, exec_tool, web, memory_tool):
         module.register_builtins(registry)
     return registry

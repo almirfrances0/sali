@@ -19,7 +19,7 @@ from uuid import UUID
 from sali.config.settings import Settings
 from sali.context.engine import LIVE_NOTE, ContextEngine
 from sali.core.clock import Clock, SystemClock
-from sali.core.enums import MemorySource
+from sali.core.enums import MemoryLayer, MemorySource
 from sali.core.errors import ProviderError
 from sali.core.ids import new_id
 from sali.memory.writer import observe
@@ -123,6 +123,24 @@ _STALL_JUDGE_SYSTEM = (
 )
 
 
+class _MemorySink:
+    """Bridges the remember tool to the memory system: write a durable fact, then embed it so it's
+    immediately recallable. Injected into ToolContext so the tools layer needn't import memory."""
+
+    def __init__(self, service: Any) -> None:  # MemoryService
+        self._service = service
+
+    async def remember(
+        self, content: str, *, source: MemorySource, note: str | None = None,
+        importance: float = 0.6,
+    ) -> None:
+        await self._service.remember(
+            layer=MemoryLayer.SEMANTIC, content=content, source=source,
+            importance=importance, note=note,
+        )
+        await self._service.embed_pending()
+
+
 @dataclass(slots=True)
 class AgentResult:
     run_id: UUID
@@ -164,6 +182,7 @@ class AgentLoop:
         self.settings = settings
         self.clock = clock or SystemClock()
         self.log = get_logger("sali.loop")
+        self._memory_sink = _MemorySink(retrieval.memory)  # lets the remember tool save durably
 
     async def run(self, user_input: str, session_id: UUID | None = None) -> AgentResult:
         """Run one turn to completion (non-streaming) by consuming the event stream."""
@@ -467,7 +486,8 @@ class AgentLoop:
         )
         await journal.set_state(RunState.EXECUTE_TOOL)
         started = self.clock.now()
-        ctx = ToolContext(settings=self.settings, clock=self.clock, pool=self.pool)
+        ctx = ToolContext(settings=self.settings, clock=self.clock, pool=self.pool,
+                          memory=self._memory_sink)
         result = await dispatch.run_tool(tool, call.arguments, ctx)
 
         await journal.set_state(RunState.OBSERVE)
