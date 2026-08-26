@@ -35,6 +35,11 @@ dev = [
     "mypy>=1.13",
     "import-linter>=2.0",
 ]
+# §44 extensions that need an extra package. All import-guarded: absent → the feature reports
+# what to install; present → it works. Email over IMAP/SMTP needs nothing (stdlib).
+pdf = ["pypdf>=6"]           # document ingestion of PDFs
+cal = ["icalendar>=6,<8"]   # robust CalDAV event parsing (a minimal parser works without it)
+browser = ["playwright>=1.55"]  # browser automation (also: playwright install firefox)
 
 [project.scripts]
 sali = "sali.__main__:main"
@@ -93,7 +98,7 @@ layers = [
     "sali.context",
     "sali.retrieval",
     "sali.twin | sali.learning | sali.ingest",
-    "sali.memory | sali.graph | sali.tasks | sali.scheduler",
+    "sali.memory | sali.graph | sali.tasks | sali.scheduler | sali.comms",
     "sali.security | sali.verify",
     "sali.tools",
     "sali.provider",
@@ -108,6 +113,6 @@ name = "Concrete model backends are wired only at the edges"
 type = "forbidden"
 source_modules = [
     "sali.memory", "sali.graph", "sali.retrieval", "sali.context",
-    "sali.runtime", "sali.tools", "sali.security", "sali.verify", "sali.ingest",
+    "sali.runtime", "sali.tools", "sali.security", "sali.verify", "sali.ingest", "sali.comms",
 ]
 forbidden_modules = ["sali.provider.ollama", "sali.provider.fake"]

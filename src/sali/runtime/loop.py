@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
+from sali.comms.service import CommsService
+from sali.config.secrets import SecretStore
 from sali.config.settings import Settings
 from sali.context.engine import LIVE_NOTE, ContextEngine
 from sali.core.clock import Clock, SystemClock
@@ -240,6 +242,7 @@ class AgentLoop:
         self._schedules = ScheduleStore(pool, self.clock)  # recurring work (§44)
         self._documents = IngestService(pool, provider)  # document ingestion → memory (§44)
         self._remote = build_remote_runner(settings.ssh)  # remote hosts over ssh (§44)
+        self._comms = CommsService(settings.comms, SecretStore())  # email + calendar (§44)
         self._consolidating: asyncio.Task[Any] | None = None
         self._last_consolidate: Any = None
 
@@ -615,7 +618,8 @@ class AgentLoop:
         started = self.clock.now()
         ctx = ToolContext(settings=self.settings, clock=self.clock, pool=self.pool,
                           memory=self._memory_sink, graph=self._graph, tasks=self._tasks,
-                          schedules=self._schedules, documents=self._documents, remote=self._remote)
+                          schedules=self._schedules, documents=self._documents, remote=self._remote,
+                          comms=self._comms)
         result = await dispatch.run_tool(tool, call.arguments, ctx)
 
         await journal.set_state(RunState.OBSERVE)

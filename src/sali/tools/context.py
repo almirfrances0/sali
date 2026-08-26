@@ -67,6 +67,17 @@ class IngestSink(Protocol):
     async def ingest(self, path: str) -> Any: ...
 
 
+class CommsSink(Protocol):
+    """How a tool reads/sends email and reads/writes the calendar (§44). Concrete impl (CommsService)
+    is injected by the runtime; secrets are resolved at connect time, never stored."""
+
+    async def email_search(self, query: str = "", *, limit: int = 20) -> Any: ...
+    async def email_read(self, uid: str) -> Any: ...
+    async def email_send(self, to: str, subject: str, body: str) -> str: ...
+    async def calendar_list(self, start: Any, end: Any) -> Any: ...
+    async def calendar_add(self, summary: str, start: Any, end: Any, *, location: str | None = None) -> str: ...
+
+
 @dataclass(slots=True)
 class ToolContext:
     settings: Settings
@@ -79,6 +90,7 @@ class ToolContext:
     schedules: ScheduleSink | None = None  # injected by the loop; lets a tool set up recurring work
     documents: IngestSink | None = None  # injected by the loop; lets a tool ingest a document
     remote: RemoteRunner | None = None  # injected by the loop; lets a tool run on a remote host
+    comms: CommsSink | None = None  # injected by the loop; lets a tool read/send email + calendar
 
     @property
     def paths(self) -> PathGuard:

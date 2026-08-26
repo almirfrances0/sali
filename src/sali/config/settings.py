@@ -63,6 +63,27 @@ class SshSettings(BaseModel):
     command_timeout: float = 60.0  # seconds — cap on a single remote command
 
 
+class MailAccountConfig(BaseModel):
+    # NON-secret inventory only — the app-password lives in the SecretStore under `secret_ref`.
+    address: str
+    imap_host: str
+    smtp_host: str
+    imap_port: int = 993
+    smtp_port: int = 465
+    secret_ref: str = "mail.password"
+
+
+class CalAccountConfig(BaseModel):
+    url: str  # CalDAV collection URL
+    username: str
+    secret_ref: str = "caldav.password"
+
+
+class CommsSettings(BaseModel):
+    mail: MailAccountConfig | None = None
+    calendar: CalAccountConfig | None = None
+
+
 def _default_fs_deny() -> list[str]:
     # This machine is Sali's home — it's open to it. Only credentials and the separate
     # `salix` project stay protected by default (a light guard the owner can remove).
@@ -99,6 +120,7 @@ class Settings(BaseSettings):
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
     permissions: PermissionsSettings = Field(default_factory=PermissionsSettings)
     ssh: SshSettings = Field(default_factory=SshSettings)
+    comms: CommsSettings = Field(default_factory=CommsSettings)
 
     @classmethod
     def settings_customise_sources(
