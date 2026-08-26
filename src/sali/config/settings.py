@@ -37,9 +37,11 @@ class ModelSettings(BaseModel):
     embed_model: str = "nomic-embed-text"
     embed_dim: int = 768
     embed_num_gpu: int = 0  # CPU-only embeddings — never contend with the model for VRAM
-    ctx_default: int = 8192
+    # Roomy context so long writes/tasks aren't truncated. Larger = slower (KV cache spills to
+    # CPU under 12 GB VRAM), which Almir explicitly accepts: "he can do slowly" over "has limits".
+    ctx_default: int = 16_384
     ctx_max: int = 32_768
-    request_timeout_s: float = 120.0
+    request_timeout_s: float = 300.0  # long single-shot generations must not time out mid-page
 
 
 class RuntimeSettings(BaseModel):

@@ -10,6 +10,7 @@ never assumed to have succeeded (rule 13).
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -47,6 +48,72 @@ _SUMMARIZE: dict[str, Any] = {"temperature": 0.3, "top_k": 40, "top_p": 0.9}
 _COMPACT_AFTER = 24
 _KEEP_RECENT = 6
 
+# Follow-through: models sometimes *narrate* an action ("I'll run these in parallel") and then
+# stop without calling anything, leaving Almir to re-prompt. When a reply defers a machine
+# action but emits no tool call, we nudge Sali to actually do it — bounded, so it can't loop.
+_MAX_FOLLOW_THROUGH = 2
+_FOLLOW_THROUGH_NUDGE = (
+    "(You just said you'd do that but didn't actually call anything. Do it now, in this reply — "
+    "run the tools. Don't narrate that you're about to; just go, then tell me what you found.)"
+)
+
+# A tool call sometimes leaks out as *text* instead of a parsed call (the model emits the JSON
+# itself). We must never leave Almir staring at raw JSON, so we detect it and ask for a clean redo.
+_MAX_JSON_RECOVERY = 2
+_JSON_RECOVERY_NUDGE = (
+    "(That came out as raw JSON instead of doing anything. If you meant to use a tool, call it "
+    "properly as a tool. Otherwise just answer me in plain words — never paste JSON at me.)"
+)
+_LEAKED_TOOL_JSON = re.compile(
+    r'^\s*[\[{].*"(name|tool_name|function|arguments|parameters)"\s*:', re.IGNORECASE | re.DOTALL
+)
+
+
+def _looks_like_leaked_tool_call(text: str) -> bool:
+    """A response whose content is really a tool-call JSON blob the parser didn't catch. We treat
+    it as a malfunction to recover from, not as an answer to show."""
+    stripped = text.strip()
+    return stripped.startswith(("{", "[")) and bool(_LEAKED_TOOL_JSON.match(stripped))
+# A short reply is a *preamble* ("I'll run these in parallel."); a long one is a real answer that
+# merely mentions an action, and must never be discarded and re-generated. Keep the window tight.
+_PREAMBLE_MAX_CHARS = 220
+# An intent lead ("I'll", "let me", "let's") closely followed by an action verb — kept narrow so
+# ordinary sign-offs don't trip it (collision-prone verbs like "show you"/"take"/"start" removed).
+_DEFER_LEAD_ACTION = re.compile(
+    r"\b(i'?ll|i\s+will|i'?m\s+going\s+to|i\s+am\s+going\s+to|let\s+me|let'?s|let\s+us|going\s+to|"
+    r"gonna|about\s+to)\b[^.?!]{0,50}?\b(run|check|inspect|install|grep|find|search|scan|read|"
+    r"open|list|pull\s+up|take\s+a\s+look|dig\s+into|go\s+(?:through|one)|verify|execute|fetch|"
+    r"kick\s+off|do\s+(?:that|it|this|these|them))\b",
+    re.IGNORECASE,
+)
+# Bare present-continuous *openers* — anchored at the start so mid-sentence participles and
+# past-tense completion reports ("I finished installing X") don't match.
+_DEFER_BARE = re.compile(
+    r"^\s*(?:okay|ok|alright|sure|right|got\s+it|on\s+it)?[,.\s]*"
+    r"(running|checking|installing|searching|scanning|inspecting|setting\s+up|pulling\s+up|"
+    r"digging\s+into|kicking\s+off)\b",
+    re.IGNORECASE,
+)
+# Conditional / optional / offered actions ("I'll run it if it gets tight", "let me know if…")
+# are not stalls — the work is genuinely deferred by design, so never auto-continue past them.
+_CONDITIONAL = re.compile(
+    r"\b(if|once|when|unless|whenever|later|tomorrow|afterwards?|next\s+time|down\s+the\s+line|"
+    r"let\s+me\s+know|want\s+me\s+to|should\s+i|feel\s+free)\b",
+    re.IGNORECASE,
+)
+
+
+def _defers_action(text: str) -> bool:
+    """True only when a reply is a *bare, short announcement* of a machine action it hasn't taken
+    yet — the exact "I'll do X" then stop that leaves Almir re-prompting. A question (anywhere), a
+    conditional/offer, or any substantial answer is NOT a stall and is left to finalize untouched."""
+    stripped = text.strip()
+    if not stripped or "?" in stripped or len(stripped) > _PREAMBLE_MAX_CHARS:
+        return False
+    if _CONDITIONAL.search(stripped):
+        return False
+    return bool(_DEFER_LEAD_ACTION.search(stripped) or _DEFER_BARE.match(stripped))
+
 
 @dataclass(slots=True)
 class AgentResult:
@@ -60,7 +127,7 @@ class AgentResult:
 class LoopEvent:
     """A streamed moment of a turn, for live rendering (terminal or WebSocket)."""
 
-    kind: str  # 'status' | 'token' | 'thinking' | 'tool' | 'final' | 'error'
+    kind: str  # 'status' | 'token' | 'thinking' | 'tool' | 'reset' | 'final' | 'error'
     text: str = ""
     data: dict[str, Any] = field(default_factory=dict)
 
@@ -166,6 +233,8 @@ class AgentLoop:
                 tool_calls = 0
                 final_text = ""
                 iteration = 0
+                follow_through = 0
+                json_recovery = 0
 
                 while iteration < max_iter and tokens_used < budget:
                     await journal.set_state(RunState.REASON_PLAN, iteration=iteration)
@@ -190,6 +259,30 @@ class AgentLoop:
                         latency_ms=latency, tokens_in=res.tokens_in, tokens_out=res.tokens_out,
                     )
                     if not res.tool_calls:
+                        # A tool call that leaked out as raw JSON text — never leave Almir staring
+                        # at it. Wipe what streamed and ask for a clean redo (bounded).
+                        if json_recovery < _MAX_JSON_RECOVERY and _looks_like_leaked_tool_call(res.content):
+                            json_recovery += 1
+                            yield LoopEvent("reset")
+                            messages.append(ChatMessage(role="assistant", content=res.content))
+                            messages.append(ChatMessage(role="user", content=_JSON_RECOVERY_NUDGE))
+                            await journal.event("json_recovery", {"attempt": json_recovery})
+                            yield LoopEvent("status", "let me redo that")
+                            iteration += 1
+                            continue
+                        # If Sali *announced* an action but has done nothing yet this turn, push it
+                        # to actually follow through (bounded, so it can never spin). Only on a bare
+                        # preamble with no work done — a finished answer is never second-guessed.
+                        if (tool_calls == 0 and follow_through < _MAX_FOLLOW_THROUGH
+                                and _defers_action(res.content)):
+                            follow_through += 1
+                            yield LoopEvent("reset")  # clear the preamble; the real answer streams fresh
+                            messages.append(ChatMessage(role="assistant", content=res.content))
+                            messages.append(ChatMessage(role="user", content=_FOLLOW_THROUGH_NUDGE))
+                            await journal.event("follow_through", {"attempt": follow_through})
+                            yield LoopEvent("status", "on it")
+                            iteration += 1
+                            continue
                         final_text = res.content
                         break
                     messages.append(

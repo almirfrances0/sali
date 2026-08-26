@@ -8,6 +8,7 @@ persists nothing.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -24,6 +25,12 @@ from sali.runtime.session import persistent_session_id
 
 app = typer.Typer(add_completion=False, help="Sali — a local-first personal AI agent.")
 console = Console()
+
+# Typewriter pacing for streamed answers: ~60fps, 1–8 chars revealed per frame (it catches up
+# on long bursts and eases off at the end, so text always types out instead of dumping).
+_FRAME = 1 / 60
+_REVEAL_MIN = 1
+_REVEAL_MAX = 8
 
 
 @app.command()
@@ -146,40 +153,81 @@ def _fmt_tool(data: dict[str, Any]) -> str:
 
 
 async def _stream_turn(loop: Any, text: str, session: UUID) -> None:
-    """Render one turn live: a status/thinking animation, then the answer streaming in."""
+    """Render one turn live: a thinking animation, then the answer *typed out* character by
+    character. The reveal is paced on its own clock, decoupled from how the model chunks its
+    output — so even a burst that arrives all at once still types out smoothly, the way the
+    big assistants do it, instead of dumping the whole paragraph in one frame."""
     from rich.console import Group
     from rich.live import Live
     from rich.spinner import Spinner
     from rich.text import Text
 
-    buffer = ""
-    activity: str | None = "…"
+    # Shared state between the producer (astream) and the paced renderer.
+    st: dict[str, Any] = {"target": "", "shown": 0, "activity": "…", "done": False, "error": None}
 
     def render() -> Group:
         parts: list[Any] = []
-        if buffer:
-            parts.append(Text.assemble(("sali › ", "bold green"), buffer))
-        if activity is not None:
-            parts.append(Spinner("dots", text=Text(f" {activity}", style="dim cyan")))
+        shown = st["target"][: st["shown"]]
+        if shown:
+            parts.append(Text.assemble(("sali › ", "bold green"), shown))
+        if st["activity"] is not None:
+            parts.append(Spinner("dots", text=Text(f" {st['activity']}", style="dim cyan")))
         return Group(*parts)
 
-    with Live(render(), console=console, refresh_per_second=16, transient=False) as live:
-        async for event in loop.astream(text, session_id=session):
-            if event.kind == "status":
-                activity = f"{event.text}…"
-            elif event.kind == "tool":
-                if event.data.get("phase") == "start":
-                    activity = f"running {event.data['name']} {_fmt_tool(event.data)}".rstrip()
-                else:
-                    live.console.print(f"[dim]  · {event.data['name']}[/]")
-                    activity = "thinking…"
-            elif event.kind == "token":
-                buffer += event.text
-                activity = None  # the answer is streaming now — drop the spinner
-            elif event.kind == "final":
-                buffer = event.text or buffer
-                activity = None
+    with Live(render(), console=console, auto_refresh=False, transient=False) as live:
+
+        async def produce() -> None:
+            try:
+                async for event in loop.astream(text, session_id=session):
+                    if event.kind == "status":
+                        st["activity"] = f"{event.text}…"
+                    elif event.kind == "tool":
+                        if event.data.get("phase") == "start":
+                            st["activity"] = f"running {event.data['name']} {_fmt_tool(event.data)}".rstrip()
+                        else:
+                            live.console.print(f"[dim]  · {event.data['name']}[/]")
+                            st["activity"] = "typing…"
+                    elif event.kind == "reset":
+                        # A false-start (leaked JSON, or a bare "I'll do it" preamble) is being
+                        # redone — wipe what typed out so the real answer starts on a clean line.
+                        st["target"] = ""
+                        st["shown"] = 0
+                        st["activity"] = "…"
+                    elif event.kind == "token":
+                        st["target"] += event.text
+                        st["activity"] = None  # the answer is coming — drop the spinner
+                    elif event.kind == "final":
+                        if event.text:
+                            st["target"] = event.text
+                            st["shown"] = min(st["shown"], len(event.text))  # never slice past the end
+                        st["activity"] = None
+            except Exception as exc:  # noqa: BLE001 - surfaced after the render loop drains
+                st["error"] = exc
+                st["activity"] = None  # don't leave a spinner frozen above the traceback
+            finally:
+                st["done"] = True
+
+        producer = asyncio.create_task(produce())
+        try:
+            # Reveal a few characters per frame, catching up gently when the model runs ahead
+            # and easing off as it finishes — a real typewriter, not a paragraph dump.
+            while not (st["done"] and st["shown"] >= len(st["target"])):
+                remaining = len(st["target"]) - st["shown"]
+                if remaining > 0:
+                    st["shown"] += min(remaining, max(_REVEAL_MIN, min(_REVEAL_MAX, remaining // 6)))
+                live.update(render())
+                live.refresh()
+                await asyncio.sleep(_FRAME)
             live.update(render())
+            live.refresh()
+        finally:
+            # Cancel first so a Ctrl-C or render error doesn't block until the whole model
+            # response finishes generating; then drain the (now-cancelled) producer.
+            producer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await producer
+    if st["error"] is not None:
+        raise st["error"]
 
 
 async def _agent(settings: Settings, message: str | None) -> None:

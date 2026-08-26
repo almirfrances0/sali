@@ -21,7 +21,9 @@ from sali.provider.presets import DETERMINISTIC, SamplingPreset
 class OllamaProvider:
     def __init__(self, settings: ModelSettings) -> None:
         self.s = settings
-        self._client = AsyncClient(host=settings.host)
+        # Generous timeout so a long single-shot generation (a full page, slowly) never gets
+        # cut off mid-stream on modest hardware.
+        self._client = AsyncClient(host=settings.host, timeout=settings.request_timeout_s)
 
     def _build(
         self,

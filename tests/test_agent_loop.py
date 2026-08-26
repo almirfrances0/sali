@@ -148,6 +148,104 @@ async def test_astream_emits_tool_events(live_pool: Any) -> None:
     assert len(starts) == 1 and starts[0].data["name"] == "memory_info"
 
 
+async def test_loop_follows_through_on_announced_action(live_pool: Any) -> None:
+    # Sali narrates an action but calls nothing (the reported bug) → the loop must nudge it to
+    # actually do it in the SAME turn, not stop and wait for Almir to re-prompt.
+    fake = FakeModelProvider(
+        responses=[
+            ChatResult("I'll run these in parallel to keep it fast.", None, [], 5, 3, "fake"),
+            ChatResult("", None, [ToolCall("memory_info", {})], 4, 2, "fake"),
+            ChatResult("You've got plenty of memory free.", None, [], 4, 3, "fake"),
+        ]
+    )
+    result = await _loop(live_pool, fake).run("check memory and disk in parallel")
+    assert result.tool_calls == 1  # it followed through and actually ran the tool
+    assert "plenty of memory free" in result.text
+    async with live_pool.acquire() as c:
+        followed = await c.fetchval(
+            "SELECT count(*) FROM run_events WHERE run_id=$1 AND kind='follow_through'",
+            result.run_id,
+        )
+        assert followed == 1  # the nudge was journaled exactly once
+
+
+async def test_loop_does_not_nudge_a_normal_answer(live_pool: Any) -> None:
+    # A plain, complete answer with no deferred action must NOT be nudged — it just finalizes.
+    fake = FakeModelProvider(
+        responses=[ChatResult("Your disk is about half full.", None, [], 4, 4, "fake")]
+    )
+    result = await _loop(live_pool, fake).run("how full is my disk")
+    assert result.text == "Your disk is about half full."
+    async with live_pool.acquire() as c:
+        followed = await c.fetchval(
+            "SELECT count(*) FROM run_events WHERE run_id=$1 AND kind='follow_through'",
+            result.run_id,
+        )
+        assert followed == 0
+
+
+def test_defers_action_detects_announced_but_not_asked() -> None:
+    from sali.runtime.loop import _defers_action
+
+    # Bare, short announcements of a not-yet-taken action → follow through.
+    assert _defers_action("I'll run these in parallel to keep it fast.")
+    assert _defers_action("Let me check the disk usage real quick.")
+    assert _defers_action("Let's do this.")  # the phrasing Almir flagged
+    assert _defers_action("Let's run these one by one.")
+    assert _defers_action("Okay, let's go one by one through the services.")
+    assert _defers_action("Running that now.")  # bare present-continuous opener
+    assert _defers_action("Setting up the environment now.")
+
+
+def test_defers_action_leaves_real_answers_alone() -> None:
+    # The review's false-positive cases: a complete answer must never be discarded and re-run.
+    from sali.runtime.loop import _defers_action
+
+    assert not _defers_action("Want me to run these in parallel?")  # a question is for Almir
+    assert not _defers_action("Your disk is about half full.")  # plain finished answer
+    assert not _defers_action("I'll remember that.")  # intent, but no machine-action verb
+    assert not _defers_action("Half full. I'll run a cleanup if it gets tight.")  # conditional offer
+    assert not _defers_action("I'll take a look at the other services tomorrow.")  # deferred by design
+    assert not _defers_action("I'll check back later.")
+    assert not _defers_action("Let me know if you want me to run it.")  # an offer, not a stall
+    assert not _defers_action("I finished installing the package and it works now.")  # completion report
+    # A long, substantive answer that merely mentions an action is not a preamble.
+    assert not _defers_action(
+        "Here's the full rundown of your system. " * 8 + "I'll run the scan."
+    )
+    assert not _defers_action("")
+
+
+def test_looks_like_leaked_tool_call() -> None:
+    from sali.runtime.loop import _looks_like_leaked_tool_call
+
+    assert _looks_like_leaked_tool_call('{"name": "create_file", "arguments": {"path": "/x"}}')
+    assert _looks_like_leaked_tool_call('  [ {"function": {"name": "run"}} ]  ')
+    assert not _looks_like_leaked_tool_call("Here's a JSON example: {\"a\": 1} in your config.")
+    assert not _looks_like_leaked_tool_call("Your disk is half full.")
+
+
+async def test_loop_recovers_from_leaked_tool_json(live_pool: Any) -> None:
+    # The model emits a tool call as raw JSON text (parser miss). The loop must NOT hand that
+    # back as the answer — it wipes it and asks for a clean redo, then finalizes on the real reply.
+    fake = FakeModelProvider(
+        responses=[
+            ChatResult('{"name": "create_file", "arguments": {"path": "/tmp/x", "content": "hi"}}',
+                       None, [], 6, 4, "fake"),
+            ChatResult("Done — I saved that note for you.", None, [], 4, 3, "fake"),
+        ]
+    )
+    events = [e async for e in _loop(live_pool, fake).astream("write a note", session_id=new_id())]
+    final = next(e for e in events if e.kind == "final")
+    assert final.text == "Done — I saved that note for you."  # never the raw JSON
+    assert any(e.kind == "reset" for e in events)  # the leaked JSON was wiped from the display
+    async with live_pool.acquire() as c:
+        recovered = await c.fetchval(
+            "SELECT count(*) FROM run_events WHERE kind='json_recovery'"
+        )
+        assert recovered >= 1
+
+
 async def test_sense_short_circuits_on_tiny_input() -> None:
     # A hunch on <4 chars would be noise — and it must never touch the DB for that (pool=None).
     loop = _loop(None, FakeModelProvider())
