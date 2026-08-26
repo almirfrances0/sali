@@ -110,6 +110,53 @@ async def test_twin_memories_are_functional_and_stay_current(db_conn: Any) -> No
     assert "RTX 5090" in rows[0]["content"] and "RTX 4070" not in rows[0]["content"]
 
 
+# ---- event-driven observation daemon (§16) ----------------------------------------------------
+class _StubService:
+    def __init__(self, results: list[Any]) -> None:
+        self.results = results
+        self.calls = 0
+
+    async def refresh(self, *, exclude_projects: tuple[str, ...] = ()) -> Any:
+        r = self.results[self.calls]
+        self.calls += 1
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+
+async def test_daemon_surfaces_only_meaningful_changes() -> None:
+    from uuid import uuid4
+
+    from sali.twin.daemon import TwinDaemon
+    from sali.twin.sync import SyncResult
+
+    stub = _StubService([
+        SyncResult(uuid4(), 3, [], []),                 # cycle 1: nothing changed → quiet
+        SyncResult(uuid4(), 4, ["software:htop"], []),  # cycle 2: a package appeared → surfaced
+    ])
+    changes: list[list[str]] = []
+
+    async def on_change(r: Any) -> None:
+        changes.append(r.added)
+
+    daemon = TwinDaemon(stub, interval=0.01)
+    ran = await daemon.run(max_cycles=2, on_change=on_change)
+    assert ran == 2
+    assert changes == [["software:htop"]]  # the no-change cycle did NOT fire on_change
+
+
+async def test_daemon_survives_a_failing_cycle() -> None:
+    from uuid import uuid4
+
+    from sali.twin.daemon import TwinDaemon
+    from sali.twin.sync import SyncResult
+
+    stub = _StubService([RuntimeError("observe blew up"), SyncResult(uuid4(), 1, [], [])])
+    daemon = TwinDaemon(stub, interval=0.01)
+    ran = await daemon.run(max_cycles=1)
+    assert ran == 1 and stub.calls == 2  # it retried after the failure instead of dying
+
+
 async def test_tree_renders_structure(live_pool: Any) -> None:
     snap = _snap([
         TwinEntity("hardware", "hw:gpu", "RTX 4070", {}, "has"),

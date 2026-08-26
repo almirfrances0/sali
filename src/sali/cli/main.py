@@ -56,7 +56,25 @@ async def _init(settings: Settings) -> list[str]:
 
     applied = await init_database(settings)
     await _seed_core(settings)  # idempotent: Sali's identity persists independent of the model
+    await _seed_twin(settings)  # best-effort: know the machine right after setup
     return applied
+
+
+async def _seed_twin(settings: Settings) -> None:
+    """Build the desktop twin once at init so Sali starts out knowing its machine. Best-effort —
+    a failure here never blocks init (the twin can always be (re)built with `sali twin --refresh`)."""
+    from sali.db.pool import create_pool
+
+    pool = await create_pool(settings)
+    try:
+        result = await _twin_service(pool, settings).refresh(
+            exclude_projects=tuple(settings.permissions.fs_deny)
+        )
+        console.print(f"[green]Built the desktop twin:[/] {result.entities} things observed.")
+    except Exception as exc:  # noqa: BLE001 - observation is optional at init time
+        console.print(f"[yellow]Twin not built ({exc}); run `sali twin --refresh` later.[/]")
+    finally:
+        await pool.close()
 
 
 async def _seed_core(settings: Settings) -> None:
@@ -440,17 +458,21 @@ def twin(
     asyncio.run(_twin(settings, refresh))
 
 
-async def _twin(settings: Settings, refresh: bool) -> None:
-    from sali.db.pool import create_pool
+def _twin_service(pool: Any, settings: Settings) -> Any:
+    """A TwinService wired with a memory service, so a refresh also records the machine as
+    retrievable system-env facts (grounding "what GPU / how much RAM / what's installed")."""
     from sali.memory.service import MemoryService
     from sali.provider.registry import build_provider
     from sali.twin.service import TwinService
 
+    return TwinService(pool, memory=MemoryService(pool, build_provider(settings)))
+
+
+async def _twin(settings: Settings, refresh: bool) -> None:
+    from sali.db.pool import create_pool
+
     pool = await create_pool(settings)
-    # A memory service so a refresh also records the machine as retrievable system-env facts,
-    # letting the agent ground "what GPU / how much RAM / what's installed" from the twin.
-    memory = MemoryService(pool, build_provider(settings))
-    service = TwinService(pool, memory=memory)
+    service = _twin_service(pool, settings)
     try:
         if refresh:
             with console.status("[cyan]observing the machine…[/]"):
@@ -465,6 +487,47 @@ async def _twin(settings: Settings, refresh: bool) -> None:
             console.print(f"[green]twin refreshed[/] — {note}")
         console.print((await service.tree()).replace("[", "\\["))
     finally:
+        await pool.close()
+
+
+@app.command()
+def observe(
+    interval: int = typer.Option(180, help="Seconds between observation cycles."),
+) -> None:
+    """Watch the machine: re-observe on a loop and surface meaningful changes (§16). Ctrl-C stops.
+
+    Cheap by design — routine cycles change nothing and cost no reasoning; only genuine
+    structural changes (a package installed, a project appeared, a service gone) are surfaced.
+    """
+    settings = load_settings()
+    configure_logging("WARNING")
+    asyncio.run(_observe(settings, interval))
+
+
+async def _observe(settings: Settings, interval: int) -> None:
+    from sali.db.pool import create_pool
+    from sali.twin.daemon import TwinDaemon
+
+    pool = await create_pool(settings)
+    daemon = TwinDaemon(
+        _twin_service(pool, settings), interval=float(interval),
+        exclude_projects=tuple(settings.permissions.fs_deny),
+    )
+
+    async def on_change(result: Any) -> None:
+        for key in result.added:
+            console.print(f"[green]  + {key}[/]")
+        for key in result.removed:
+            console.print(f"[yellow]  - {key}[/]")
+
+    console.print(f"[dim]watching the machine every {interval}s — Ctrl-C to stop[/]")
+    stop = asyncio.Event()
+    try:
+        await daemon.run(stop=stop, on_change=on_change)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        stop.set()
+    finally:
+        console.print(f"[dim]stopped after {daemon.cycles} cycles.[/]")
         await pool.close()
 
 
