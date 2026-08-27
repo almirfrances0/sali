@@ -26,6 +26,20 @@ class Node:
 
 
 @dataclass(slots=True)
+class Resolution:
+    """Why a surface form resolved to a particular entity — so a graph query is EXPLAINABLE (§5/§6):
+    which node was chosen, how it matched, and which OTHER entities the same name matched (ambiguity).
+    Resolution is deterministic (ranked by match precision, then canonical-entity-type, then id)."""
+
+    query: str
+    resolved: Node | None
+    matched_by: str  # exact_name | alias | name_substring | key_substring | none
+    candidate_count: int
+    candidates: list[dict[str, Any]]  # every match: {name, canonical_key, node_type, match_rank}
+    ambiguous: bool  # the surface form matched >1 entity at the top precision — a real disambiguation happened
+
+
+@dataclass(slots=True)
 class Edge:
     id: UUID
     src_id: UUID

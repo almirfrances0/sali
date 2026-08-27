@@ -312,10 +312,12 @@ class _RecallSink:
         return out
 
     async def related(self, entity: str, *, hops: int = 1) -> dict[str, Any]:
-        nodes = await self._graph.find_by_name(entity, limit=3)
-        if not nodes:
-            return {"entity": entity, "found": False, "relations": []}
-        node = nodes[0]
+        # Resolve EXPLAINABLY (§5/§6): which entity was chosen, how, and the others the name matched —
+        # so two queries can never silently disagree about which 'Sali' they meant.
+        res = await self._graph.resolve(entity)
+        if res.resolved is None:
+            return {"entity": entity, "found": False, "relations": [], "candidates": []}
+        node = res.resolved
         relations: list[dict[str, Any]] = []
         if hops <= 1:
             for hop in await self._graph.neighbors(node.id):
@@ -325,8 +327,15 @@ class _RecallSink:
             for r in await self._graph.traverse(node.id, max_depth=min(hops, 4)):
                 if r["depth"] > 0:
                     relations.append({"target": r["name"], "type": r["node_type"], "hops": r["depth"]})
-        return {"entity": entity, "found": True, "resolved": node.name, "type": node.node_type,
-                "relations": relations[:24]}
+        others = [c for c in res.candidates if c["canonical_key"] != node.canonical_key][:5]
+        return {
+            "entity": entity, "found": True,
+            "resolved": {"name": node.name, "canonical_key": node.canonical_key,
+                         "node_type": node.node_type, "matched_by": res.matched_by},
+            "ambiguous": res.ambiguous, "other_candidates": others,
+            "scope": "current graph (temporal-filtered, valid_until IS NULL)",
+            "relations": relations[:24],
+        }
 
     async def entity(self, name: str) -> dict[str, Any]:
         nodes = await self._graph.find_by_name(name, limit=3)

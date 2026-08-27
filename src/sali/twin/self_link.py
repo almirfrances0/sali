@@ -15,7 +15,12 @@ from typing import Any
 from uuid import UUID
 
 from sali.core.enums import MemorySource
-from sali.graph.writer import ensure_node, relate
+from sali.graph.writer import ensure_node, refresh_props, relate
+
+# Canonical aliases for the agent (§5) — the surface forms that mean Sali-the-agent (NOT the repo,
+# a model variant, or a path). So "my AI"/"you" resolve to agent:sali, and the reported bare-"Sali"
+# ambiguity is disambiguated to the agent by these + the node-type priority.
+_AGENT_ALIASES = ["sali", "sali ai", "sali agent", "the ai", "my ai", "the assistant", "you"]
 
 
 async def link_self(
@@ -27,6 +32,7 @@ async def link_self(
     agent node id. Caller owns the transaction."""
     sali = await ensure_node(
         conn, node_type="agent", name="Sali", canonical_key="agent:sali", source=source)
+    await refresh_props(conn, sali.id, {"aliases": _AGENT_ALIASES})  # canonical aliases (§5)
 
     await relate(conn, src_id=sali.id, dst_id=machine_id, rel_type="runs_on", source=source)
 

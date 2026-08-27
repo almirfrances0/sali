@@ -10,7 +10,17 @@ from uuid import UUID
 from sali.core.enums import MemorySource
 from sali.graph import traverse as _traverse
 from sali.graph import writer as _writer
-from sali.graph.models import ContradictionOutcome, Edge, Node
+from sali.graph.models import ContradictionOutcome, Edge, Node, Resolution
+
+# Canonical-entity-type priority for tie-breaking name resolution: a first-class entity Sali reasons
+# about (its own agent node, the person, the machine, its model) outranks incidental nodes that merely
+# contain the same token (a project folder, a filesystem path, an old model variant). Lower wins.
+_TYPE_PRIORITY = (
+    "CASE node_type "
+    "WHEN 'agent' THEN 0 WHEN 'person' THEN 1 WHEN 'machine' THEN 2 WHEN 'model' THEN 3 "
+    "WHEN 'service' THEN 4 WHEN 'container' THEN 5 WHEN 'network' THEN 6 WHEN 'project' THEN 7 "
+    "WHEN 'software' THEN 8 WHEN 'ext_tool' THEN 9 WHEN 'capability' THEN 10 WHEN 'location' THEN 11 "
+    "WHEN 'os_package' THEN 12 WHEN 'environment' THEN 13 WHEN 'hardware' THEN 14 ELSE 15 END")
 
 
 class GraphService:
@@ -73,31 +83,56 @@ class GraphService:
                 conn, start_id, max_depth=max_depth, rel_types=rel_types, as_of=as_of
             )
 
-    async def find_by_name(self, name: str, *, limit: int = 5) -> list[Node]:
-        """Entity resolution (§18/§19): map a surface form ('my VPS', 'project-x', 'me', 'Ollama') to
-        CURRENT nodes. Ranked so an EXACT name or a declared ALIAS beats a mere substring, and a
-        substring of the *name* beats one that only appears in the canonical key (a filesystem path
-        like /home/almir/… must never out-resolve the person named Almir)."""
-        from sali.graph.models import row_to_node
-
+    async def _ranked_rows(self, conn: Any, name: str, limit: int) -> list[Any]:
+        """Ranked candidate rows for a surface form. DETERMINISTIC: match precision, then
+        canonical-entity-type priority (an 'agent'/'person'/'machine' beats a 'project'/'path' when the
+        name ties — so bare 'Sali' resolves to the agent, not the repo or a model variant), then a
+        stable id tiebreak. This is the fix for the reported nondeterministic resolution."""
         raw = name.strip()
         if not raw:
             return []
         lower = raw.lower()
         pattern = "%" + raw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        return list(await conn.fetch(
+            "SELECT *, CASE "
+            "  WHEN lower(name) = $2 THEN 0 "
+            "  WHEN props->'aliases' ? $2 THEN 1 "
+            "  WHEN name ILIKE $1 THEN 2 "
+            "  ELSE 3 END AS match_rank, "
+            f"  {_TYPE_PRIORITY} AS type_priority "
+            "FROM graph_node WHERE valid_until IS NULL "
+            "AND (name ILIKE $1 OR canonical_key ILIKE $1 OR props->'aliases' ? $2) "
+            "ORDER BY match_rank, type_priority, confidence DESC, last_seen DESC, id LIMIT $3",
+            pattern, lower, limit))
+
+    async def find_by_name(self, name: str, *, limit: int = 5) -> list[Node]:
+        """Map a surface form ('my VPS', 'project-x', 'me', 'Ollama') to CURRENT nodes, best-first and
+        deterministically (see ``_ranked_rows``)."""
+        from sali.graph.models import row_to_node
+
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT *, CASE "
-                "  WHEN lower(name) = $2 THEN 0 "
-                "  WHEN props->'aliases' ? $2 THEN 1 "
-                "  WHEN name ILIKE $1 THEN 2 "
-                "  ELSE 3 END AS match_rank "
-                "FROM graph_node WHERE valid_until IS NULL "
-                "AND (name ILIKE $1 OR canonical_key ILIKE $1 OR props->'aliases' ? $2) "
-                "ORDER BY match_rank, confidence DESC, last_seen DESC LIMIT $3",
-                pattern, lower, limit,
-            )
+            rows = await self._ranked_rows(conn, name, limit)
         return [row_to_node(r) for r in rows]
+
+    async def resolve(self, name: str, *, limit: int = 8) -> Resolution:
+        """Resolve a surface form AND explain it (§5/§6): the chosen node, how it matched, and the other
+        entities the same name matched (ambiguity). Used so a graph query is traceable, never a mystery."""
+        from sali.graph.models import row_to_node
+
+        async with self.pool.acquire() as conn:
+            rows = await self._ranked_rows(conn, name, limit)
+        if not rows:
+            return Resolution(query=name, resolved=None, matched_by="none",
+                              candidate_count=0, candidates=[], ambiguous=False)
+        top = rows[0]
+        matched_by = {0: "exact_name", 1: "alias", 2: "name_substring", 3: "key_substring"}.get(
+            int(top["match_rank"]), "unknown")
+        same_precision = sum(1 for r in rows if r["match_rank"] == top["match_rank"])
+        candidates = [{"name": r["name"], "canonical_key": r["canonical_key"],
+                       "node_type": r["node_type"], "match_rank": int(r["match_rank"])} for r in rows]
+        return Resolution(query=name, resolved=row_to_node(top), matched_by=matched_by,
+                          candidate_count=len(rows), candidates=candidates,
+                          ambiguous=same_precision > 1)
 
     async def get_node(
         self, node_type: str, canonical_key: str, *, as_of: datetime | None = None
