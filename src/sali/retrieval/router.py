@@ -9,7 +9,20 @@ is always on; the flags add graph, recency, and the live-inspection signal.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+
+# Self-contained turns that need NO memory (§35: don't search 500 memories for "2+2"). Conservative —
+# only obvious greetings/acks and pure arithmetic; anything else still retrieves.
+_TRIVIAL_EXACT = frozenset({
+    "hi", "hello", "hey", "yo", "sup", "hiya", "hey there", "hi there", "hello there",
+    "thanks", "thank you", "thankyou", "ty", "cheers", "much appreciated",
+    "ok", "okay", "k", "kk", "yes", "yeah", "yep", "no", "nope", "sure", "got it",
+    "cool", "nice", "great", "awesome", "perfect", "lol", "haha", "nvm", "never mind",
+    "bye", "goodbye", "good morning", "good night", "gm", "gn", "morning",
+})
+_ARITH = re.compile(r"^[\s\d+\-*/().,^%=x×÷]+$")
+_ARITH_PREFIX = re.compile(r"^(what\s+is|what's|whats|calculate|compute|solve|how much is)\s+")
 
 _LIVE = (
     "right now", "currently", "current ", "at the moment", "how much", "how many",
@@ -41,8 +54,20 @@ def _has(query: str, phrases: tuple[str, ...]) -> bool:
     return any(phrase in query for phrase in phrases)
 
 
+def _is_trivial(q: str) -> bool:
+    s = q.strip(" ?!.\t\n")
+    if not s:
+        return True
+    if s in _TRIVIAL_EXACT:
+        return True
+    core = _ARITH_PREFIX.sub("", s)  # strip a "what is …" wrapper around a sum
+    return bool(_ARITH.match(core) and any(ch.isdigit() for ch in core))
+
+
 def classify(query: str) -> RetrievalPlan:
     q = query.lower()
+    if _is_trivial(q):  # a greeting, an ack, or plain arithmetic — self-contained, needs no memory
+        return RetrievalPlan(intent="trivial", use_vector=False, use_keyword=False)
     live = _has(q, _LIVE)
     temporal = _has(q, _TEMPORAL)
     relational = _has(q, _RELATIONAL)

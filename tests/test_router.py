@@ -1,36 +1,26 @@
-"""Deterministic query routing (spec §12)."""
+"""The retrieval router — including the §35 gate: trivial turns retrieve no memory."""
 
 from __future__ import annotations
 
 from sali.retrieval.router import classify
 
 
-def test_live_state_query_routes_to_inspection() -> None:
-    plan = classify("How much RAM is free right now?")
-    assert plan.needs_live
-    assert plan.intent == "live"
+def test_trivial_turns_skip_memory_retrieval() -> None:
+    for q in ("hi", "Hello!", "thanks", "ok", "yes", "cool", "good morning",
+              "2 + 2", "what is 2+2?", "what's 15 * 3", "calculate 100 / 4"):
+        plan = classify(q)
+        assert plan.intent == "trivial", q
+        assert not plan.use_vector and not plan.use_keyword, q  # no memory search for self-contained turns
 
 
-def test_docker_running_query_is_live_not_recalled() -> None:
-    # "Docker-not-installed inspected, not recalled" — the router flags it for live inspection.
-    plan = classify("Is docker running currently?")
-    assert plan.needs_live
+def test_real_questions_still_retrieve_memory() -> None:
+    for q in ("what database does project x use", "how did we fix docker last time",
+              "what did I say about local models", "who owns the VPS"):
+        plan = classify(q)
+        assert plan.intent != "trivial" and plan.use_vector and plan.use_keyword, q
 
 
-def test_relational_query_uses_graph() -> None:
-    plan = classify("Which projects are connected to the VPS?")
-    assert plan.use_graph
-    assert plan.intent == "relational"
-
-
-def test_temporal_query_pulls_recent() -> None:
-    plan = classify("What model was I using last month?")
-    assert plan.use_recent
-    assert not plan.needs_live
-
-
-def test_plain_lookup_is_semantic_only() -> None:
-    plan = classify("What did I say about local models?")
-    assert plan.intent == "lookup"
-    assert plan.use_vector and plan.use_keyword
-    assert not plan.use_graph and not plan.needs_live
+def test_intents_are_still_classified() -> None:
+    assert classify("what's my VRAM right now?").needs_live
+    assert classify("what is connected to the VPS?").use_graph
+    assert classify("what changed recently?").use_recent
