@@ -182,16 +182,165 @@ async def _c_multi_source(ctx: _Ctx) -> bool:
     return e2.confidence > base  # independent corroboration raised confidence
 
 
+# ── A–Q end-to-end coverage (§11): each verifies the RETRIEVED FACTS, never an LLM answer ────────
+
+async def _c_identity(ctx: _Ctx) -> bool:  # A. Identity resolves deterministically to the agent
+    await ctx.graph.ensure_node(node_type="agent", name="Sali", canonical_key="agent:sali",
+                                source=MemorySource.USER_EXPLICIT)
+    await ctx.graph.ensure_node(node_type="project", name="sali", canonical_key="project:sali",
+                                source=MemorySource.SYSTEM_OBSERVATION)
+    res = await ctx.graph.resolve("Sali")
+    return res.resolved is not None and res.resolved.canonical_key == "agent:sali" and res.ambiguous
+
+
+async def _c_user(ctx: _Ctx) -> bool:  # B. User knowledge
+    await ctx.mem.remember(layer=MemoryLayer.SEMANTIC, content="Almir's primary OS is Kali Linux",
+                           source=MemorySource.USER_EXPLICIT, importance=0.7)
+    await ctx.mem.embed_pending()
+    hits = await ctx.mem.retrieve("what OS does Almir use", k=5)
+    return any("Kali" in h.memory.content for h in hits)
+
+
+async def _c_environment(ctx: _Ctx) -> bool:  # C. Environment
+    await ctx.mem.remember(layer=MemoryLayer.SYSTEM_ENV, content="the machine has an NVIDIA RTX 4070 GPU",
+                           source=MemorySource.SYSTEM_OBSERVATION, functional=True, claim_key="env:gpu")
+    await ctx.mem.embed_pending()
+    hits = await ctx.mem.retrieve("what GPU does the machine have", k=5)
+    return any("RTX 4070" in h.memory.content for h in hits)
+
+
+async def _c_episodic(ctx: _Ctx) -> bool:  # E. Episodic retrieval
+    await ctx.mem.remember(layer=MemoryLayer.EPISODIC,
+                           content="yesterday we fixed the Docker networking problem",
+                           source=MemorySource.INFERENCE)
+    await ctx.mem.embed_pending()
+    hits = await ctx.mem.retrieve("docker networking problem", k=5, layer="episodic")
+    return any("Docker networking" in h.memory.content for h in hits)
+
+
+async def _c_procedural(ctx: _Ctx) -> bool:  # F. Procedural retrieval surfaces on a task turn
+    await ctx.mem.remember(layer=MemoryLayer.PROCEDURAL,
+                           content="deploy service X: build then ship then verify",
+                           source=MemorySource.INFERENCE, functional=True, claim_key="procedure:deployx",
+                           structured={"steps": ["build", "ship", "verify"], "certainty": "learned"})
+    await ctx.mem.embed_pending()
+    q = "how do I deploy service X"
+    bundle = await ctx.retrieval.gather(q, classify(q), k=5)
+    return any("deploy service X" in h.memory.content for h in bundle.procedures)
+
+
+async def _c_confidence(ctx: _Ctx) -> bool:  # J. Confidence — a weak belief is not a fact
+    from sali.core.knowledge import KnowledgeType, classify_knowledge
+
+    await ctx.mem.remember(layer=MemoryLayer.SEMANTIC, content="the cache is probably Redis",
+                           source=MemorySource.INFERENCE)  # gated → needs_grounding
+    await ctx.mem.embed_pending()
+    hits = await ctx.mem.retrieve("what is the cache", k=5)
+    hit = next((h for h in hits if "cache" in h.memory.content), None)
+    if hit is None:
+        return False
+    kt = classify_knowledge(hit.memory.source, hit.memory.layer,
+                            needs_grounding=hit.memory.needs_grounding, confidence=hit.effective_confidence)
+    return kt in (KnowledgeType.BELIEF, KnowledgeType.INFERENCE)  # honestly weak, not asserted as fact
+
+
+async def _c_cross_session(ctx: _Ctx) -> bool:  # L. Cross-session persistence
+    await ctx.mem.remember(layer=MemoryLayer.SEMANTIC, content="the deploy key lives in the vault",
+                           source=MemorySource.CONVERSATION)
+    await ctx.mem.embed_pending()
+    later = MemoryService(ctx.graph.pool, ctx.mem.provider)  # a fresh service (a "later session"), same store
+    hits = await later.retrieve("where is the deploy key", k=5)
+    return any("deploy key" in h.memory.content for h in hits)
+
+
+async def _c_reboot(ctx: _Ctx) -> bool:  # M. Reboot persistence — durably in the store
+    m = await ctx.mem.remember(layer=MemoryLayer.IDENTITY, content="I am Sali, Almir's local AI",
+                               source=MemorySource.USER_EXPLICIT)
+    async with ctx.graph.pool.acquire() as c:
+        row = await c.fetchrow("SELECT content FROM memory WHERE id=$1 AND valid_until IS NULL", m.id)
+    return row is not None and "Sali" in row["content"]
+
+
+async def _c_failure_learning(ctx: _Ctx) -> bool:  # N. Failure learning surfaces on a similar task
+    await ctx.mem.remember(
+        layer=MemoryLayer.EPISODIC,
+        content="deploying failed because port 3000 was busy; fixed by freeing the port",
+        source=MemorySource.INFERENCE, functional=True, claim_key="failure:x",
+        structured={"kind": "incident", "error": "port 3000 busy", "correction": "free the port"})
+    await ctx.mem.embed_pending()
+    q = "deploying is failing again"
+    bundle = await ctx.retrieval.gather(q, classify(q), k=5)
+    return any("port 3000" in h.memory.content for h in bundle.experiences)
+
+
+async def _c_procedure_learning(ctx: _Ctx) -> bool:  # O. Procedure learning from repeated runs
+    from uuid import uuid4
+
+    from sali.learning.procedures import learn_procedures
+
+    async with ctx.graph.pool.acquire() as c:
+        for _ in range(2):  # the same sequence in two runs clears the evidence bar
+            run = uuid4()
+            for cmd in ("docker compose build", "docker compose up -d"):
+                await c.execute(
+                    "INSERT INTO tool_execution (run_id, tool_name, plan, success, status) "
+                    "VALUES ($1,'execute_command',$2,true,'observed')", run, {"args": {"command": cmd}})
+        learned = await learn_procedures(c, ctx.mem.provider, threshold=2)
+    return len(learned) >= 1
+
+
+async def _c_consolidation(ctx: _Ctx) -> bool:  # P. Consolidation mines a tool experience
+    from uuid import uuid4
+
+    from sali.learning.tool_experience import learn_tool_experiences
+
+    async with ctx.graph.pool.acquire() as c:
+        for _ in range(3):
+            await c.execute(
+                "INSERT INTO tool_execution (run_id, tool_name, plan, success, status) "
+                "VALUES ($1,'execute_command',$2,true,'observed')", uuid4(),
+                {"args": {"command": "jq . data.json"}})
+        exps = await learn_tool_experiences(c, threshold=3)
+    return any(e.binary == "jq" for e in exps)
+
+
+async def _c_gap_detection(ctx: _Ctx) -> bool:  # Q. Knowledge-gap detection
+    from sali.learning.queue import Budget, pending, queue_gaps
+
+    # A distinctive subject that sorts FIRST, so the harness is robust even when the live store already
+    # holds real investigate events (the benchmark shares the connection in a rolled-back transaction).
+    subject = "AAA-benchmark-investigate-gap"
+    async with ctx.graph.pool.acquire() as c:
+        await c.execute(
+            "INSERT INTO event (event_type, subject_type, payload) VALUES ('desktop.observed','desktop',$1)",
+            {"kind": "port_opened", "summary": subject, "action": "investigate"})
+        await queue_gaps(c, budget=Budget(max_new_per_pass=5))
+        items = await pending(c, limit=50)
+    return any(subject in i.subject for i in items)
+
+
 CASES: list[Case] = [
-    Case("recall a stored fact", "retrieval", _c_retrieval),
+    Case("identity resolves to the agent", "A_identity", _c_identity),
+    Case("recall a fact about Almir", "B_user", _c_user),
+    Case("recall an environment fact", "C_environment", _c_environment),
+    Case("recall a stored fact", "D_retrieval", _c_retrieval),
+    Case("recall an episode", "E_episodic", _c_episodic),
+    Case("surface a procedure on a task turn", "F_procedural", _c_procedural),
+    Case("reach a fact two hops out", "G_graph", _c_graph_traversal),
+    Case("answer as-of vs current", "H_temporal", _c_temporal),
+    Case("open then verify a contradiction", "I_contradiction", _c_contradiction),
+    Case("keep a weak belief honestly weak", "J_confidence", _c_confidence),
+    Case("carry a web fact's provenance", "K_provenance", _c_provenance),
+    Case("corroborate across sources", "K_provenance", _c_multi_source),
+    Case("persist across sessions", "L_cross_session", _c_cross_session),
+    Case("persist durably in the store", "M_reboot", _c_reboot),
+    Case("recall a past failure on a retry", "N_failure_learning", _c_failure_learning),
+    Case("learn a procedure from repeats", "O_procedure_learning", _c_procedure_learning),
+    Case("mine a tool experience", "P_consolidation", _c_consolidation),
+    Case("detect a knowledge gap", "Q_gap_detection", _c_gap_detection),
     Case("resolve self-reference to the person", "entity_resolution", _c_entity_self),
     Case("resolve an alias to its entity", "entity_resolution", _c_entity_alias),
-    Case("answer as-of vs current", "temporal", _c_temporal),
-    Case("carry a web fact's provenance", "provenance", _c_provenance),
-    Case("open then verify a contradiction", "contradiction", _c_contradiction),
     Case("prefer the current project's memory", "scope", _c_scope),
-    Case("reach a fact two hops out", "graph_traversal", _c_graph_traversal),
-    Case("corroborate across sources", "provenance", _c_multi_source),
 ]
 
 
