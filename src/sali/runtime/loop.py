@@ -40,6 +40,7 @@ from sali.provider.base import ChatMessage, ChatResult, ModelProvider, ToolCall
 from sali.retrieval.router import classify
 from sali.retrieval.service import RetrievalService
 from sali.runtime.journal import RunJournal
+from sali.runtime.self_state import SelfStateStore
 from sali.runtime.state import RunState, resume_action
 from sali.scheduler.store import ScheduleStore
 from sali.security.confirm import Confirmer
@@ -237,6 +238,16 @@ class _MemorySink:
         return result
 
 
+class _SelfSink:
+    """Exposes Sali's runtime self-model to the self_state tool (§6/§7/§41/§71). Read-only."""
+
+    def __init__(self, store: SelfStateStore) -> None:
+        self._store = store
+
+    async def report(self) -> dict[str, Any]:
+        return await self._store.assemble()
+
+
 class _ToolCatalogSink:
     """Lets Sali query its OWN toolset (§53/§21): which installed tools serve a task (ranked by learned
     reliability + safety) and a tool's alternatives — over the inventory + capability graph. Read-only."""
@@ -397,6 +408,8 @@ class AgentLoop:
         self._vision = _VisionSink(provider)  # look at the screen locally (sali3 §33-35)
         self._perception = build_perception(settings)  # focused app/window + a11y tree (sali3 §2,8,9)
         self._catalog = _ToolCatalogSink(pool)  # lets Sali query its own toolset (§53/§21)
+        self._self_state = SelfStateStore(pool)  # persistent runtime self-model (§6/§7/§41)
+        self._self_sink = _SelfSink(self._self_state)
         self._syscrit: tuple[frozenset[str], float] | None = None  # (system-critical binaries, loaded_at)
         self._consolidating: asyncio.Task[Any] | None = None
         self._last_consolidate: Any = None
@@ -551,6 +564,8 @@ class AgentLoop:
             history = await self._load_history(conn, session_id)
             await self._append_message(conn, session_id, "user", user_input)
             journal = await RunJournal.start(conn, session_id, user_input)
+            with contextlib.suppress(Exception):  # self-model update must never break a turn
+                await self._self_state.note_turn(user_input)
             try:
                 yield LoopEvent("status", "remembering")
                 await journal.set_state(RunState.RETRIEVE)
@@ -766,6 +781,7 @@ class AgentLoop:
                         await twin_awareness.acknowledge(conn, ack_changes_through)
                     if ack_obs_through is not None:
                         await twin_awareness.acknowledge_observations(conn, ack_obs_through)
+                    await self._self_state.record_outcome(success=True, summary=user_input)
                     await self._maybe_compact(conn, session_id)  # keep the one session from breaking
                     await prune_stm(conn)  # reclaim expired short-term rows every turn (cheap, no model)
                     self._maybe_learn()  # fold raw activity into episodes/procedures — off-thread
@@ -791,6 +807,8 @@ class AgentLoop:
                 await journal.event("run.error", {"error": str(exc)})
                 await journal.set_state(RunState.FAILED)
                 await journal.finish("failed")
+                with contextlib.suppress(Exception):
+                    await self._self_state.record_outcome(success=False, summary=str(exc)[:200])
                 raise
 
     async def _handle_tool(
@@ -844,7 +862,8 @@ class AgentLoop:
                           tasks=self._tasks,
                           schedules=self._schedules, documents=self._documents, remote=self._remote,
                           comms=self._comms, browser=self._browser, vision=self._vision,
-                          perception=self._perception, catalog=self._catalog)
+                          perception=self._perception, catalog=self._catalog,
+                          self_model=self._self_sink)
         result = await dispatch.run_tool(tool, call.arguments, ctx)
 
         await journal.set_state(RunState.OBSERVE)

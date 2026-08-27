@@ -130,6 +130,15 @@ class ToolCatalogSink(Protocol):
     async def alternatives(self, tool: str) -> list[str]: ...
 
 
+class SelfSink(Protocol):
+    """How a tool reads Sali's own runtime self-model (spec §6/§7/§41/§71): identity, self-knowledge,
+    what it's focused on now, the current task, how it last fared, and what it's uncertain about.
+    Concrete impl (over sali_state + the memory/task stores) is injected by the runtime; returns a
+    JSON-ready dict so the tools layer stays free of runtime/memory types."""
+
+    async def report(self) -> dict[str, Any]: ...
+
+
 @dataclass(slots=True)
 class ToolContext:
     settings: Settings
@@ -148,6 +157,7 @@ class ToolContext:
     vision: VisionSink | None = None  # injected by the loop; lets a tool look at the screen locally
     perception: PerceptionSink | None = None  # injected by the loop; the focused app/window + UI tree
     catalog: ToolCatalogSink | None = None  # injected by the loop; lets a tool query its own toolset
+    self_model: SelfSink | None = None  # injected by the loop; lets a tool read Sali's own self-state
 
     @property
     def paths(self) -> PathGuard:

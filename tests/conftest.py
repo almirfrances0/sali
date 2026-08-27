@@ -103,6 +103,9 @@ async def live_pool(test_settings: Settings, db_available: bool) -> AsyncIterato
     async def _clean() -> None:
         async with pool.acquire() as c:
             await c.execute(f"TRUNCATE {_LOOP_TABLES} RESTART IDENTITY CASCADE")
+            # sali_state is a singleton (one row); truncate + re-seed so each test starts fresh.
+            await c.execute("TRUNCATE sali_state")
+            await c.execute("INSERT INTO sali_state (id) VALUES (true) ON CONFLICT DO NOTHING")
 
     await _clean()
     try:
