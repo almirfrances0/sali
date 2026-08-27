@@ -32,12 +32,18 @@ class SyncResult:
     removed: list[str]
 
 
+# The relations the twin itself manages. It reconciles ONLY these, so a machine child hung off a
+# DIFFERENT subsystem's relation (e.g. tool discovery's has_tool edges) is never closed as "removed"
+# just because it isn't in the twin's snapshot — the two write to the same machine anchor safely.
+_MANAGED_RELATIONS = ("has", "runs", "hosts", "has_model")
+
+
 async def _existing_entity_keys(conn: Any, machine_id: UUID) -> set[str]:
     rows = await conn.fetch(
         "SELECT n.canonical_key FROM graph_edge e JOIN graph_node n ON n.id = e.dst_id "
         "WHERE e.src_id=$1 AND e.valid_until IS NULL AND e.superseded_by IS NULL "
-        "  AND n.valid_until IS NULL",
-        machine_id,
+        "  AND n.valid_until IS NULL AND e.rel_type = ANY($2::text[])",
+        machine_id, list(_MANAGED_RELATIONS),
     )
     return {r["canonical_key"] for r in rows}
 
