@@ -203,9 +203,12 @@ async def _seed_core(settings: Settings) -> None:
 
     conn = await connect(settings)
     try:
+        # The single canonical person (§19). Self-reference forms resolve here so "what do I use?"
+        # finds Almir's graph, never a stray node whose path happens to contain "almir" (§18).
         almir = await graph_writer.ensure_node(
             conn, node_type="person", name="Almir", canonical_key="person:almir",
             source=MemorySource.USER_EXPLICIT,
+            props={"aliases": ["me", "my", "i", "myself", "mine", "owner", "the user", "almir"]},
         )
         sali = await graph_writer.ensure_node(
             conn, node_type="agent", name="Sali", canonical_key="agent:sali",

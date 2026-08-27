@@ -74,19 +74,28 @@ class GraphService:
             )
 
     async def find_by_name(self, name: str, *, limit: int = 5) -> list[Node]:
-        """Minimal entity resolution (§18): map a surface form ('my VPS', 'project-x', 'Ollama') to
-        CURRENT nodes whose name or canonical key matches. Ordered by confidence then recency."""
+        """Entity resolution (§18/§19): map a surface form ('my VPS', 'project-x', 'me', 'Ollama') to
+        CURRENT nodes. Ranked so an EXACT name or a declared ALIAS beats a mere substring, and a
+        substring of the *name* beats one that only appears in the canonical key (a filesystem path
+        like /home/almir/… must never out-resolve the person named Almir)."""
         from sali.graph.models import row_to_node
 
-        term = name.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        if not term:
+        raw = name.strip()
+        if not raw:
             return []
+        lower = raw.lower()
+        pattern = "%" + raw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT * FROM graph_node WHERE valid_until IS NULL "
-                "AND (name ILIKE $1 OR canonical_key ILIKE $1) "
-                "ORDER BY confidence DESC, last_seen DESC LIMIT $2",
-                f"%{term}%", limit,
+                "SELECT *, CASE "
+                "  WHEN lower(name) = $2 THEN 0 "
+                "  WHEN props->'aliases' ? $2 THEN 1 "
+                "  WHEN name ILIKE $1 THEN 2 "
+                "  ELSE 3 END AS match_rank "
+                "FROM graph_node WHERE valid_until IS NULL "
+                "AND (name ILIKE $1 OR canonical_key ILIKE $1 OR props->'aliases' ? $2) "
+                "ORDER BY match_rank, confidence DESC, last_seen DESC LIMIT $3",
+                pattern, lower, limit,
             )
         return [row_to_node(r) for r in rows]
 

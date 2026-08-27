@@ -119,6 +119,23 @@ async def test_search_surfaces_the_structured_incident(live_pool: Any) -> None:
     assert match["detail"]["kind"] == "incident" and "8080" in match["detail"]["error"]
 
 
+async def test_entity_resolution_prefers_person_and_resolves_self_reference(live_pool: Any) -> None:
+    recall, _, graph = await _wire(live_pool)
+    await graph.ensure_node(node_type="person", name="Almir", canonical_key="person:almir",
+                            source=MemorySource.USER_EXPLICIT,
+                            props={"aliases": ["me", "my", "i", "owner"]})
+    # a noise node whose canonical-key PATH contains "almir" — must never out-resolve the person (§18)
+    await graph.ensure_node(node_type="environment", name="venv sali",
+                            canonical_key="pyenv:/home/almir/Desktop/sali/.venv",
+                            source=MemorySource.SYSTEM_OBSERVATION)
+
+    person = await recall.entity("Almir")
+    assert person["found"] and person["type"] == "person"  # exact name beats the path match
+
+    me = await recall.entity("me")  # self-reference resolves to the canonical person (§19)
+    assert me["found"] and me["type"] == "person" and me["name"] == "Almir"
+
+
 async def test_recall_tools_guard_missing_handle() -> None:
     res = await MemorySearch().run({"query": "x"}, ToolContext(settings=Settings(), clock=SystemClock()))
     assert not res.ok and "recall" in (res.error or "")
