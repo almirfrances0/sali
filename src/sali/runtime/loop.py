@@ -295,10 +295,9 @@ class _RecallSink:
         self._graph = graph
 
     async def search(self, query: str, *, layer: str | None = None, k: int = 6) -> list[dict[str, Any]]:
-        # For a layer-filtered read, pull a wider slate then keep the top-k of that layer.
-        hits = await self._memory.retrieve(query, k=k if layer is None else max(k * 4, 24))
-        if layer is not None:
-            hits = [h for h in hits if h.memory.layer.value == layer]
+        # A layer-scoped read is a REAL SQL predicate now, so a relevant procedure/incident outside
+        # the generic top-k is no longer invisible (fixes the top-24 blind spot; §4/§6).
+        hits = await self._memory.retrieve(query, k=k, layer=layer)
         out: list[dict[str, Any]] = []
         for h in hits[:k]:
             m = h.memory

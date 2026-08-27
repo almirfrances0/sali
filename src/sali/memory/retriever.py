@@ -31,24 +31,35 @@ def query_terms(query: str) -> list[str]:
     return [w for w in re.findall(r"[a-z0-9]{3,}", query.lower()) if w not in _KW_STOP]
 
 
-async def retrieve_keyword(conn: Any, query: str, limit: int = 10) -> list[Any]:
+async def retrieve_keyword(
+    conn: Any, query: str, limit: int = 10, *, layer: str | None = None
+) -> list[Any]:
     terms = query_terms(query)
     if not terms:
         return []
     patterns = [f"%{t}%" for t in terms]
+    # An optional layer filter is a REAL SQL predicate (not a post-hoc top-k slice), so a
+    # layer-scoped recall reaches memories that would fall outside the generic top-k (§4/§6).
+    layer_clause = " AND m.layer = $3::memory_layer" if layer else ""
     sql = (
         f"SELECT m.*, {_HALF_LIFE} {_FROM} "
-        "WHERE m.valid_until IS NULL AND m.content ILIKE ANY($1) "
+        f"WHERE m.valid_until IS NULL AND m.content ILIKE ANY($1){layer_clause} "
         "ORDER BY m.importance DESC, m.confidence DESC, m.id LIMIT $2"  # m.id = stable tiebreak
     )
-    return list(await conn.fetch(sql, patterns, limit))
+    args: list[Any] = [patterns, limit] + ([layer] if layer else [])
+    return list(await conn.fetch(sql, *args))
 
 
-async def retrieve_vector(conn: Any, query_vec: Sequence[float], limit: int = 10) -> list[Any]:
+async def retrieve_vector(
+    conn: Any, query_vec: Sequence[float], limit: int = 10, *, layer: str | None = None
+) -> list[Any]:
     literal = vector_literal(query_vec)
+    layer_clause = " AND m.layer = $3::memory_layer" if layer else ""
     sql = (
         f"SELECT m.*, {_HALF_LIFE}, (1 - (m.embedding <=> $1::vector)) AS similarity {_FROM} "
-        "WHERE m.valid_until IS NULL AND m.embed_status = 'done' AND m.embedding IS NOT NULL "
+        f"WHERE m.valid_until IS NULL AND m.embed_status = 'done' AND m.embedding IS NOT NULL"
+        f"{layer_clause} "
         "ORDER BY m.embedding <=> $1::vector, m.id LIMIT $2"  # m.id = stable tiebreak
     )
-    return list(await conn.fetch(sql, literal, limit))
+    args: list[Any] = [literal, limit] + ([layer] if layer else [])
+    return list(await conn.fetch(sql, *args))
