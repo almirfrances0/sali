@@ -284,3 +284,49 @@ async def _record_memory_contradiction(
         "VALUES ('memory.contradiction','memory',$1,$2)",
         old_id, {"resolution": resolution, "new_id": str(new_id), "resolved_by": resolved_by},
     )
+
+
+async def forget(conn: Any, memory_id: UUID, *, reason: str) -> bool:
+    """Retire a memory from CURRENT knowledge by closing its validity interval — never a hard delete,
+    so the history stays recoverable (§51). Returns True if it was current and is now retired."""
+    result = await conn.execute(
+        "UPDATE memory SET valid_until=now(), updated_at=now() "
+        "WHERE id=$1 AND valid_until IS NULL AND superseded_by IS NULL",
+        memory_id,
+    )
+    closed = bool(result.split()[-1] == "1")
+    if closed:
+        await conn.execute(
+            "INSERT INTO event (event_type, subject_type, subject_id, payload) "
+            "VALUES ('memory.forgotten','memory',$1,$2)",
+            memory_id, {"reason": reason[:200]},
+        )
+    return closed
+
+
+async def reground(conn: Any, memory_id: UUID, *, verified: bool, note: str | None = None) -> bool:
+    """Re-ground a memory against reality (§40): a confirmed fact clears needs_grounding, refreshes
+    last_verified and nudges confidence up; a contradicted one drops confidence and is re-flagged. An
+    evidence row records the check either way. Returns True if a current memory was updated."""
+    if verified:
+        result = await conn.execute(
+            "UPDATE memory SET last_verified=now(), needs_grounding=false, "
+            "  confidence=least(1.0, confidence + 0.05), updated_at=now() "
+            "WHERE id=$1 AND valid_until IS NULL",
+            memory_id,
+        )
+    else:
+        result = await conn.execute(
+            "UPDATE memory SET confidence=greatest(0.1, confidence - 0.2), needs_grounding=true, "
+            "  updated_at=now() WHERE id=$1 AND valid_until IS NULL",
+            memory_id,
+        )
+    if result.split()[-1] != "1":
+        return False
+    await conn.execute(
+        "INSERT INTO memory_evidence (memory_id, source, confidence, note) "
+        "VALUES ($1,'system_observation'::memory_source,$2,$3)",
+        memory_id, 0.9 if verified else 0.3,
+        note or ("verified against reality" if verified else "contradicted by reality"),
+    )
+    return True

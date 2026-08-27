@@ -24,6 +24,12 @@ class _FakeSink:
         self.calls.append((content, source, note, importance))
         self.grounding.append(needs_grounding)
 
+    async def forget(self, query: str, *, reason: str) -> dict[str, object]:
+        return {"found": False}
+
+    async def verify(self, query: str, *, verified: bool, note: str | None = None) -> dict[str, object]:
+        return {"found": False}
+
 
 def _ctx(sink: _FakeSink | None) -> ToolContext:
     return ToolContext(settings=Settings(), clock=SystemClock(), memory=sink)

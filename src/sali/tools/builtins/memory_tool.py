@@ -79,5 +79,73 @@ class RememberFact(Tool):
                           display=f"remembered{shown}")
 
 
+class ForgetBelief(Tool):
+    name = "memory_forget"
+    description = (
+        "Retire a belief you've found to be WRONG — after Almir corrects you, or you verify it's no "
+        "longer true. Give the belief in your own words; the closest-matching memory is retired from "
+        "current knowledge (its history is kept, never hard-deleted, so it's reversible). Use this "
+        "instead of leaving a known-false memory to resurface. Pair it with `remember` for the "
+        "correct fact."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "belief": {"type": "string", "description": "The wrong belief to retire, in your words."},
+            "reason": {"type": "string", "description": "Why it's wrong (e.g. 'Almir corrected me')."},
+        },
+        "required": ["belief"],
+    }
+    risk_level = RiskLevel.R1  # curating its own memory; reversible (history preserved)
+    capabilities = frozenset({Capability.WRITE})
+    idempotent = False
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        if ctx.memory is None:
+            return ToolResult(ok=False, display="no memory", error="memory isn't available right now")
+        belief = str(args.get("belief", "")).strip()
+        if not belief:
+            return ToolResult(ok=False, display="nothing to forget", error="belief is required")
+        result = await ctx.memory.forget(belief, reason=str(args.get("reason") or "no longer true"))
+        if not result.get("found"):
+            return ToolResult(ok=True, output=result, display="no matching memory to forget")
+        return ToolResult(ok=True, output=result, display=f"retired: {result['forgot'][:60]}")
+
+
+class VerifyBelief(Tool):
+    name = "memory_verify"
+    description = (
+        "Re-ground a memory against reality after you've CHECKED it (e.g. inspected the machine): "
+        "mark it verified=true if it still holds (refreshes it, raises confidence) or verified=false "
+        "if reality contradicts it (lowers confidence, flags it). Give the belief in your words."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "belief": {"type": "string", "description": "The memory you checked, in your words."},
+            "verified": {"type": "boolean", "description": "True if reality confirms it, false if not."},
+        },
+        "required": ["belief", "verified"],
+    }
+    risk_level = RiskLevel.R1
+    capabilities = frozenset({Capability.WRITE})
+    idempotent = False
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        if ctx.memory is None:
+            return ToolResult(ok=False, display="no memory", error="memory isn't available right now")
+        belief = str(args.get("belief", "")).strip()
+        if not belief:
+            return ToolResult(ok=False, display="need a belief", error="belief is required")
+        verified = bool(args.get("verified"))
+        result = await ctx.memory.verify(belief, verified=verified, note=None)
+        if not result.get("found"):
+            return ToolResult(ok=True, output=result, display="no matching memory")
+        return ToolResult(ok=True, output=result,
+                          display=("confirmed: " if verified else "flagged: ") + result["memory"][:56])
+
+
 def register_builtins(registry: ToolRegistry) -> None:
     registry.register(RememberFact())
+    registry.register(ForgetBelief())
+    registry.register(VerifyBelief())

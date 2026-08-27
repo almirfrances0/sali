@@ -110,6 +110,27 @@ class MemoryService:
             retriever=which,
         )
 
+    async def forget_matching(self, query: str, *, reason: str) -> dict[str, Any]:
+        """Retire the memory that best matches `query` (a belief Sali has corrected). Reversible —
+        the interval is closed, not deleted. Returns what was forgotten, or found=False."""
+        hits = await self.retrieve(query, k=1)
+        if not hits:
+            return {"found": False}
+        top = hits[0].memory
+        async with self.pool.acquire() as conn:
+            closed = await writer.forget(conn, top.id, reason=reason)
+        return {"found": True, "forgot": top.content, "closed": closed}
+
+    async def verify_matching(self, query: str, *, verified: bool, note: str | None = None) -> dict[str, Any]:
+        """Re-ground the memory best matching `query` against reality (§40) — confirmed or contradicted."""
+        hits = await self.retrieve(query, k=1)
+        if not hits:
+            return {"found": False}
+        top = hits[0].memory
+        async with self.pool.acquire() as conn:
+            updated = await writer.reground(conn, top.id, verified=verified, note=note)
+        return {"found": True, "memory": top.content, "verified": verified, "updated": updated}
+
     async def touch(self, memory_id: UUID) -> None:
         """Access reinforcement: bump access_count and record it was just used."""
         await self.touch_many([memory_id])

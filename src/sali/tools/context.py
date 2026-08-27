@@ -28,6 +28,9 @@ class MemorySink(Protocol):
         importance: float = 0.6, needs_grounding: bool = False, about: str | None = None,
     ) -> None: ...
 
+    async def forget(self, query: str, *, reason: str) -> dict[str, Any]: ...
+    async def verify(self, query: str, *, verified: bool, note: str | None = None) -> dict[str, Any]: ...
+
 
 class RecallSink(Protocol):
     """How a tool ACTIVELY queries Sali's memory (spec §34,§55,§56) — search, graph traversal,

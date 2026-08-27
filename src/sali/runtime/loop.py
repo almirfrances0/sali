@@ -214,6 +214,14 @@ class _MemorySink:
         )
         await self._service.embed_pending()
 
+    async def forget(self, query: str, *, reason: str) -> dict[str, Any]:
+        result: dict[str, Any] = await self._service.forget_matching(query, reason=reason)
+        return result
+
+    async def verify(self, query: str, *, verified: bool, note: str | None = None) -> dict[str, Any]:
+        result: dict[str, Any] = await self._service.verify_matching(query, verified=verified, note=note)
+        return result
+
 
 class _RecallSink:
     """Active memory recall for Sali's memory tools (§34,§55,§56): hybrid search, graph traversal, and
