@@ -73,6 +73,7 @@ async def remember(
     structured: dict[str, Any] | None = None,
     needs_grounding: bool = False,
     note: str | None = None,
+    scope: str = "global",
     at: datetime | None = None,
 ) -> Memory:
     """Persist a fact. Corroborates on restatement; resolves functional-claim conflicts."""
@@ -92,7 +93,7 @@ async def remember(
         return await _resolve_claim(
             conn, layer=layer, content=content, source=source, obs_conf=obs_conf, freshness=fresh,
             importance=imp, claim_key=claim_key, source_ref=source_ref, structured=structured,
-            needs_grounding=needs_grounding, note=note, at=at,
+            needs_grounding=needs_grounding, note=note, scope=scope, at=at,
         )
 
     dedup = (
@@ -110,7 +111,7 @@ async def remember(
                     conn, layer=layer, content=content, source=source, obs_conf=obs_conf,
                     freshness=fresh, importance=imp, claim_key=claim_key, functional=functional,
                     source_ref=source_ref, structured=structured, needs_grounding=needs_grounding,
-                    note=note, valid_from=at,
+                    note=note, scope=scope, valid_from=at,
                 )
         except Exception as exc:  # noqa: BLE001 - narrowed to unique-violation immediately below
             if getattr(exc, "sqlstate", None) != "23505":  # not unique_violation → real error
@@ -136,6 +137,7 @@ async def _resolve_claim(
     structured: dict[str, Any] | None,
     needs_grounding: bool,
     note: str | None,
+    scope: str,
     at: datetime | None,
 ) -> Memory:
     async with conn.transaction():
@@ -154,7 +156,7 @@ async def _resolve_claim(
             "layer": layer, "content": content, "source": source, "obs_conf": obs_conf,
             "freshness": freshness, "importance": importance, "claim_key": claim_key,
             "functional": True, "source_ref": source_ref, "structured": structured,
-            "needs_grounding": needs_grounding, "note": note,
+            "needs_grounding": needs_grounding, "note": note, "scope": scope,
         }
         if current is None:
             return await _insert_memory(conn, **insert, valid_from=effective_at)
@@ -204,6 +206,7 @@ async def _insert_memory(
     structured: dict[str, Any] | None,
     needs_grounding: bool,
     note: str | None,
+    scope: str = "global",
     valid_from: datetime | None = None,
     valid_until: datetime | None = None,
 ) -> Memory:
@@ -212,11 +215,12 @@ async def _insert_memory(
     row = await conn.fetchrow(
         "INSERT INTO memory "
         "  (layer, content, source, source_ref, structured, claim_key, functional, confidence, "
-        "   importance, reliability, evidence_count, freshness, needs_grounding, valid_from, valid_until) "
+        "   importance, reliability, evidence_count, freshness, needs_grounding, scope, "
+        "   valid_from, valid_until) "
         "VALUES ($1::memory_layer,$2,$3::memory_source,$4,$5,$6,$7,$8,$9,$10,1,$11::freshness_policy,"
-        "        $12, COALESCE($13::timestamptz, now()), $14) RETURNING *",
+        "        $12, $13, COALESCE($14::timestamptz, now()), $15) RETURNING *",
         layer.value, content, source.value, source_ref, structured or {}, claim_key, functional,
-        conf, importance, rel, freshness.value, needs_grounding, valid_from, valid_until,
+        conf, importance, rel, freshness.value, needs_grounding, scope, valid_from, valid_until,
     )
     await conn.execute(
         "INSERT INTO memory_evidence (memory_id, source, source_ref, confidence, note) "

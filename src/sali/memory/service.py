@@ -48,7 +48,7 @@ class MemoryService:
     async def embed_pending(self, batch: int = 32) -> int:
         return await embed_worker.embed_pending(self.pool, self.provider, batch)
 
-    async def retrieve(self, query: str, k: int = 8) -> list[MemoryHit]:
+    async def retrieve(self, query: str, k: int = 8, *, scope: str | None = None) -> list[MemoryHit]:
         query_vec = (await self.provider.embed([embed_worker.QUERY_PREFIX + query]))[0]
         async with self.pool.acquire() as conn:
             vector_rows = await retriever.retrieve_vector(conn, query_vec, k)
@@ -69,11 +69,11 @@ class MemoryService:
             entry["kw_rank"] = rank
 
         now = self.clock.now()
-        hits = [self._to_hit(entry, now) for entry in fused.values()]
+        hits = [self._to_hit(entry, now, scope) for entry in fused.values()]
         hits.sort(key=lambda h: h.score, reverse=True)
         return hits[:k]
 
-    def _to_hit(self, entry: dict[str, Any], now: Any) -> MemoryHit:
+    def _to_hit(self, entry: dict[str, Any], now: Any, active_scope: str | None = None) -> MemoryHit:
         row = entry["row"]
         retrievers: set[str] = entry["retrievers"]
 
@@ -98,7 +98,16 @@ class MemoryService:
         half_life = timedelta(seconds=float(row["half_life_s"])) if row["half_life_s"] else timedelta(days=30)
         dimp = decayed_importance(float(row["importance"]), half_life, now - row["last_verified"])
         reuse = min(0.2, 0.04 * int(row["access_count"] or 0))
-        score = relevance * (0.6 + 0.25 * eff_conf + 0.15 * dimp) * (1.0 + reuse)
+        # Scope (§30/§31): in the current project, its memories are boosted and unrelated projects'
+        # are damped — global memories stay neutral (they apply everywhere). Relevance still leads.
+        m_scope = row.get("scope", "global")
+        if active_scope and m_scope not in ("global", active_scope):
+            scope_factor = 0.6
+        elif active_scope and m_scope == active_scope:
+            scope_factor = 1.2
+        else:
+            scope_factor = 1.0
+        score = relevance * (0.6 + 0.25 * eff_conf + 0.15 * dimp) * (1.0 + reuse) * scope_factor
         which = "hybrid" if len(retrievers) > 1 else next(iter(retrievers))
         return MemoryHit(
             memory=row_to_memory(row),

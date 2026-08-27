@@ -28,6 +28,7 @@ from sali.core.clock import Clock, SystemClock
 from sali.core.enums import MemoryLayer, MemorySource
 from sali.core.errors import ProviderError
 from sali.core.ids import new_id
+from sali.core.scope import project_scope
 from sali.graph.service import GraphService
 from sali.ingest.service import IngestService
 from sali.learning.episodes import prune_stm
@@ -516,7 +517,8 @@ class AgentLoop:
                 yield LoopEvent("status", "remembering")
                 await journal.set_state(RunState.RETRIEVE)
                 plan = classify(user_input)
-                bundle = await self.retrieval.gather(user_input, plan, k=5)
+                scope = project_scope(self.settings.permissions.exec_cwd)  # §31: weight this project
+                bundle = await self.retrieval.gather(user_input, plan, k=5, scope=scope)
                 await journal.event(
                     "retrieve",
                     {"intent": plan.intent, "memories": len(bundle.memories),

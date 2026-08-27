@@ -30,9 +30,11 @@ class RetrievalService:
         self.memory = MemoryService(pool, provider, clock)
         self.clock = clock or SystemClock()
 
-    async def gather(self, query: str, plan: RetrievalPlan, *, k: int = 6) -> RetrievalBundle:
+    async def gather(
+        self, query: str, plan: RetrievalPlan, *, k: int = 6, scope: str | None = None
+    ) -> RetrievalBundle:
         memories = (
-            await self.memory.retrieve(query, k=k)
+            await self.memory.retrieve(query, k=k, scope=scope)
             if (plan.use_vector or plan.use_keyword)
             else []
         )

@@ -50,7 +50,8 @@ async def _memory_status(settings: Settings) -> None:
     finally:
         await kernel.close()
     m, g, c = h["memory"], h["graph"], h["contradictions"]
-    console.print(f"[bold]Memory[/] — {m['current']} current, {m['superseded']} superseded")
+    console.print(f"[bold]Memory[/] — {m['current']} current, {m['superseded']} superseded, "
+                  f"{m.get('scoped', 0)} project-scoped")
     for layer, n in m["by_layer"].items():
         console.print(f"  {layer:12s} {n}")
     console.print(f"[bold]Graph[/] — {g['nodes']} nodes, {g['edges']} edges "

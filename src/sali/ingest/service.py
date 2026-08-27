@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from sali.core.enums import MemoryLayer, MemorySource
+from sali.core.scope import project_scope
 from sali.ingest.chunker import chunk_text
 from sali.ingest.extractors import extract_text
 from sali.ingest.models import IngestResult
@@ -69,11 +70,13 @@ class IngestService:
                 doc_id = await conn.fetchval(
                     "INSERT INTO document (path, content_hash, bytes) VALUES ($1, $2, $3) RETURNING id",
                     str(p), content_hash, size)
+            scope = project_scope(str(p)) or "global"  # a project's docs are scoped to it (§31)
             for i, chunk in enumerate(chunks):
                 await memory_writer.remember(
                     conn, layer=MemoryLayer.SEMANTIC, content=redact(chunk),
                     source=MemorySource.FILE_OBSERVATION, note=f"from {p} — chunk {i + 1}/{n}",
-                    importance=0.5, obs_conf=0.9, functional=True, claim_key=f"doc:{doc_id}#{i}")
+                    importance=0.5, obs_conf=0.9, functional=True, claim_key=f"doc:{doc_id}#{i}",
+                    scope=scope)
             await conn.execute(
                 "UPDATE document SET content_hash = $1, bytes = $2, chunks = $3, status = 'ok', "
                 "ingested_at = now() WHERE id = $4", content_hash, size, n, doc_id)

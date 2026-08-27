@@ -13,19 +13,21 @@ _NOW = datetime(2026, 8, 26, 12, 0, 0, tzinfo=UTC)
 
 
 def _row(*, importance: float, access_count: int, half_life_s: float = 86_400 * 30,
-         last_verified: datetime = _NOW) -> dict[str, Any]:
+         last_verified: datetime = _NOW, scope: str = "global") -> dict[str, Any]:
     return {
         "id": uuid4(), "layer": "semantic", "content": "x", "source": "user_explicit",
         "confidence": 0.8, "importance": importance, "reliability": 1.0, "evidence_count": 1,
         "freshness": "permanent", "valid_from": _NOW, "valid_until": None, "last_verified": last_verified,
         "embed_status": "done", "structured": {}, "claim_key": None, "functional": False,
         "needs_grounding": False, "access_count": access_count, "half_life_s": half_life_s,
+        "scope": scope,
     }
 
 
-def _hit(row: dict[str, Any], similarity: float = 0.7) -> float:
+def _hit(row: dict[str, Any], similarity: float = 0.7, active_scope: str | None = None) -> float:
     svc = MemoryService(pool=None, provider=FakeModelProvider())  # _to_hit touches no pool
-    return svc._to_hit({"row": row, "similarity": similarity, "retrievers": {"vector"}}, _NOW).score
+    return svc._to_hit(
+        {"row": row, "similarity": similarity, "retrievers": {"vector"}}, _NOW, active_scope).score
 
 
 def test_reactivation_lifts_a_reused_memory() -> None:
@@ -45,3 +47,18 @@ def test_relevance_still_dominates_importance() -> None:
     important_irrelevant = _hit(_row(importance=1.0, access_count=8), similarity=0.15)
     relevant_ordinary = _hit(_row(importance=0.3, access_count=0), similarity=0.95)
     assert relevant_ordinary > important_irrelevant
+
+
+def test_scope_boosts_the_current_project_and_damps_others() -> None:
+    in_proj = _row(importance=0.5, access_count=0, scope="project:x")
+    other = _row(importance=0.5, access_count=0, scope="project:y")
+    glob = _row(importance=0.5, access_count=0, scope="global")
+    # working INSIDE project x
+    assert _hit(in_proj, active_scope="project:x") > _hit(glob, active_scope="project:x")   # boosted
+    assert _hit(glob, active_scope="project:x") > _hit(other, active_scope="project:x")     # other damped
+
+
+def test_scope_is_inert_without_an_active_project() -> None:
+    a = _row(importance=0.5, access_count=0, scope="project:x")
+    b = _row(importance=0.5, access_count=0, scope="global")
+    assert _hit(a) == _hit(b)  # no active scope → scoping has no effect, nothing is damped

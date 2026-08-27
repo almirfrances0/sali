@@ -28,6 +28,8 @@ async def health(pool: Any) -> dict[str, Any]:
                 "AND confidence < $1", _LOW_CONFIDENCE),
             "embed_backlog": await conn.fetchval(
                 "SELECT count(*) FROM memory WHERE embed_status = 'pending'"),
+            "scoped": await conn.fetchval(
+                "SELECT count(*) FROM memory WHERE valid_until IS NULL AND scope <> 'global'"),
         }
         current_nodes = await conn.fetchval("SELECT count(*) FROM graph_node WHERE valid_until IS NULL")
         current_edges = await conn.fetchval("SELECT count(*) FROM graph_edge WHERE valid_until IS NULL")
