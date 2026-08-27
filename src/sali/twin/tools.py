@@ -155,6 +155,28 @@ async def discover_tools(
     return await sync_tools(conn, found, packages, source=source)
 
 
+async def link_tool_software(conn: Any, *, source: MemorySource = MemorySource.SYSTEM_OBSERVATION) -> int:
+    """Unify the two representations of the same binary (§conflicts): the twin's `software:<x>` node
+    (which carries the VERSION) and tool-intelligence's `ext_tool:<x>` node (which carries CAPABILITIES
+    + authority). They're linked with a `same_program` edge so a query from either reaches the whole
+    truth, without merging (each keeps its half). Idempotent; matches by the software node's binary path."""
+    rows = await conn.fetch(
+        "SELECT id, props FROM graph_node WHERE node_type='software' AND valid_until IS NULL")
+    linked = 0
+    for r in rows:
+        path = str((r["props"] or {}).get("path", ""))
+        binary = path.rsplit("/", 1)[-1] if path else ""
+        if not binary:
+            continue
+        ext = await conn.fetchrow(
+            "SELECT id FROM graph_node WHERE node_type=$1 AND canonical_key=$2 AND valid_until IS NULL",
+            NODE_EXT_TOOL, ext_tool_key(binary))
+        if ext is not None:
+            await relate(conn, src_id=ext["id"], dst_id=r["id"], rel_type="same_program", source=source)
+            linked += 1
+    return linked
+
+
 async def _close_tool_edge(conn: Any, machine_id: UUID, name: str) -> None:
     await conn.execute(
         "UPDATE graph_edge SET valid_until = now() "

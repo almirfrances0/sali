@@ -46,7 +46,7 @@ from sali.runtime.state import RunState, resume_action
 from sali.runtime.world_state import WorldStateBuilder
 from sali.scheduler.store import ScheduleStore
 from sali.security.confirm import Confirmer
-from sali.security.policy import Action, PolicyDecision, PolicyEngine, SessionGrants
+from sali.security.policy import Action, PolicyDecision, PolicyEngine
 from sali.security.redact import redact_obj
 from sali.tasks.store import TaskStore
 from sali.tools import dispatch
@@ -573,7 +573,6 @@ class AgentLoop:
         """Drive one turn, streaming status/token/thinking/tool events as they happen. This is
         the real core; ``run`` is a thin consumer. Everything is journaled exactly as before."""
         session_id = session_id or new_id()
-        grants = SessionGrants()
         async with self.pool.acquire() as conn:  # journal + tool + persistence connection
             await self._ensure_conversation(conn, session_id)
             history = await self._load_history(conn, session_id)
@@ -731,7 +730,7 @@ class AgentLoop:
                             messages.append(_circuit_broken_message(call.name, broken[0], broken[1]))
                             continue
                         tool_sigs[sig] = tool_sigs.get(sig, 0) + 1  # count executed calls only
-                        tool_msg, ok, summary = await self._handle_tool(conn, journal, grants, call)
+                        tool_msg, ok, summary = await self._handle_tool(conn, journal, call)
                         # A clean, persistent progress line: what was done + a short result.
                         yield LoopEvent("tool", call.name, {"phase": "done", "name": call.name,
                                                             "ok": ok, "summary": summary})
@@ -833,7 +832,7 @@ class AgentLoop:
                 raise
 
     async def _handle_tool(
-        self, conn: Any, journal: RunJournal, grants: SessionGrants, call: ToolCall
+        self, conn: Any, journal: RunJournal, call: ToolCall
     ) -> tuple[ChatMessage, bool, str]:
         """Run one tool; return (message-for-the-model, succeeded?, short summary) — the flag +
         summary let the UI print a clean ✓/✗ progress line of what was actually done."""
@@ -842,7 +841,7 @@ class AgentLoop:
             await journal.event("tool.unknown", {"name": call.name})
             return _tool_message(call.name, {"error": f"unknown tool '{call.name}'"}), False, "unknown tool"
 
-        decision = self.policy.decide(tool, call.arguments, grants)
+        decision = self.policy.decide(tool, call.arguments)
         decision = await self._authority_floor(tool, call.arguments, decision)
         await journal.event(
             "policy",

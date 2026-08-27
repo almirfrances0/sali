@@ -1,14 +1,13 @@
 """The permission policy.
 
 Maps a tool's risk level to an action — auto-allow / confirm / deny — with a hard denylist
-that always wins, a DESTRUCTIVE-capability floor, per-session sticky grants, and R4 treated
-as deny-by-default. The *decision* is made here (server-side); how a confirmation is
-collected is a separate concern (see ``confirm.py``).
+that always wins, a DESTRUCTIVE-capability floor, and R4 treated as confirm-first. The *decision*
+is made here (server-side); how a confirmation is collected is a separate concern (see ``confirm.py``).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 
 from sali.core.enums import Capability, RiskLevel
@@ -40,13 +39,6 @@ _RISK_ACTION: dict[RiskLevel, Action] = {
 }
 
 
-@dataclass(slots=True)
-class SessionGrants:
-    """Sticky per-session approvals (a user can 'allow this tool for now')."""
-
-    allowed: set[str] = field(default_factory=set)
-
-
 class PolicyEngine:
     def __init__(
         self,
@@ -57,9 +49,7 @@ class PolicyEngine:
         self.denylist = denylist
         self.allowlist = allowlist
 
-    def decide(
-        self, tool: Tool, args: dict[str, object], grants: SessionGrants | None = None
-    ) -> PolicyDecision:
+    def decide(self, tool: Tool, args: dict[str, object]) -> PolicyDecision:
         if tool.name in self.denylist:  # explicit hard denylist (rarely used)
             return PolicyDecision(Action.DENY, f"{tool.name} is denylisted", tool.risk_level)
         if not tool.available:

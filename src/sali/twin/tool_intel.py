@@ -22,7 +22,7 @@ from sali.core.enums import MemorySource
 from sali.obs.log import get_logger
 from sali.twin.authority import classify_tools
 from sali.twin.capabilities import apply_capabilities
-from sali.twin.tools import observe_path_tools, resolve_packages, sync_tools
+from sali.twin.tools import link_tool_software, observe_path_tools, resolve_packages, sync_tools
 
 log = get_logger("sali.twin.tool_intel")
 
@@ -57,6 +57,7 @@ async def run_pass(
                 disc = await sync_tools(conn, found, packages, source=source)
                 caps = await apply_capabilities(conn)
                 auth = await classify_tools(conn)
+                await link_tool_software(conn)  # unify software:<x> and ext_tool:<x> for the same binary
             await conn.execute(
                 "INSERT INTO event (event_type, payload) VALUES ('tool.intel_pass', $1)",
                 {"discovered": disc.total, "added": len(disc.added), "removed": len(disc.removed),

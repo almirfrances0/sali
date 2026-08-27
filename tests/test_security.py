@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from sali.core.enums import Capability, RiskLevel
-from sali.security.policy import Action, PolicyEngine, SessionGrants
+from sali.security.policy import Action, PolicyEngine
 from sali.security.redact import looks_like_secret, redact, redact_obj
 from sali.tools.base import Tool, ToolResult
 from sali.tools.builtins.system import MemoryInfo
@@ -60,16 +60,9 @@ def test_destructive_capability_forces_confirm() -> None:
     assert PolicyEngine().decide(_LowRiskDestructive(), {}).action is Action.CONFIRM
 
 
-def test_session_grant_upgrades_confirm_to_auto() -> None:
-    # A grant upgrades a non-destructive CONFIRM tool...
-    grants = SessionGrants(allowed={"web_fetch"})
-    assert PolicyEngine().decide(_NetworkTool(), {}, grants).action is Action.AUTO_ALLOW
-
-
-def test_session_grant_refused_for_destructive() -> None:
-    # ...but a name-only grant must NOT auto-allow a destructive/high-risk tool.
-    grants = SessionGrants(allowed={"delete_one"})
-    assert PolicyEngine().decide(_LowRiskDestructive(), {}, grants).action is Action.CONFIRM
+def test_ordinary_network_tool_auto_allows() -> None:
+    # Everyday work runs free (the freedom policy) — no per-session grant machinery needed.
+    assert PolicyEngine().decide(_NetworkTool(), {}).action is Action.AUTO_ALLOW
 
 
 def test_allowlist_mode_denies_unlisted() -> None:
