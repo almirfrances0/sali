@@ -1210,6 +1210,9 @@ _LEARN_EVERY = 10
 # capabilities, classify authority). Deterministic + diff-based, so cheap; also run once at startup
 # (cycle 1) so a fresh machine is inventoried promptly, then periodically.
 _TOOL_INTEL_EVERY = 20
+# How often the daemon researches a few pending learning gaps online (§9). Rare + internet-gated +
+# budget-bounded, so it never crawls — at the 5-min twin cadence this is a few times a day.
+_RESEARCH_EVERY = 30
 
 
 async def _observe(settings: Settings, interval: int) -> None:
@@ -1344,6 +1347,10 @@ async def _daemon(settings: Settings) -> None:
             await tool_intel.run_pass(pool)
         if cycle % _LEARN_EVERY == 0:
             await learning.consolidate()
+        if cycle % _RESEARCH_EVERY == 0:  # §9: research a few pending learning gaps (internet-gated)
+            from sali.learning.research import research_pass
+
+            await research_pass(pool, build_provider(settings))
 
     # Each faculty runs under a supervisor: one crashing is logged and restarted (with backoff) rather
     # than cancelling its siblings — a hiccup in perception never takes the scheduler down with it.
