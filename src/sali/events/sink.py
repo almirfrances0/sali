@@ -24,11 +24,18 @@ _CONFIG_FILES = frozenset({
     ".env", "dockerfile", "docker-compose.yml", "docker-compose.yaml", "pyproject.toml",
     "makefile", "nginx.conf", "requirements.txt", "package.json", "cargo.toml",
 })
+# System-event kinds map directly to their attention signal.
+_KIND_SIGNAL = {
+    EventKind.PORT_OPENED: "new_service",
+    EventKind.SERVICE_FAILED: "service_failed",
+    EventKind.DISK_PRESSURE: "disk_full",
+}
 
 
 def _signals_for(obs: Observation) -> frozenset[str]:
-    """Categorical attention signals derived from a filesystem/window observation. (System events —
-    process/service/network — will contribute richer signals as the event bus grows, §13.)"""
+    """Categorical attention signals derived from an observation — filesystem, window, or system."""
+    if obs.kind in _KIND_SIGNAL:
+        return frozenset({_KIND_SIGNAL[obs.kind]})
     sample = str(obs.detail.get("sample", ""))
     name = sample.rsplit(os.sep, 1)[-1].lower()
     signals: set[str] = set()

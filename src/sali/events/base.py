@@ -14,6 +14,10 @@ class EventKind(StrEnum):
     FILE_DELETED = "file_deleted"
     FILE_MOVED = "file_moved"
     WINDOW_FOCUS = "window_focus"
+    # System state changes (§13) — cheap deterministic signals, not filesystem/window.
+    PORT_OPENED = "port_opened"        # a new listening socket appeared
+    SERVICE_FAILED = "service_failed"  # a systemd unit entered a failed state
+    DISK_PRESSURE = "disk_pressure"    # a mount crossed the fullness threshold
 
 
 @dataclass(slots=True)

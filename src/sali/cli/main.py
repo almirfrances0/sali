@@ -1324,6 +1324,12 @@ async def _daemon(settings: Settings) -> None:
     engine = _perception_engine(settings, pool)  # continuous desktop perception (§7,11,42); None if off
     if engine is not None:
         faculties.append(("perception", lambda: engine.run(stop)))
+    # System-state watcher (§13/§78): new listening ports, failed units, disk pressure → attention.
+    from sali.events.sink import DbObservationSink
+    from sali.events.syswatch import SystemWatch
+
+    syswatch = SystemWatch(DbObservationSink(pool))
+    faculties.append(("syswatch", lambda: syswatch.run(stop)))
 
     console.print("[dim]Sali is up — observing, learning, perceiving, and watching its schedules.[/]")
     try:
