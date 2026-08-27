@@ -69,7 +69,10 @@ async def learn_procedures(
             content=f"{name} — Almir's usual steps: " + " → ".join(steps),
             source=MemorySource.INFERENCE, functional=True, claim_key=f"procedure:{sig}",
             importance=0.7, obs_conf=min(0.9, 0.5 + 0.1 * len(runs)),
-            structured={"steps": list(steps), "evidence": len(runs), "name": name},
+            # certainty hierarchy (§23): a mined-and-repeated sequence is 'learned' (past 'observed');
+            # 'preferred' is reserved for one Almir has explicitly confirmed.
+            structured={"steps": list(steps), "evidence": len(runs), "name": name,
+                        "certainty": "learned"},
         )
         learned.append(LearnedProcedure(name=name, steps=list(steps), evidence=len(runs)))
     return learned

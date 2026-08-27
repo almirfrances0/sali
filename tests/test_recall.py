@@ -106,6 +106,19 @@ async def test_recall_tools_end_to_end(live_pool: Any) -> None:
     assert hist.ok and not hist.output["found"]  # unknown → graceful empty, no invention
 
 
+async def test_search_surfaces_the_structured_incident(live_pool: Any) -> None:
+    recall, mem, _ = await _wire(live_pool)
+    await mem.remember(
+        layer=MemoryLayer.EPISODIC, content="fixed the docker port conflict last time",
+        source=MemorySource.SYSTEM_OBSERVATION,
+        structured={"kind": "incident", "error": "port 8080 in use", "correction": "stopped the other service"})
+    await mem.embed_pending()
+    hits = await recall.search("docker port problem", layer="episodic")
+    match = next((h for h in hits if "docker" in h["content"]), None)
+    assert match is not None
+    assert match["detail"]["kind"] == "incident" and "8080" in match["detail"]["error"]
+
+
 async def test_recall_tools_guard_missing_handle() -> None:
     res = await MemorySearch().run({"query": "x"}, ToolContext(settings=Settings(), clock=SystemClock()))
     assert not res.ok and "recall" in (res.error or "")

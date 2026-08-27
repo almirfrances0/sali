@@ -232,11 +232,14 @@ class _RecallSink:
         out: list[dict[str, Any]] = []
         for h in hits[:k]:
             m = h.memory
-            out.append({
+            entry: dict[str, Any] = {
                 "content": m.content, "layer": m.layer.value, "source": m.source.value,
                 "confidence": round(h.effective_confidence, 2), "stale": h.stale,
                 "recorded": m.valid_from.date().isoformat() if m.valid_from else None,
-            })
+            }
+            if m.structured:  # a structured incident/experience/procedure — give Sali the whole shape
+                entry["detail"] = m.structured
+            out.append(entry)
         return out
 
     async def related(self, entity: str, *, hops: int = 1) -> dict[str, Any]:

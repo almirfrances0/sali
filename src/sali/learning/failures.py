@@ -64,6 +64,21 @@ async def record_failures(conn: Any, *, limit: int = 50) -> int:
         content = (f"A past attempt failed: the {row['tool_name']} tool{doing} failed{because}. "
                    f"What fixed it: `{fix_command}`.")
         note = f"task: {row['user_input'][:120]}" if row["user_input"] else None
+        # A STRUCTURED incident (§24/§25) alongside the text, so recall gives Sali the whole shape, not
+        # a sentence. Everything here is FACT from the tool_execution rows; the *cause* is deliberately
+        # only a HYPOTHESIS (§25: a failure never proves its cause — the correction is what's verified).
+        incident = {
+            "kind": "incident",
+            "objective": (row["user_input"] or "")[:200] or None,
+            "tool": row["tool_name"],
+            "failed_command": command,
+            "error": (row["error"] or "")[:400] or None,
+            "hypothesis": f"the fix `{fix_command}` suggests the failure was addressable by re-running "
+                          f"{_binary(command)} differently",
+            "correction": fix_command,
+            "verified": True,  # the correction was a verified_success later in the same run
+            "outcome": "resolved",
+        }
         # Record each distinct failure→fix once (dedup by content signature) — same lesson, one memory.
         if await conn.fetchval(
             "SELECT 1 FROM memory WHERE layer = 'episodic'::memory_layer "
@@ -74,6 +89,7 @@ async def record_failures(conn: Any, *, limit: int = 50) -> int:
             conn, layer=MemoryLayer.EPISODIC, content=content,
             source=MemorySource.SYSTEM_OBSERVATION, functional=True,
             claim_key=f"failure:{row['id']}", importance=0.6, obs_conf=1.0, note=note,
+            structured=incident,
         )
         count += 1
     return count

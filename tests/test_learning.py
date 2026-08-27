@@ -113,6 +113,30 @@ async def test_records_only_fixed_failures_and_does_not_duplicate(db_conn: Any) 
     assert await record_failures(db_conn) == 0  # idempotent — the same lesson isn't re-recorded
 
 
+async def test_recorded_failure_carries_a_structured_incident(db_conn: Any) -> None:
+    run = uuid4()
+    t0 = datetime.now(UTC) - timedelta(minutes=1)
+    await db_conn.execute(
+        "INSERT INTO agent_runs (run_id, session_id, user_input, state, status) "
+        "VALUES ($1,$2,'deploy project x','done','completed')", run, uuid4())
+    await db_conn.execute(
+        "INSERT INTO tool_execution (run_id, tool_name, status, danger_level, plan, success, error, started_at) "
+        "VALUES ($1,'execute_command','verified_failure'::tool_status,0,$2,false,$3,$4)",
+        run, {"args": {"command": "docker compose up -d"}}, "port 8080 already in use", t0)
+    await db_conn.execute(
+        "INSERT INTO tool_execution (run_id, tool_name, status, danger_level, plan, success, started_at) "
+        "VALUES ($1,'execute_command','verified_success'::tool_status,0,$2,true,$3)",
+        run, {"args": {"command": "docker compose down && docker compose up -d"}}, t0 + timedelta(seconds=5))
+
+    assert await record_failures(db_conn) == 1
+    inc = (await db_conn.fetchrow(
+        "SELECT structured FROM memory WHERE claim_key LIKE 'failure:%' AND valid_until IS NULL"))["structured"]
+    assert inc["kind"] == "incident" and inc["objective"] == "deploy project x"
+    assert inc["tool"] == "execute_command" and "8080" in inc["error"]
+    assert "down" in inc["correction"] and inc["verified"] is True and inc["outcome"] == "resolved"
+    assert "hypothesis" in inc  # the CAUSE is only a hypothesis (§25), never asserted as fact
+
+
 async def test_relearning_a_procedure_reuses_the_name_and_does_not_churn(db_conn: Any) -> None:
     base = datetime(2026, 1, 1, tzinfo=UTC)
     for i, run in enumerate((uuid4(), uuid4())):
