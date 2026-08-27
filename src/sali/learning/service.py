@@ -15,6 +15,7 @@ from sali.learning.failures import record_failures
 from sali.learning.model import ConsolidationResult
 from sali.learning.procedures import learn_procedures, record_procedure_outcomes
 from sali.learning.queue import queue_gaps
+from sali.learning.reflection import reflect_on_recent
 from sali.learning.tool_experience import learn_tool_experiences
 from sali.memory import embed_worker, retention
 from sali.obs.log import get_logger
@@ -54,9 +55,12 @@ class LearningService:
                 episodes = await consolidate_stm(conn, self.provider)
                 pruned = await prune_stm(conn)
                 gaps = await queue_gaps(conn)  # §45/§46: notice new learning gaps, bounded by budget
+                reflected = await reflect_on_recent(conn, self.provider)  # §57: one lesson per pass
                 reclaimed = await retention.gc(conn)  # §51: bound the event log's routine bookkeeping
                 if gaps:
                     await _emit(conn, "learning.queued", {"count": gaps})
+                if reflected:
+                    await _emit(conn, "learning.reflection", {"count": reflected})
                 if reclaimed:
                     await _emit(conn, "learning.gc", {"events_pruned": reclaimed})
                 for proc in procedures:
