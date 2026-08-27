@@ -1325,11 +1325,15 @@ async def _daemon(settings: Settings) -> None:
     if engine is not None:
         faculties.append(("perception", lambda: engine.run(stop)))
     # System-state watcher (§13/§78): new listening ports, failed units, disk pressure → attention.
+    from sali.events.proactive import ProactiveLoop
     from sali.events.sink import DbObservationSink
     from sali.events.syswatch import SystemWatch
 
     syswatch = SystemWatch(DbObservationSink(pool))
     faculties.append(("syswatch", lambda: syswatch.run(stop)))
+    # Proactive loop (§16): surface the attention-flagged notify/investigate observations to Almir.
+    proactive = ProactiveLoop(pool)
+    faculties.append(("proactive", lambda: proactive.run(stop)))
 
     console.print("[dim]Sali is up — observing, learning, perceiving, and watching its schedules.[/]")
     try:
