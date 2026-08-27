@@ -18,7 +18,7 @@ from sali.memory.service import MemoryService
 from sali.provider.base import ModelProvider
 from sali.retrieval.models import GraphFact, RecentItem, RetrievalBundle, ToolFact
 from sali.retrieval.router import RetrievalPlan
-from sali.twin.capabilities import capability_slugs_in, tools_with_capability
+from sali.twin.capabilities import capability_slugs_in
 
 _STOP = {
     "the", "are", "and", "for", "which", "what", "does", "did", "how", "why", "who", "your",
@@ -73,14 +73,18 @@ class RetrievalService:
     async def _tool_facts(self, query: str, k: int) -> list[ToolFact]:
         """Answer a tool question from the inventory + capability graph: the tools that provide each
         capability the query refers to, or — if none is named — a summary of what's installed."""
+        from sali.twin import selection
+
         slugs = capability_slugs_in(query)
         facts: list[ToolFact] = []
         async with self.pool.acquire() as conn:
             for slug in slugs[:k]:
-                names = await tools_with_capability(conn, slug)
-                if names:
+                # Rank by LEARNED reliability + proven-use + safety (not alphabetically), so the tool
+                # experience Sali actually accumulated reaches the prompt (§3/§8 memory USED).
+                scored = await selection.score_tools(conn, slug)
+                if scored:
                     facts.append(ToolFact(capability=slug, description=CAPABILITY_VOCAB.get(slug, ""),
-                                          tools=names[:12]))
+                                          tools=[s.name for s in scored[:12]]))
             if not facts:  # a general "what tools do I have?" — summarize the inventory honestly
                 total = await conn.fetchval("SELECT count(*) FROM discovered_tool WHERE available")
                 if total:
