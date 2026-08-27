@@ -68,3 +68,24 @@ async def test_two_hop_from_agent_reaches_the_environment(db_conn: Any) -> None:
     neighbors = {h["node"].canonical_key for h in await traverse.neighbors(db_conn, sali_id)}
     # from the agent, one hop now reaches the whole self+environment picture (was: nothing)
     assert {"machine:kali", "model:sali:latest", "person:almir", f"path:{_WS}", f"path:{_SRC}"} <= neighbors
+
+
+async def test_self_model_is_grounded_in_graph_facts_no_drift(live_pool: Any) -> None:
+    # The self-model reads the machine/model from the graph, so swapping the model updates it with NO
+    # code change — killing the "Qwen vs model:sali:latest" drift the review found.
+    from sali.runtime.self_state import SelfStateStore
+
+    async with live_pool.acquire() as conn:
+        m = await ensure_node(conn, node_type="machine", name="Kali Rolling",
+                              canonical_key="machine:kali", source=MemorySource.SYSTEM_OBSERVATION,
+                              props={"os": "Kali GNU/Linux", "arch": "x86_64"})
+        await ensure_node(conn, node_type="person", name="Almir", canonical_key="person:almir",
+                          source=MemorySource.USER_EXPLICIT)
+        await link_self(conn, machine_id=m.id, model_name="qwen3:35b", workspace=_WS, source_dir=_SRC)
+
+    view = await SelfStateStore(live_pool).assemble()
+    assert view["environment"]["model"] == "qwen3:35b"          # the ACTUAL model, from the graph
+    assert view["environment"]["machine"] == "Kali Rolling"
+    assert view["environment"]["workspace"] == _WS and view["environment"]["source"] == _SRC
+    assert "qwen3:35b" in view["self_knowledge"]                # composed, not hardcoded
+    assert "Qwen model" not in view["self_knowledge"]           # the old drift string is gone

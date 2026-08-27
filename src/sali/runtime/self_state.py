@@ -12,19 +12,35 @@ from __future__ import annotations
 
 from typing import Any
 
-# A truthful account of Sali's architecture — kept in lockstep with the real system, so self-knowledge
-# is grounded fact, not model invention (§71).
-SELF_KNOWLEDGE = (
-    "I'm Sali, a local-first intelligence that lives on Almir's Kali Linux machine — it's my home, not "
-    "a job. My reasoning brain is the Qwen model served locally through Ollama and kept warm; it's only "
-    "the part of me that thinks. The rest of me is a deterministic system I run continuously as a "
-    "systemd service: a PostgreSQL datastore holds my memory — a temporal knowledge graph of my world "
-    "plus semantic, episodic, procedural and environment memories, each with provenance, confidence and "
-    "freshness. A desktop twin models this machine; a perception engine watches the filesystem and "
-    "windows; a tool-intelligence layer knows the tools installed here and how safe each is to run. An "
-    "execution broker runs tools under a policy gate I cannot override, and my secrets live in an "
-    "encrypted vault, never in my reasoning. My memory and private data stay local."
+# The INVARIANT part of Sali's architecture (no machine/model mention — those are read from the graph
+# so a hardware/model swap updates the self-model automatically, no drift — §71/§10).
+_REST_NARRATIVE = (
+    " The rest of me is a deterministic system I run continuously as a systemd service: a PostgreSQL "
+    "datastore holds my memory — a temporal knowledge graph of my world plus semantic, episodic, "
+    "procedural and environment memories, each with provenance, confidence and freshness. A desktop twin "
+    "models this machine; a perception engine watches the filesystem and windows; a tool-intelligence "
+    "layer knows the tools installed here and how safe each is to run. An execution broker runs tools "
+    "under a policy gate I cannot override, and my secrets live in an encrypted vault, never in my "
+    "reasoning. My memory and private data stay local."
 )
+_GENERIC_BRAIN = (" My reasoning brain is a local model served through Ollama and kept warm; it's only "
+                  "the part of me that thinks.")
+# Stock description (fallback when the graph has no agent facts yet); assemble() prefers the grounded one.
+SELF_KNOWLEDGE = ("I'm Sali, a local-first intelligence living on Almir's machine — it's my home, not a "
+                  "job." + _GENERIC_BRAIN + _REST_NARRATIVE)
+
+
+def _compose_self_knowledge(env: dict[str, Any]) -> str:
+    """Build the self-description from live graph facts (machine + model) + the invariant narrative, so
+    it never disagrees with reality the way a hardcoded string would."""
+    machine = env.get("machine") or "Almir's machine"
+    os_name = env.get("os")
+    model = env.get("model")
+    # Only add the OS in parens when it says something the machine name doesn't already.
+    where = f"living on {machine}" + (f" ({os_name})" if os_name and os_name != machine else "")
+    brain = (f" My reasoning brain is {model}, served locally through Ollama and kept warm; it's only "
+             "the part of me that thinks." if model else _GENERIC_BRAIN)
+    return f"I'm Sali, a local-first intelligence {where} — it's my home, not a job.{brain}{_REST_NARRATIVE}"
 
 
 class SelfStateStore:
@@ -77,10 +93,12 @@ class SelfStateStore:
             learning_queue = [f"{r['kind']}: {r['subject']}" for r in await conn.fetch(
                 "SELECT kind, subject FROM learning_queue WHERE status='pending' "
                 "ORDER BY priority, created_at LIMIT 5")]
+            env = await self._environment(conn)  # machine/model/workspace/source from the graph (§1/§10)
         s = dict(state) if state else {}
         return {
             "identity": "Sali",
-            "self_knowledge": SELF_KNOWLEDGE,
+            "self_knowledge": _compose_self_knowledge(env),  # grounded in graph facts, no drift
+            "environment": env,
             "mode": s.get("mode", "idle"),
             "current_focus": s.get("current_focus"),
             "active_operation": s.get("active_operation"),
@@ -92,3 +110,25 @@ class SelfStateStore:
             "uncertainties": uncertainties,
             "learning_queue": learning_queue,
         }
+
+    async def _environment(self, conn: Any) -> dict[str, Any]:
+        """Sali's own environment, read from the agent subgraph the linker built (§1): the machine it
+        runs on (+ os/kernel/arch), the model it thinks with, and its workspace + source locations."""
+        rows = await conn.fetch(
+            "SELECT e.rel_type, n.name, n.props FROM graph_edge e "
+            "  JOIN graph_node a ON a.id=e.src_id JOIN graph_node n ON n.id=e.dst_id "
+            "WHERE a.canonical_key='agent:sali' AND a.valid_until IS NULL "
+            "  AND e.valid_until IS NULL AND n.valid_until IS NULL")
+        env: dict[str, Any] = {}
+        for r in rows:
+            props = r["props"] or {}
+            if r["rel_type"] == "runs_on":
+                env.update(machine=r["name"], os=props.get("os"), kernel=props.get("kernel"),
+                           arch=props.get("arch"))
+            elif r["rel_type"] == "thinks_with":
+                env["model"] = r["name"]
+            elif r["rel_type"] == "works_in":
+                env["workspace"] = props.get("path")
+            elif r["rel_type"] == "source_at":
+                env["source"] = props.get("path")
+        return env
