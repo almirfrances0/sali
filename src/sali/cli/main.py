@@ -329,6 +329,36 @@ def secrets_rm(ref: str) -> None:
     console.print(f"[green]removed[/] {ref}" if removed else f"[yellow]not in the vault:[/] {ref}")
 
 
+@app.command("sudo-pass")
+def sudo_pass() -> None:
+    """Store your sudo password (encrypted in the vault) so Sali can run privileged commands. The
+    password never enters Sali's reasoning, prompts, or logs — sudo pulls it via SUDO_ASKPASS (§28)."""
+    from sali.config.secrets import SecretStore
+    from sali.config.vault import VaultError
+    from sali.tools.privilege import SUDO_REF
+
+    value = typer.prompt("your sudo password", hide_input=True)
+    try:
+        SecretStore().set(SUDO_REF, value)
+    except VaultError as exc:
+        raise typer.BadParameter(f"vault refused the write (no secret was lost): {exc}") from exc
+    console.print("[green]stored[/] sudo.password "
+                  "[dim](encrypted; used only via SUDO_ASKPASS, never shown or logged)[/]")
+
+
+@app.command("sudo-askpass", hidden=True)
+def sudo_askpass() -> None:
+    """Internal SUDO_ASKPASS helper — prints the stored sudo password to stdout for sudo. Not for
+    interactive use; it only exposes what the same user could already read from the vault."""
+    import sys
+
+    from sali.tools.privilege import read_sudo_password
+
+    password = read_sudo_password()
+    if password:
+        sys.stdout.write(password)
+
+
 @app.command("ssh-pass")
 def ssh_pass(host: str) -> None:
     """Store a password for a VPS/host (user@host or a ~/.ssh alias) in the encrypted vault, so Sali

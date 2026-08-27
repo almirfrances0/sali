@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from sali.core.enums import Capability, RiskLevel
-from sali.tools import jail
+from sali.tools import jail, privilege
 from sali.tools.base import Tool, ToolResult
 from sali.tools.context import ToolContext
 from sali.tools.exec import CommandTimeout, run_argv
@@ -101,7 +101,9 @@ class ExecuteCommand(Tool):
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         command = args.get("command")
         if isinstance(command, str):
-            argv = ["bash", "-c", command]
+            # §28: if the command uses sudo, route it through the askpass broker so the password comes
+            # from the vault, never the model. No-op when there's no sudo / no password configured.
+            argv = ["bash", "-c", privilege.wrap_sudo(command)]
         elif isinstance(command, list) and command and all(isinstance(c, str) for c in command):
             argv = command
         else:
@@ -127,7 +129,8 @@ class ExecuteCommand(Tool):
             # 1 MiB before the flood-kill (was 256 KiB) — a real log/build/journalctl dump shouldn't
             # be SIGKILLed mid-run; the loop still truncates what the model sees to _TOOL_OUTPUT_CAP.
             rc, out, err = await run_argv(
-                argv, timeout=self.timeout_s, env=_safe_env(), max_output=1024 * 1024
+                argv, timeout=self.timeout_s, env=privilege.sudo_env(_safe_env()),
+                max_output=1024 * 1024,
             )
         except CommandTimeout as exc:
             return ToolResult(ok=False, display="timeout", error=str(exc))
@@ -153,7 +156,7 @@ async def _run_background(argv: list[str], *, cwd: str) -> ToolResult:
         with os.fdopen(fd, "wb") as log:
             proc = subprocess.Popen(  # noqa: S603 - Sali runs freely on its own machine
                 argv, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                start_new_session=True, env=_safe_env(), cwd=cwd,
+                start_new_session=True, env=privilege.sudo_env(_safe_env()), cwd=cwd,
             )
     except (OSError, ValueError) as exc:
         return ToolResult(ok=False, display="couldn't start", error=str(exc)[:200])
