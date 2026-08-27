@@ -224,6 +224,29 @@ class _MemorySink:
         return result
 
 
+class _ToolCatalogSink:
+    """Lets Sali query its OWN toolset (§53/§21): which installed tools serve a task (ranked by learned
+    reliability + safety) and a tool's alternatives — over the inventory + capability graph. Read-only."""
+
+    def __init__(self, pool: Any) -> None:
+        self._pool = pool
+
+    async def suggest(self, task: str) -> list[dict[str, Any]]:
+        from sali.twin import selection
+
+        async with self._pool.acquire() as conn:
+            ranked = await selection.suggest(conn, task)
+        return [{"tool": s.name, "capability": s.capability, "score": s.score,
+                 "reliability": s.reliability, "used": s.used, "authority": s.authority}
+                for s in ranked]
+
+    async def alternatives(self, tool: str) -> list[str]:
+        from sali.twin import selection
+
+        async with self._pool.acquire() as conn:
+            return await selection.alternatives(conn, tool)
+
+
 class _RecallSink:
     """Active memory recall for Sali's memory tools (§34,§55,§56): hybrid search, graph traversal, and
     history — every result carries provenance + confidence + a staleness flag so the model reasons
@@ -360,6 +383,7 @@ class AgentLoop:
         self._browser = build_browser(settings.browser)  # Sali's own Firefox (§44); launched lazily
         self._vision = _VisionSink(provider)  # look at the screen locally (sali3 §33-35)
         self._perception = build_perception(settings)  # focused app/window + a11y tree (sali3 §2,8,9)
+        self._catalog = _ToolCatalogSink(pool)  # lets Sali query its own toolset (§53/§21)
         self._consolidating: asyncio.Task[Any] | None = None
         self._last_consolidate: Any = None
 
@@ -805,7 +829,7 @@ class AgentLoop:
                           tasks=self._tasks,
                           schedules=self._schedules, documents=self._documents, remote=self._remote,
                           comms=self._comms, browser=self._browser, vision=self._vision,
-                          perception=self._perception)
+                          perception=self._perception, catalog=self._catalog)
         result = await dispatch.run_tool(tool, call.arguments, ctx)
 
         await journal.set_state(RunState.OBSERVE)

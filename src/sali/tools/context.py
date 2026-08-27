@@ -120,6 +120,16 @@ class PerceptionSink(Protocol):
     async def snapshot(self, *, ui: bool = False) -> dict[str, Any]: ...
 
 
+class ToolCatalogSink(Protocol):
+    """How a tool queries Sali's knowledge of its OWN tools (spec §53/§21): which installed tools can
+    do a task (ranked by learned reliability + safety), and a tool's alternatives. Concrete impl is
+    injected by the runtime over the tool inventory + capability graph; returns JSON-ready dicts so
+    the tools layer stays free of twin/graph types."""
+
+    async def suggest(self, task: str) -> list[dict[str, Any]]: ...
+    async def alternatives(self, tool: str) -> list[str]: ...
+
+
 @dataclass(slots=True)
 class ToolContext:
     settings: Settings
@@ -137,6 +147,7 @@ class ToolContext:
     browser: BrowserSink | None = None  # injected by the loop; lets a tool drive Sali's browser
     vision: VisionSink | None = None  # injected by the loop; lets a tool look at the screen locally
     perception: PerceptionSink | None = None  # injected by the loop; the focused app/window + UI tree
+    catalog: ToolCatalogSink | None = None  # injected by the loop; lets a tool query its own toolset
 
     @property
     def paths(self) -> PathGuard:
