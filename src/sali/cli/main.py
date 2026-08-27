@@ -55,7 +55,8 @@ async def _memory_status(settings: Settings) -> None:
     for layer, n in m["by_layer"].items():
         console.print(f"  {layer:12s} {n}")
     console.print(f"[bold]Graph[/] — {g['nodes']} nodes, {g['edges']} edges "
-                  f"({g['historical_edges']} historical), {g['orphan_nodes']} orphans")
+                  f"({g['historical_edges']} historical), {g['orphan_nodes']} orphans, "
+                  f"{g.get('corroborated_facts', 0)} multi-source")
     console.print(f"[bold]Contradictions[/] — {c['total']} total, {c['open']} open, "
                   f"{c.get('verified', 0)} verified, {c.get('by_priority', 0)} by-priority  "
                   f"[bold]Events[/] — {h['events']}")

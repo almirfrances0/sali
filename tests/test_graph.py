@@ -163,3 +163,35 @@ async def test_non_observable_conflict_stays_evidence_priority(db_conn: Any) -> 
         "SELECT status, resolved_by FROM contradiction WHERE subject_type='graph_edge' "
         "ORDER BY created_at DESC LIMIT 1")
     assert row["status"] == "resolved" and row["resolved_by"] == "evidence_priority"
+
+
+# ── multi-source provenance + corroboration (§6/§48) ──
+
+async def test_multi_source_corroboration_raises_confidence(db_conn: Any) -> None:
+    x = await _node(db_conn, "e:corr", "X")
+    a = await _node(db_conn, "e:corra", "A")
+    # a weak claim from one source
+    e1 = await writer.relate(db_conn, src_id=x.id, dst_id=a.id, rel_type="uses",
+                             source=MemorySource.INFERENCE, confidence=0.4)
+    base = e1.confidence
+    # the SAME source repeating adds no confidence (mere repetition) and no duplicate evidence row
+    e2 = await writer.relate(db_conn, src_id=x.id, dst_id=a.id, rel_type="uses",
+                             source=MemorySource.INFERENCE, confidence=0.4)
+    assert e2.confidence == base
+    # an INDEPENDENT source corroborating RAISES confidence (§6/§48)
+    e3 = await writer.relate(db_conn, src_id=x.id, dst_id=a.id, rel_type="uses",
+                             source=MemorySource.SYSTEM_OBSERVATION, confidence=0.9)
+    assert e3.confidence > base and e3.confidence < 1.0  # strengthened, never proven
+
+    sources = await db_conn.fetch(
+        "SELECT DISTINCT source::text AS s FROM graph_evidence WHERE edge_id=$1 ORDER BY s", e1.id)
+    assert [r["s"] for r in sources] == ["inference", "system_observation"]  # both attest, once each
+
+
+async def test_new_node_and_edge_record_first_evidence(db_conn: Any) -> None:
+    x = await _node(db_conn, "e:ev", "X")
+    assert await db_conn.fetchval("SELECT count(*) FROM graph_evidence WHERE node_id=$1", x.id) == 1
+    a = await _node(db_conn, "e:eva", "A")
+    edge = await writer.relate(db_conn, src_id=x.id, dst_id=a.id, rel_type="runs",
+                               source=MemorySource.USER_EXPLICIT)
+    assert await db_conn.fetchval("SELECT count(*) FROM graph_evidence WHERE edge_id=$1", edge.id) == 1

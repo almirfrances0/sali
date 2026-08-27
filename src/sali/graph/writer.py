@@ -47,10 +47,14 @@ async def ensure_node(
         # Re-observation bumps last_seen (not last_verified, which is for explicit verify).
         # Props merge is additive — existing values win, so a weaker source can't clobber
         # an established attribute (the opposite mistake would undercut set_fact's guarantee).
+        # A NEW source attesting the node raises confidence (§6/§48); a repeat just refreshes it.
+        fresh_source = await _note_evidence(
+            conn, node_id=existing["id"], source=source, confidence=confidence, source_ref=memory_id)
+        new_conf = _corroborated(existing["confidence"], confidence) if fresh_source else existing["confidence"]
         row = await conn.fetchrow(
             "UPDATE graph_node SET last_seen=COALESCE($2::timestamptz, now()), "
-            "  confidence=greatest(confidence, $3), props = $4 || props WHERE id=$1 RETURNING *",
-            existing["id"], at, confidence, props or {},
+            "  confidence=$3, props = $4 || props WHERE id=$1 RETURNING *",
+            existing["id"], at, new_conf, props or {},
         )
         return row_to_node(row)
     row = await conn.fetchrow(
@@ -60,6 +64,7 @@ async def ensure_node(
         "  COALESCE($7::timestamptz, now()), COALESCE($7::timestamptz, now()), $8) RETURNING *",
         node_type, name, canonical_key, props or {}, source.value, confidence, at, memory_id,
     )
+    await _note_evidence(conn, node_id=row["id"], source=source, confidence=confidence, source_ref=memory_id)
     return row_to_node(row)
 
 
@@ -75,6 +80,30 @@ async def refresh_props(
         "last_seen = now() WHERE id=$1",
         node_id, props, name,
     )
+
+
+async def _note_evidence(
+    conn: Any, *, source: MemorySource, confidence: float, source_ref: UUID | None,
+    edge_id: UUID | None = None, node_id: UUID | None = None,
+) -> bool:
+    """Record that `source` attests this fact — once per (fact, source), so re-observation by the same
+    source doesn't pile up rows. Returns True if this is a NEW source for the fact (§6/§48)."""
+    col = "edge_id" if edge_id is not None else "node_id"
+    ref = edge_id if edge_id is not None else node_id
+    if await conn.fetchval(
+        f"SELECT 1 FROM graph_evidence WHERE {col}=$1 AND source=$2::memory_source", ref, source.value):
+        return False
+    await conn.execute(
+        f"INSERT INTO graph_evidence ({col}, source, source_ref, confidence) "
+        "VALUES ($1,$2::memory_source,$3,$4)",
+        ref, source.value, source_ref, confidence)
+    return True
+
+
+def _corroborated(current: float, incoming: float) -> float:
+    """Noisy-OR corroboration (§48): an INDEPENDENT source agreeing closes part of the gap to certainty,
+    weighted by that source's confidence. Bounded below 1 — corroboration strengthens, never proves."""
+    return min(0.99, current + (1.0 - current) * incoming * 0.5)
 
 
 async def relate(
@@ -96,10 +125,14 @@ async def relate(
         src_id, dst_id, rel_type,
     )
     if existing is not None:
+        # A new independent source corroborating raises confidence (§6/§48); a repeat just refreshes.
+        fresh_source = await _note_evidence(
+            conn, edge_id=existing["id"], source=source, confidence=confidence, source_ref=memory_id)
+        new_conf = _corroborated(existing["confidence"], confidence) if fresh_source else existing["confidence"]
         row = await conn.fetchrow(
             "UPDATE graph_edge SET last_verified=COALESCE($2::timestamptz, now()), "
-            "  confidence=greatest(confidence, $3) WHERE id=$1 RETURNING *",
-            existing["id"], at, confidence,
+            "  confidence=$3 WHERE id=$1 RETURNING *",
+            existing["id"], at, new_conf,
         )
         return row_to_edge(row)
     row = await _insert_edge(conn, src_id, dst_id, rel_type, props, source, confidence, memory_id, at)
@@ -139,10 +172,12 @@ async def set_fact(
         )
         same = next((e for e in current if e["dst_id"] == dst_id), None)
         if same is not None:
+            fresh_source = await _note_evidence(
+                conn, edge_id=same["id"], source=source, confidence=confidence, source_ref=memory_id)
+            new_conf = _corroborated(same["confidence"], confidence) if fresh_source else same["confidence"]
             row = await conn.fetchrow(
-                "UPDATE graph_edge SET last_verified=$2, confidence=greatest(confidence,$3) "
-                "WHERE id=$1 RETURNING *",
-                same["id"], effective_at, confidence,
+                "UPDATE graph_edge SET last_verified=$2, confidence=$3 WHERE id=$1 RETURNING *",
+                same["id"], effective_at, new_conf,
             )
             return row_to_edge(row), None
 
@@ -195,7 +230,7 @@ async def _insert_edge(
     valid_from: datetime | None,
     valid_until: datetime | None = None,
 ) -> Any:
-    return await conn.fetchrow(
+    row = await conn.fetchrow(
         "INSERT INTO graph_edge (src_id, dst_id, rel_type, props, source, confidence, "
         "  valid_from, valid_until, last_verified, memory_id) "
         "VALUES ($1,$2,$3,$4,$5::memory_source,$6, COALESCE($7::timestamptz, now()), $8, "
@@ -203,6 +238,8 @@ async def _insert_edge(
         src_id, dst_id, rel_type, props or {}, source.value, confidence, valid_from,
         valid_until, memory_id,
     )
+    await _note_evidence(conn, edge_id=row["id"], source=source, confidence=confidence, source_ref=memory_id)
+    return row
 
 
 async def _record_contradiction(

@@ -42,6 +42,10 @@ async def health(pool: Any) -> dict[str, Any]:
                 "SELECT count(*) FROM graph_node n WHERE n.valid_until IS NULL AND NOT EXISTS ("
                 "SELECT 1 FROM graph_edge e WHERE e.valid_until IS NULL "
                 "AND (e.src_id = n.id OR e.dst_id = n.id))"),
+            "evidence": await conn.fetchval("SELECT count(*) FROM graph_evidence"),
+            "corroborated_facts": await conn.fetchval(
+                "SELECT count(*) FROM (SELECT edge_id FROM graph_evidence WHERE edge_id IS NOT NULL "
+                "GROUP BY edge_id HAVING count(DISTINCT source) > 1) c"),
         }
         contradictions = {
             "total": await conn.fetchval("SELECT count(*) FROM contradiction"),
