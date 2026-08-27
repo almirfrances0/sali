@@ -88,8 +88,8 @@ async def _memory_status(settings: Settings) -> None:
                   f"({g['historical_edges']} historical), {g['orphan_nodes']} orphans, "
                   f"{g.get('corroborated_facts', 0)} multi-source")
     console.print(f"[bold]Contradictions[/] — {c['total']} total, {c['open']} open, "
-                  f"{c.get('verified', 0)} verified, {c.get('by_priority', 0)} by-priority  "
-                  f"[bold]Events[/] — {h['events']}")
+                  f"{c.get('verified', 0)} verified, {c.get('by_priority', 0)} by-priority, "
+                  f"{c.get('possible', 0)} possible (free-text)  [bold]Events[/] — {h['events']}")
     soft = []
     if m["unverified"]:
         soft.append(f"{m['unverified']} unverified")

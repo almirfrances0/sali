@@ -94,3 +94,50 @@ async def test_retrieval_excludes_superseded(db_conn: Any) -> None:
     await db_conn.execute("UPDATE memory SET valid_until = now() WHERE id=$1", m.id)
     rows = await retrieve_keyword(db_conn, "obsolete driver", 10)
     assert all(r["id"] != m.id for r in rows)  # only current memories are retrieved
+
+
+# ── free-text possible-conflict detection (§13/§46): surface, never auto-resolve ──
+
+async def test_near_identical_semantic_memory_is_flagged_possible_conflict(db_conn: Any) -> None:
+    from sali.memory.embed_worker import _note_possible_conflict
+    from sali.memory.retriever import vector_literal
+
+    m1 = await writer.remember(db_conn, layer=MemoryLayer.SEMANTIC,
+                               content="Project X uses PostgreSQL", source=MemorySource.USER_EXPLICIT)
+    m2 = await writer.remember(db_conn, layer=MemoryLayer.SEMANTIC,
+                               content="Project X uses MySQL", source=MemorySource.USER_EXPLICIT)
+    same = vector_literal([0.1] * 768)  # simulate two semantically-similar embeddings
+    for mid in (m1.id, m2.id):
+        await db_conn.execute(
+            "UPDATE memory SET embedding=$1::vector, embed_status='done' WHERE id=$2", same, mid)
+
+    await _note_possible_conflict(db_conn, m2.id, same)
+    flagged = await db_conn.fetchval(
+        "SELECT count(*) FROM event WHERE event_type='memory.possible_conflict' AND subject_id=$1", m2.id)
+    assert flagged == 1  # the very-similar pair is surfaced for review...
+    # ...but NEITHER memory was superseded or retired — no silent resolution (§46)
+    assert await db_conn.fetchval(
+        "SELECT count(*) FROM memory WHERE id=ANY($1) AND valid_until IS NULL", [m1.id, m2.id]) == 2
+
+
+async def test_unrelated_semantic_memory_is_not_flagged(db_conn: Any) -> None:
+    from sali.memory.embed_worker import _note_possible_conflict
+    from sali.memory.retriever import vector_literal
+
+    m1 = await writer.remember(db_conn, layer=MemoryLayer.SEMANTIC,
+                               content="the office is in Berlin", source=MemorySource.USER_EXPLICIT)
+    m2 = await writer.remember(db_conn, layer=MemoryLayer.SEMANTIC,
+                               content="lunch is at noon", source=MemorySource.USER_EXPLICIT)
+    v1 = [0.0] * 768
+    v1[0] = 1.0
+    v2 = [0.0] * 768
+    v2[400] = 1.0  # orthogonal → low similarity
+    await db_conn.execute("UPDATE memory SET embedding=$1::vector, embed_status='done' WHERE id=$2",
+                          vector_literal(v1), m1.id)
+    await db_conn.execute("UPDATE memory SET embedding=$1::vector, embed_status='done' WHERE id=$2",
+                          vector_literal(v2), m2.id)
+
+    await _note_possible_conflict(db_conn, m2.id, vector_literal(v2))
+    assert await db_conn.fetchval(
+        "SELECT count(*) FROM event WHERE event_type='memory.possible_conflict' AND subject_id=$1",
+        m2.id) == 0  # unrelated facts are never flagged
