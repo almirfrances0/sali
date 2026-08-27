@@ -39,3 +39,5 @@ class RetrievalBundle:
     graph_facts: list[GraphFact] = field(default_factory=list)
     recent: list[RecentItem] = field(default_factory=list)
     tool_facts: list[ToolFact] = field(default_factory=list)
+    procedures: list[MemoryHit] = field(default_factory=list)   # how Sali handled this before (§4)
+    experiences: list[MemoryHit] = field(default_factory=list)  # past incidents/episodes (§6)

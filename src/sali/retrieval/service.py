@@ -51,8 +51,24 @@ class RetrievalService:
         graph_facts = await self._graph_facts(query, k)
         recent = await self._recent(k) if plan.use_recent else []
         tool_facts = await self._tool_facts(query, k) if plan.use_tools else []
+        procedures, experiences = await self._experience(query, plan, scope=scope)
+        # Don't double-surface: a procedure/incident that also matched the generic pool shows ONLY in
+        # its dedicated section (avoids the prompt-bloat the review flagged).
+        surfaced = {h.memory.id for h in procedures + experiences}
+        memories = [h for h in memories if h.memory.id not in surfaced]
         return RetrievalBundle(memories=memories, graph_facts=graph_facts, recent=recent,
-                               tool_facts=tool_facts)
+                               tool_facts=tool_facts, procedures=procedures, experiences=experiences)
+
+    async def _experience(
+        self, query: str, plan: RetrievalPlan, *, scope: str | None
+    ) -> tuple[list[Any], list[Any]]:
+        """On a doing/fixing turn, pull how Sali handled this before (procedural) and what happened
+        last time (episodic incidents/episodes) — layer-scoped so they're guaranteed to surface (§4/§6)."""
+        if not plan.use_experience:
+            return [], []
+        procedures = await self.memory.retrieve(query, k=3, scope=scope, layer="procedural")
+        experiences = await self.memory.retrieve(query, k=3, scope=scope, layer="episodic")
+        return procedures, experiences
 
     async def _tool_facts(self, query: str, k: int) -> list[ToolFact]:
         """Answer a tool question from the inventory + capability graph: the tools that provide each

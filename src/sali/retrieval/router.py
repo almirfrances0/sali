@@ -46,6 +46,15 @@ _TOOL = (
     "installed", "what's installed", "whats installed", "list tools", "what can i use",
     "tools can i", "tool to ", "tools to ", "tools i have", "tools available",
 )
+# A doing/fixing request — pull how Sali handled this BEFORE (procedures) and what went wrong last
+# time (past incidents), so it never starts from zero (§4/§6).
+_TASK = (
+    "how do i", "how do you", "how to", "how can i", "how should i", "how would you",
+    "deploy", "set up", "set-up", "setup", "configure", "fix", "debug", "troubleshoot",
+    "broken", "not working", "doesn't work", "does not work", "won't", "wont ", "isn't working",
+    "failing", "keeps failing", "getting an error", "throwing", "get it working", "make it work",
+    "again",  # "docker is broken again" — a recurrence is exactly when past experience matters
+)
 
 
 @dataclass(slots=True)
@@ -57,6 +66,7 @@ class RetrievalPlan:
     use_recent: bool = False
     needs_live: bool = False
     use_tools: bool = False
+    use_experience: bool = False  # a doing/fixing turn — pull past procedures + incidents
 
 
 def _has(query: str, phrases: tuple[str, ...]) -> bool:
@@ -82,8 +92,10 @@ def classify(query: str) -> RetrievalPlan:
     relational = _has(q, _RELATIONAL)
     recent = _has(q, _RECENT)
     tool = _has(q, _TOOL)
+    task = _has(q, _TASK)
     intent = (
         "live" if live
+        else "task" if task
         else "tool" if tool
         else "relational" if relational
         else "temporal" if temporal
@@ -96,4 +108,5 @@ def classify(query: str) -> RetrievalPlan:
         use_recent=recent or temporal,
         needs_live=live,
         use_tools=tool,
+        use_experience=task,
     )

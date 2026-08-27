@@ -147,6 +147,19 @@ class ContextEngine:
             avg = sum(h.score for h in bundle.memories) / len(bundle.memories)
             sections.append(Section("memories", Priority.P2, text, self._count(text), score=avg))
 
+        if bundle.procedures or bundle.experiences:
+            # How Sali handled this kind of task before — surfaced BEFORE it acts so it never starts
+            # from zero (§4/§6). Ranked high within P2 so a proven procedure isn't crowded out.
+            lines = []
+            for h in bundle.procedures:
+                steps = (h.memory.structured or {}).get("steps")
+                how = " → ".join(steps) if isinstance(steps, list) and steps else h.memory.content
+                lines.append(f"- How you did this before: {how}")
+            for h in bundle.experiences:
+                lines.append(f"- Last time this came up: {h.memory.content}")
+            text = "You've handled this kind of thing before — reuse it, don't start over:\n" + "\n".join(lines)
+            sections.append(Section("experience", Priority.P2, text, self._count(text), score=0.75))
+
         if bundle.graph_facts:
             lines = [f"- {f.src} --{f.rel}--> {f.dst}" for f in bundle.graph_facts]
             text = "Known relationships:\n" + "\n".join(lines)

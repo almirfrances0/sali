@@ -591,7 +591,9 @@ class AgentLoop:
                     "retrieve",
                     {"intent": plan.intent, "memories": len(bundle.memories),
                      "graph": len(bundle.graph_facts), "recent": len(bundle.recent),
-                     "tools": len(bundle.tool_facts), "needs_live": plan.needs_live},
+                     "tools": len(bundle.tool_facts),
+                     "experience": len(bundle.procedures) + len(bundle.experiences),
+                     "needs_live": plan.needs_live},
                 )
 
                 await journal.set_state(RunState.BUILD_CONTEXT)
