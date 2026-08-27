@@ -97,6 +97,7 @@ class ContextEngine:
         history: list[tuple[str, str]] | None = None,
         machine_changes: str | None = None,
         tasks_note: str | None = None,
+        world_note: str | None = None,
     ) -> AssembledContext:
         conflicts: list[str] = []
         sections: list[Section] = [
@@ -119,6 +120,10 @@ class ContextEngine:
             sections.append(
                 Section("machine_changes", Priority.P1, machine_changes, self._count(machine_changes))
             )
+        if world_note:
+            # What's happening on the machine right now (§73): focused app, recent files/commands/errors
+            # — so Sali already has the environment before answering "why isn't this working?".
+            sections.append(Section("world", Priority.P1, world_note, self._count(world_note)))
         if tool_specs:
             tools_text = "Tools you can call: " + "; ".join(
                 f"{s.name} — {s.description}" for s in tool_specs

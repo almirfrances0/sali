@@ -42,6 +42,7 @@ from sali.retrieval.service import RetrievalService
 from sali.runtime.journal import RunJournal
 from sali.runtime.self_state import SelfStateStore
 from sali.runtime.state import RunState, resume_action
+from sali.runtime.world_state import WorldStateBuilder
 from sali.scheduler.store import ScheduleStore
 from sali.security.confirm import Confirmer
 from sali.security.policy import Action, PolicyDecision, PolicyEngine, SessionGrants
@@ -410,6 +411,7 @@ class AgentLoop:
         self._catalog = _ToolCatalogSink(pool)  # lets Sali query its own toolset (§53/§21)
         self._self_state = SelfStateStore(pool)  # persistent runtime self-model (§6/§7/§41)
         self._self_sink = _SelfSink(self._self_state)
+        self._world = WorldStateBuilder(pool, self._perception)  # live "what's happening now" (§73)
         self._syscrit: tuple[frozenset[str], float] | None = None  # (system-critical binaries, loaded_at)
         self._consolidating: asyncio.Task[Any] | None = None
         self._last_consolidate: Any = None
@@ -586,10 +588,14 @@ class AgentLoop:
                 machine_changes, ack_changes_through, ack_obs_through = await self._machine_changes(
                     conn, journal)
                 tasks_note = await self._open_tasks_note()  # §24: resume any task in progress
+                world_note = ""
+                with contextlib.suppress(Exception):  # world-state is best-effort, never breaks a turn
+                    world_note = (await self._world.snapshot()).render()
                 assembled = self.context.assemble(
                     user_input, bundle, specs,
                     live_note=LIVE_NOTE if plan.needs_live else None, history=history,
                     machine_changes=machine_changes, tasks_note=tasks_note,
+                    world_note=world_note or None,
                 )
                 messages = list(assembled.messages)
                 await journal.event(
