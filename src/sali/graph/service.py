@@ -150,20 +150,40 @@ class GraphService:
                 "SELECT * FROM graph_node WHERE id=$1 AND valid_until IS NULL", node_id)
         return row_to_node(row) if row is not None else None
 
-    async def snapshot(self, *, limit: int = 250) -> dict[str, list[Any]]:
-        """A bounded, importance-ranked slice of the CURRENT graph (nodes + the edges among them) for
-        the brain's initial load — never the whole hairball. Strongest/most-recently-seen nodes first."""
+    async def snapshot(
+        self, *, limit: int = 250, exclude_types: Sequence[str] = ("ext_tool",)
+    ) -> dict[str, Any]:
+        """The brain's initial load: the meaningful, CONNECTED entity core — never the whole hairball.
+
+        Ranked by DEGREE first (hubs — the agent, machine, models, projects — come first, so the returned
+        edges actually connect), then confidence/recency. Leaf-explosion types (the ~2400 ext_tool nodes
+        hanging off one 'has_tool' hub) are excluded by default and reported in ``collapsed`` so the UI can
+        draw them as a single cluster the user expands on demand (LOD, §10)."""
         limit = max(1, min(limit, 2000))
+        exclude = list(exclude_types)
         async with self.pool.acquire() as conn:
             nodes = await conn.fetch(
-                "SELECT * FROM graph_node WHERE valid_until IS NULL "
-                "ORDER BY confidence DESC, last_seen DESC, id LIMIT $1", limit)
+                "WITH deg AS ("
+                "  SELECT id, count(*) AS d FROM ("
+                "    SELECT src_id AS id FROM graph_edge WHERE valid_until IS NULL AND superseded_by IS NULL"
+                "    UNION ALL "
+                "    SELECT dst_id FROM graph_edge WHERE valid_until IS NULL AND superseded_by IS NULL"
+                "  ) t GROUP BY id) "
+                "SELECT n.*, COALESCE(deg.d, 0) AS degree FROM graph_node n "
+                "  LEFT JOIN deg ON deg.id = n.id "
+                "WHERE n.valid_until IS NULL AND n.node_type <> ALL($2::text[]) "
+                "ORDER BY degree DESC, n.confidence DESC, n.last_seen DESC, n.id LIMIT $1",
+                limit, exclude)
             ids = [n["id"] for n in nodes]
             edges = await conn.fetch(
                 "SELECT * FROM graph_edge WHERE valid_until IS NULL AND superseded_by IS NULL "
                 "AND src_id = ANY($1) AND dst_id = ANY($1)", ids)
+            collapsed = await conn.fetch(
+                "SELECT node_type, count(*) AS n FROM graph_node "
+                "WHERE valid_until IS NULL AND node_type = ANY($1::text[]) GROUP BY node_type", exclude)
         return {"nodes": [row_to_node(n) for n in nodes],
-                "edges": [row_to_edge(e) for e in edges]}
+                "edges": [row_to_edge(e) for e in edges],
+                "collapsed": {r["node_type"]: int(r["n"]) for r in collapsed}}
 
     async def subgraph(self, node_id: UUID, *, depth: int = 1, limit: int = 80) -> dict[str, list[Any]]:
         """The BIDIRECTIONAL neighborhood around a node (full nodes AND edges, both directions) out to

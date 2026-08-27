@@ -57,4 +57,14 @@ tests + mypy --strict + import-linter green · reconnection · **no fake product
 load · quiet-when-idle · terminal/web parity.
 
 ## Verification log
-_(appended as increments land)_
+- **Phase A DONE (backend web layer)** — A1 deltas + A2 serializer + A3 REST + A4 fan-out + A5 serving.
+  `make ci` green (515 passed, 87.37% cov, mypy --strict + import-linter kept). Live-verified against the
+  REAL `sali` DB via `sali serve --host 127.0.0.1 --port 8790`:
+  - `/api/self` → real identity + env (machine Kali, model sali:latest, workspace/source from graph).
+  - `/api/presence` → derived live state (caught a daemon run mid-turn: `reason_plan` → "thinking").
+  - `/api/graph/snapshot` → connected core: 67 nodes / 33 edges, Sali+Kali hubs, 2477 ext_tool leaves
+    collapsed into a cluster (LOD) — a real brain, not a hairball.
+  - `/api/attention/counts` → real tiers (critical 1, important 270, interesting 100, routine null).
+  - `/stream` (live WS) → smoke event arrived with `api_key` **redacted**, plus a real daemon `tool.failed`
+    — the genuine firehose, redacted at the boundary (§34).
+  - TODO (Phase D): a systemd unit for `sali serve` (prod runs the daemon, not the API yet).
