@@ -13,7 +13,7 @@ from typing import Any
 from sali.learning.episodes import consolidate_stm, prune_stm
 from sali.learning.failures import record_failures
 from sali.learning.model import ConsolidationResult
-from sali.learning.procedures import learn_procedures
+from sali.learning.procedures import learn_procedures, record_procedure_outcomes
 from sali.memory import embed_worker
 from sali.obs.log import get_logger
 from sali.provider.base import ModelProvider
@@ -39,6 +39,7 @@ class LearningService:
             if not await conn.fetchval("SELECT pg_try_advisory_xact_lock($1)", _CONSOLIDATE_LOCK):
                 return ConsolidationResult()  # another pass holds the lock — skip cleanly
             procedures = await learn_procedures(conn, self.provider, threshold=threshold)
+            outcomes = await record_procedure_outcomes(conn)  # §43: reinforce/penalize by how they ran
             failures = await record_failures(conn)
             episodes = await consolidate_stm(conn, self.provider)
             pruned = await prune_stm(conn)
@@ -49,8 +50,10 @@ class LearningService:
                 await _emit(conn, "learning.failure", {"count": failures})
             if episodes:
                 await _emit(conn, "learning.episode", {"count": episodes})
+            if outcomes:
+                await _emit(conn, "learning.procedure_outcome", {"count": outcomes})
         await embed_worker.embed_pending(self.pool, self.provider)  # make the new memories usable
-        log.info("consolidated", procedures=len(procedures), failures=failures,
+        log.info("consolidated", procedures=len(procedures), outcomes=outcomes, failures=failures,
                  episodes=episodes, pruned=pruned)
         return ConsolidationResult(procedures=procedures, failures_recorded=failures,
                                    episodes_created=episodes, stm_pruned=pruned)

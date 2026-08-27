@@ -113,6 +113,40 @@ async def test_records_only_fixed_failures_and_does_not_duplicate(db_conn: Any) 
     assert await record_failures(db_conn) == 0  # idempotent — the same lesson isn't re-recorded
 
 
+async def test_procedure_outcomes_reinforce_clean_runs_and_penalize_failed_ones(db_conn: Any) -> None:
+    from sali.learning.procedures import learn_procedures, record_procedure_outcomes
+
+    t0 = datetime.now(UTC) - timedelta(minutes=10)  # recent, inside the 7-day feedback window
+
+    async def _apply(run: Any, when: datetime, *, ok: bool) -> None:
+        await _exec(db_conn, run, "git pull", when)
+        await _exec(db_conn, run, "docker compose up -d", when + timedelta(seconds=2),
+                    success=ok, status="verified_success" if ok else "verified_failure")
+
+    # two clean runs establish the procedure
+    await _apply(uuid4(), t0, ok=True)
+    await _apply(uuid4(), t0 + timedelta(seconds=60), ok=True)
+    assert await learn_procedures(db_conn, FakeModelProvider(), threshold=2)
+    await record_procedure_outcomes(db_conn)  # score the establishing applications (baseline)
+    conf0 = await db_conn.fetchval(
+        "SELECT confidence FROM memory WHERE layer='procedural' AND valid_until IS NULL LIMIT 1")
+
+    # a fresh CLEAN application reinforces it (§43)
+    await _apply(uuid4(), t0 + timedelta(seconds=120), ok=True)
+    assert await record_procedure_outcomes(db_conn) == 1
+    conf1 = await db_conn.fetchval(
+        "SELECT confidence FROM memory WHERE layer='procedural' AND valid_until IS NULL LIMIT 1")
+    assert conf1 > conf0
+    assert await record_procedure_outcomes(db_conn) == 0  # each application scored once (deduped)
+
+    # a run that applied it but FAILED penalizes it
+    await _apply(uuid4(), t0 + timedelta(seconds=180), ok=False)
+    assert await record_procedure_outcomes(db_conn) == 1
+    conf2 = await db_conn.fetchval(
+        "SELECT confidence FROM memory WHERE layer='procedural' AND valid_until IS NULL LIMIT 1")
+    assert conf2 < conf1
+
+
 async def test_recorded_failure_carries_a_structured_incident(db_conn: Any) -> None:
     run = uuid4()
     t0 = datetime.now(UTC) - timedelta(minutes=1)

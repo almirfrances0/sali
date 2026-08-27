@@ -11,9 +11,10 @@ honestly weaker than something Sali saw first-hand, and grows as the evidence do
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 from sali.core.enums import MemoryLayer, MemorySource
-from sali.learning.mining import sequences_by_run, signature
+from sali.learning.mining import normalize_command, sequences_by_run, signature
 from sali.learning.model import LearnedProcedure
 from sali.memory import writer as memory_writer
 from sali.provider.base import ChatMessage, ModelProvider
@@ -76,3 +77,59 @@ async def learn_procedures(
         )
         learned.append(LearnedProcedure(name=name, steps=list(steps), evidence=len(runs)))
     return learned
+
+
+async def record_procedure_outcomes(conn: Any, *, days: int = 7, limit: int = 1000) -> int:
+    """Close the learning loop (§43): when a run executed a KNOWN procedure's exact sequence, reinforce
+    the procedure if the run was clean and penalize it if the run hit a failure — so a procedure that
+    keeps working grows trusted and one that keeps failing loses confidence. Each (procedure, run)
+    outcome is counted once (deduped via memory_evidence.source_ref). Returns outcomes recorded."""
+    procs = {
+        r["claim_key"]: r for r in await conn.fetch(
+            "SELECT id, claim_key, confidence FROM memory "
+            "WHERE layer='procedural'::memory_layer AND valid_until IS NULL AND claim_key LIKE 'procedure:%'")
+    }
+    if not procs:
+        return 0
+    rows = await conn.fetch(
+        "SELECT run_id, plan->'args'->>'command' AS command, success FROM tool_execution "
+        "WHERE tool_name='execute_command' AND plan->'args'->>'command' IS NOT NULL "
+        "  AND started_at > now() - make_interval(days => $1) ORDER BY run_id, started_at LIMIT $2",
+        days, limit)
+
+    per_run: dict[UUID, dict[str, Any]] = {}
+    for r in rows:
+        state = per_run.setdefault(r["run_id"], {"steps": [], "failed": False})
+        if r["success"] is False:
+            state["failed"] = True
+        norm = normalize_command(str(r["command"]))
+        if norm and (not state["steps"] or state["steps"][-1] != norm):
+            state["steps"].append(norm)
+
+    recorded = 0
+    for run_id, state in per_run.items():
+        if len(state["steps"]) < 2:
+            continue
+        proc = procs.get(f"procedure:{signature(tuple(state['steps']))}")
+        if proc is None:
+            continue  # this run's sequence isn't a known procedure
+        if await conn.fetchval(
+            "SELECT 1 FROM memory_evidence WHERE memory_id=$1 AND source_ref=$2", proc["id"], run_id):
+            continue  # this application was already scored
+        success = not state["failed"]
+        if success:
+            await conn.execute(
+                "UPDATE memory SET confidence=least(0.95, confidence + 0.03), updated_at=now() WHERE id=$1",
+                proc["id"])
+            ev_conf, note = 0.9, "procedure applied successfully"
+        else:
+            await conn.execute(
+                "UPDATE memory SET confidence=greatest(0.2, confidence - 0.1), updated_at=now() WHERE id=$1",
+                proc["id"])
+            ev_conf, note = 0.2, "procedure application hit a failure"
+        await conn.execute(
+            "INSERT INTO memory_evidence (memory_id, source, source_ref, confidence, note) "
+            "VALUES ($1,'procedure_execution'::memory_source,$2,$3,$4)",
+            proc["id"], run_id, ev_conf, note)
+        recorded += 1
+    return recorded
