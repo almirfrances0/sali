@@ -14,6 +14,7 @@ from typing import Any
 from uuid import UUID
 
 from sali.core.enums import MemoryLayer, MemorySource
+from sali.core.toolvocab import binary_of
 from sali.learning.mining import normalize_command, sequences_by_run, signature
 from sali.learning.model import LearnedProcedure
 from sali.memory import writer as memory_writer
@@ -37,6 +38,23 @@ async def _name_procedure(provider: ModelProvider, steps: list[str]) -> str:
     except Exception:  # noqa: BLE001 - naming is best-effort; fall back to the steps
         name = ""
     return name or " → ".join(steps)[:60]
+
+
+async def _failure_modes(conn: Any, tools: list[str]) -> list[str]:
+    """The common failure modes of a procedure's tools, from their learned tool:<binary> experiences —
+    so a recalled procedure knows 'what usually breaks' (§4/§6). Deduped, capped."""
+    if not tools:
+        return []
+    rows = await conn.fetch(
+        "SELECT structured->'failure_modes' AS fm FROM memory "
+        "WHERE claim_key = ANY($1) AND valid_until IS NULL",
+        [f"tool:{t}" for t in tools])
+    modes: list[str] = []
+    for r in rows:
+        for m in (r["fm"] or []):
+            if m and m not in modes:
+                modes.append(str(m))
+    return modes[:5]
 
 
 async def learn_procedures(
@@ -65,6 +83,11 @@ async def learn_procedures(
         name = (existing["structured"] or {}).get("name") if existing else None
         if not name:
             name = await _name_procedure(provider, list(steps))
+        # Enrich the shape (§36/§4) by JOINING data already on hand — no new mechanism: the tools the
+        # steps use, what usually goes wrong with them (from their learned tool experiences), and a
+        # verification hint (the last step is typically the confirming one). So a recalled procedure
+        # guides the next turn on "what breaks" and "how to confirm", not just the raw sequence.
+        tools = sorted({b for s in steps if (b := binary_of(s))})
         await memory_writer.remember(
             conn, layer=MemoryLayer.PROCEDURAL,
             content=f"{name} — Almir's usual steps: " + " → ".join(steps),
@@ -73,7 +96,10 @@ async def learn_procedures(
             # certainty hierarchy (§23): a mined-and-repeated sequence is 'learned' (past 'observed');
             # 'preferred' is reserved for one Almir has explicitly confirmed.
             structured={"steps": list(steps), "evidence": len(runs), "name": name,
-                        "certainty": "learned"},
+                        "certainty": "learned", "tools": tools,
+                        "requires_tools": tools,  # a precondition: these must be installed
+                        "known_failure_modes": await _failure_modes(conn, tools),
+                        "verification": steps[-1] if steps else None},
         )
         learned.append(LearnedProcedure(name=name, steps=list(steps), evidence=len(runs)))
     return learned
