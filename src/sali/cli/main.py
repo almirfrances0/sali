@@ -1374,6 +1374,12 @@ async def _daemon(settings: Settings) -> None:
     # Proactive loop (§16): surface the attention-flagged notify/investigate observations to Almir.
     proactive = ProactiveLoop(pool)
     faculties.append(("proactive", lambda: proactive.run(stop)))
+    # Attention → wake (§12/§17): an 'investigate' verdict drives one autonomous investigate-and-inform
+    # turn through the SAME agent loop (unattended AutoDeny confirmer denies anything destructive).
+    from sali.events.investigate import InvestigateLoop
+
+    investigate = InvestigateLoop(pool, _LoopRunner())
+    faculties.append(("investigate", lambda: investigate.run(stop)))
 
     console.print("[dim]Sali is up — observing, learning, perceiving, and watching its schedules.[/]")
     try:
