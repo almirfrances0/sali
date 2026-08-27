@@ -39,6 +39,7 @@ interface StoreState {
   selection: Selection | null
   focus: string | null // which region is dominant (null = balanced cockpit)
   toolsOpen: boolean // the tool-catalog overlay (Sali's hands — §20/§21)
+  collapsed: Record<string, boolean> // per-widget collapse state (movable/collapsible cockpit)
 
   // firehose actions
   ingestEvents: (evs: SaliEvent[]) => void
@@ -53,6 +54,7 @@ interface StoreState {
   select: (s: Selection | null) => void
   setFocus: (f: string | null) => void
   setToolsOpen: (b: boolean) => void
+  toggleCollapse: (id: string) => void
 }
 
 function newId(): string {
@@ -72,6 +74,7 @@ export const useStore = create<StoreState>((set) => ({
   selection: null,
   focus: null,
   toolsOpen: false,
+  collapsed: {},
 
   ingestEvents: (evs) =>
     set((st) => {
@@ -176,6 +179,7 @@ export const useStore = create<StoreState>((set) => ({
   select: (s) => set({ selection: s }),
   setFocus: (f) => set({ focus: f }),
   setToolsOpen: (b) => set({ toolsOpen: b }),
+  toggleCollapse: (id) => set((st) => ({ collapsed: { ...st.collapsed, [id]: !st.collapsed[id] } })),
 }))
 
 export function presenceColor(p: Presence | undefined): string {

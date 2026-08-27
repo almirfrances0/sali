@@ -46,7 +46,7 @@ export function TopBar(): JSX.Element {
   const env = self?.environment
 
   return (
-    <header className="panel area-top flex items-center gap-5 px-4 py-2.5">
+    <header className="panel flex shrink-0 items-center gap-5 px-4 py-2.5">
       <div className="flex items-baseline gap-3">
         <span className="font-mono text-lg font-semibold tracking-[0.35em] text-ink">SALI</span>
         <span className="flex items-center gap-2 rounded-full border border-line px-2.5 py-1">

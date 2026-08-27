@@ -34,8 +34,8 @@ export function Attention(): JSX.Element {
   }
 
   return (
-    <Panel className="min-h-0 flex-1">
-      <PanelHeader label="Attention" right={<span className="font-mono text-2xs text-faint">24h</span>} />
+    <Panel>
+      <PanelHeader label="Attention" id="attention" right={<span className="font-mono text-2xs text-faint">24h</span>} />
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2.5">
         <div className="grid grid-cols-2 gap-2">
           {TIERS.map((t) => (

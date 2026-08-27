@@ -42,8 +42,8 @@ export function Tasks(): JSX.Element {
   const { data } = useQuery({ queryKey: ['tasks'], queryFn: api.tasks, refetchInterval: 8000 })
   const open = data?.open ?? []
   return (
-    <Panel className="min-h-0 flex-1">
-      <PanelHeader label="Tasks" right={<span className="font-mono text-2xs text-faint">{open.length} open</span>} />
+    <Panel>
+      <PanelHeader label="Tasks" id="tasks" right={<span className="font-mono text-2xs text-faint">{open.length} open</span>} />
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-2 py-2">
         {open.length === 0 ? <Empty>No active tasks.</Empty> : open.map((t) => <TaskCard key={t.id} t={t} />)}
       </div>

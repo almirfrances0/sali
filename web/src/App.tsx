@@ -1,17 +1,12 @@
 import { useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef } from 'react'
 
-import { Activity } from './components/activity/Activity'
-import { Attention } from './components/attention/Attention'
-import { Brain } from './components/brain/Brain'
-import { Chat } from './components/chat/Chat'
 import { ConfirmModal } from './components/chat/ConfirmModal'
 import { Inspector } from './components/memory/Inspector'
+import { Cockpit } from './components/system/Cockpit'
 import { Proactive } from './components/system/Proactive'
 import { TopBar } from './components/system/TopBar'
-import { Tasks } from './components/tasks/Tasks'
 import { ToolsOverlay } from './components/tools/ToolsOverlay'
-import { World } from './components/world/World'
 import { useStore } from './stores/store'
 import { useEventStream } from './websocket/useEventStream'
 import { useSaliStream } from './websocket/useSaliStream'
@@ -47,7 +42,7 @@ function useLiveInvalidation(): void {
         qc.invalidateQueries({ queryKey: ['attention'] })
       }
     }
-    if (has('twin.entity')) {
+    if (has('twin.entity') || has('memory.created')) {
       const now = Date.now()
       if (now - lastGraph.current > 20000) {
         lastGraph.current = now
@@ -63,18 +58,9 @@ export default function App(): JSX.Element {
   useLiveInvalidation()
 
   return (
-    <div className="cockpit relative">
+    <div className="relative flex h-full flex-col gap-2.5 p-2.5">
       <TopBar />
-      <div className="area-world flex min-h-0 flex-col gap-2.5">
-        <World />
-        <Attention />
-      </div>
-      <Brain />
-      <div className="area-activity flex min-h-0 flex-col gap-2.5">
-        <Activity />
-        <Tasks />
-      </div>
-      <Chat />
+      <Cockpit />
 
       <Inspector />
       <Proactive />

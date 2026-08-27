@@ -21,8 +21,8 @@ export function World(): JSX.Element {
   const env = self?.environment ?? {}
 
   return (
-    <Panel className="min-h-0 flex-[1.3]">
-      <PanelHeader label="World" right={<span className="font-mono text-2xs text-faint">this machine</span>} />
+    <Panel>
+      <PanelHeader label="World" id="world" right={<span className="font-mono text-2xs text-faint">this machine</span>} />
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-2.5">
         <div>
           <Row k="machine" v={env.machine} />

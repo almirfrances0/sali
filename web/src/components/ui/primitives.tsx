@@ -1,30 +1,48 @@
 import type { ReactNode } from 'react'
 
+import { useStore } from '../../stores/store'
+
 // Small, quiet building blocks so every panel reads as one system.
 
-export function Panel({
-  area,
-  className = '',
-  children,
-}: {
-  area?: string
-  className?: string
-  children: ReactNode
-}): JSX.Element {
-  return <section className={`panel flex min-h-0 flex-col overflow-hidden ${area ?? ''} ${className}`}>{children}</section>
+export function Panel({ className = '', children }: { className?: string; children: ReactNode }): JSX.Element {
+  return (
+    <section className={`panel flex h-full min-h-0 w-full flex-col overflow-hidden ${className}`}>{children}</section>
+  )
 }
 
+// The header doubles as the widget's drag handle (grip + label region) and collapse control. Interactive
+// controls in `right` sit OUTSIDE the handle so they stay clickable while the panel is draggable.
 export function PanelHeader({
   label,
+  id,
   right,
 }: {
   label: string
+  id?: string
   right?: ReactNode
 }): JSX.Element {
+  const collapsed = useStore((s) => (id ? !!s.collapsed[id] : false))
+  const toggle = useStore((s) => s.toggleCollapse)
   return (
     <header className="flex shrink-0 items-center justify-between border-b border-line px-3 py-2">
-      <span className="panel-label">{label}</span>
-      {right}
+      <div className="panel-drag flex cursor-move select-none items-center gap-2">
+        <span className="text-sm leading-none text-faint/50">⠿</span>
+        <span className="panel-label">{label}</span>
+      </div>
+      <div className="flex items-center gap-2">
+        {right}
+        {id && (
+          <button
+            onClick={() => toggle(id)}
+            onMouseDown={(e) => e.stopPropagation()}
+            className="px-0.5 font-mono text-2xs text-faint hover:text-ink"
+            aria-label={collapsed ? `expand ${label}` : `collapse ${label}`}
+            title={collapsed ? 'expand' : 'collapse'}
+          >
+            {collapsed ? '▸' : '▾'}
+          </button>
+        )}
+      </div>
     </header>
   )
 }

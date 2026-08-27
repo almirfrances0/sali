@@ -76,8 +76,8 @@ export function Chat(): JSX.Element {
   }
 
   return (
-    <Panel area="area-chat">
-      <PanelHeader label="Conversation" right={<span className="font-mono text-2xs text-faint">one continuous session</span>} />
+    <Panel>
+      <PanelHeader label="Conversation" id="chat" right={<span className="font-mono text-2xs text-faint">one continuous session</span>} />
       <div ref={scrollRef} className="flex-1 space-y-4 overflow-y-auto px-3 py-3">
         {chat.length === 0 ? (
           <Empty>Sali is present. Ask anything — the same session as the terminal.</Empty>
