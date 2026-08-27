@@ -14,6 +14,7 @@ class GraphFact:
     rel: str
     dst: str
     confidence: float
+    hops: int = 1  # graph distance from the query's seed entity (1 = direct, 2 = one step further)
 
 
 @dataclass(slots=True)

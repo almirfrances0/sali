@@ -38,6 +38,32 @@ async def test_relational_query_returns_graph_facts(live_pool: Any) -> None:
     assert any(f.src == "VPS-01" and f.rel == "runs" and f.dst == "Docker" for f in bundle.graph_facts)
 
 
+async def test_graph_retrieval_walks_two_hops_closest_first(live_pool: Any) -> None:
+    # Project X → runs_on → VPS-01 → runs → Docker : a 2-hop chain the 1-hop walk would miss (§16).
+    async with live_pool.acquire() as c:
+        px = await graph_writer.ensure_node(c, node_type="project", name="Project X",
+                                            canonical_key="project:x", source=MemorySource.USER_EXPLICIT)
+        vps = await graph_writer.ensure_node(c, node_type="host", name="VPS-9",
+                                             canonical_key="host:vps9", source=MemorySource.USER_EXPLICIT)
+        docker = await graph_writer.ensure_node(c, node_type="service", name="Docker-9",
+                                                canonical_key="svc:docker9", source=MemorySource.USER_EXPLICIT)
+        await graph_writer.relate(c, src_id=px.id, dst_id=vps.id, rel_type="runs_on",
+                                  source=MemorySource.USER_EXPLICIT)
+        await graph_writer.relate(c, src_id=vps.id, dst_id=docker.id, rel_type="runs",
+                                  source=MemorySource.USER_EXPLICIT)
+
+    service = RetrievalService(live_pool, FakeModelProvider())
+    plan = classify("what is Project X connected to?")
+    bundle = await service.gather("what is Project X connected to?", plan)
+
+    facts = {(f.src, f.rel, f.dst): f.hops for f in bundle.graph_facts}
+    assert facts.get(("Project X", "runs_on", "VPS-9")) == 1  # direct
+    assert facts.get(("VPS-9", "runs", "Docker-9")) == 2      # reached two hops out
+    # graph-distance ordering (§38): the 1-hop fact appears before any 2-hop fact
+    hops_in_order = [f.hops for f in bundle.graph_facts]
+    assert hops_in_order == sorted(hops_in_order)
+
+
 async def test_plain_lookup_returns_memories_only(live_pool: Any) -> None:
     async with live_pool.acquire() as c:
         await mem_writer.remember(

@@ -61,25 +61,37 @@ class RetrievalService:
             return w.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         patterns = [f"%{_esc(w)}%" for w in words[:6]]
         facts: list[GraphFact] = []
+        seen: set[tuple[str, str, str]] = set()
+
+        def _add(src: str, rel: str, dst: str, confidence: float, hops: int) -> None:
+            key = (src, rel, dst)
+            if key in seen or src == dst:
+                return
+            seen.add(key)
+            facts.append(GraphFact(src=src, rel=rel, dst=dst, confidence=confidence, hops=hops))
+
         async with self.pool.acquire() as conn:
             seeds = await conn.fetch(
                 "SELECT id, name FROM graph_node WHERE valid_until IS NULL AND name ILIKE ANY($1) "
                 "LIMIT 3",
                 patterns,
             )
+            # Walk TWO hops (§16): the direct relationships of the mentioned entity, then one step
+            # further out — so "why is Project X failing?" reaches Project X → Docker → the container,
+            # not just Project X's immediate neighbours. Frontier is bounded so it can't fan out.
+            frontier: list[tuple[Any, str]] = []
             for seed in seeds:
                 for hop in await traverse.neighbors(conn, seed["id"]):
-                    facts.append(
-                        GraphFact(
-                            src=seed["name"],
-                            rel=hop["rel_type"],
-                            dst=hop["node"].name,
-                            confidence=hop["confidence"],
-                        )
-                    )
-                    if len(facts) >= k:
-                        return facts
-        return facts
+                    _add(seed["name"], hop["rel_type"], hop["node"].name, hop["confidence"], 1)
+                    frontier.append((hop["node"].id, hop["node"].name))
+            for node_id, node_name in frontier[:8]:
+                for hop in await traverse.neighbors(conn, node_id):
+                    _add(node_name, hop["rel_type"], hop["node"].name, hop["confidence"], 2)
+
+        # Graph-distance ranking (§38): closest first, then most-confident — an important-but-far fact
+        # never crowds out a directly-relevant one.
+        facts.sort(key=lambda f: (f.hops, -f.confidence))
+        return facts[:k]
 
     async def _recent(self, k: int) -> list[RecentItem]:
         async with self.pool.acquire() as conn:
