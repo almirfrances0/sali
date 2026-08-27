@@ -74,6 +74,9 @@ class SelfStateStore:
             uncertainties = [r["content"] for r in await conn.fetch(
                 "SELECT content FROM memory WHERE needs_grounding AND valid_until IS NULL "
                 "ORDER BY updated_at DESC LIMIT 5")]
+            learning_queue = [f"{r['kind']}: {r['subject']}" for r in await conn.fetch(
+                "SELECT kind, subject FROM learning_queue WHERE status='pending' "
+                "ORDER BY priority, created_at LIMIT 5")]
         s = dict(state) if state else {}
         return {
             "identity": "Sali",
@@ -87,4 +90,5 @@ class SelfStateStore:
             "last_failure": s.get("last_failure"),
             "uncertainty_count": int(unc_count or 0),
             "uncertainties": uncertainties,
+            "learning_queue": learning_queue,
         }
