@@ -32,6 +32,36 @@ memory_cli = typer.Typer(help="Inspect Sali's memory.")
 app.add_typer(memory_cli, name="memory")
 
 
+@memory_cli.command("eval")
+def memory_eval() -> None:
+    """Benchmark the memory system (§67): seed a controlled scenario, score retrieval / resolution /
+    temporal / provenance / contradiction / scope accuracy. Runs rolled-back — never touches real data."""
+    settings = load_settings()
+    configure_logging("ERROR")
+    asyncio.run(_memory_eval(settings))
+
+
+async def _memory_eval(settings: Settings) -> None:
+    from sali.kernel import Kernel
+    from sali.provider.registry import build_provider
+    from sali.retrieval.benchmark import run_benchmark
+
+    kernel = Kernel.create(settings)
+    try:
+        card = await run_benchmark(await kernel.pool(), build_provider(settings))
+    finally:
+        await kernel.close()
+    for name, dimension, ok in card.results:
+        mark = "[green]✓[/]" if ok else "[red]✗[/]"
+        console.print(f"  {mark} [dim]{dimension:16s}[/] {name}")
+    console.print()
+    for dim, (passed, total) in sorted(card.by_dimension.items()):
+        colour = "green" if passed == total else "yellow" if passed else "red"
+        console.print(f"[bold]{dim:16s}[/] [{colour}]{passed}/{total}[/]")
+    pct = round(100 * card.passed / card.total) if card.total else 0
+    console.print(f"\n[bold]Memory score:[/] {card.passed}/{card.total} ({pct}%)")
+
+
 @memory_cli.command("status")
 def memory_status() -> None:
     """Show the health of Sali's memory — counts by layer, graph size, and soft spots (§49)."""
