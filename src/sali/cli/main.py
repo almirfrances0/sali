@@ -1371,16 +1371,22 @@ async def _daemon(settings: Settings) -> None:
 
     syswatch = SystemWatch(DbObservationSink(pool), baseline=Baseline(pool))
     faculties.append(("syswatch", lambda: syswatch.run(stop)))
-    # Proactive loop (§16): surface the attention-flagged notify/investigate observations to Almir.
-    proactive = ProactiveLoop(pool)
-    faculties.append(("proactive", lambda: proactive.run(stop)))
-    # Attention → wake (§12/§17): an 'investigate' verdict drives one autonomous investigate-and-inform
-    # turn through the SAME agent loop (unattended AutoDeny confirmer denies anything destructive).
+    # §14 push bus: consumers are woken the instant an event commits (LISTEN), keeping their interval
+    # only as a fallback heartbeat. Subscribe before start so the wakers are registered.
+    from sali.events.bus import EventBus
     from sali.events.investigate import InvestigateLoop
 
+    bus = EventBus(pool)
+    proactive = ProactiveLoop(pool)          # §16: surface notify/investigate observations to Almir
+    proactive_wake = bus.subscribe()
+    faculties.append(("proactive", lambda: proactive.run(stop, proactive_wake)))
+    # Attention → wake (§12/§17): an 'investigate' verdict drives one autonomous investigate-and-inform
+    # turn through the SAME agent loop (unattended AutoDeny confirmer denies anything destructive).
     investigate = InvestigateLoop(pool, _LoopRunner())
-    faculties.append(("investigate", lambda: investigate.run(stop)))
+    investigate_wake = bus.subscribe()
+    faculties.append(("investigate", lambda: investigate.run(stop, investigate_wake)))
 
+    await bus.start()
     console.print("[dim]Sali is up — observing, learning, perceiving, and watching its schedules.[/]")
     try:
         await asyncio.gather(*(_supervise(name, make, stop) for name, make in faculties))
@@ -1389,6 +1395,7 @@ async def _daemon(settings: Settings) -> None:
     finally:
         scheduler.stop()
         stop.set()
+        await bus.stop()
         await loop.aclose()
         await kernel.close()
 

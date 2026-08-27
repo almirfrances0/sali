@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 from typing import Any
 
+from sali.events.bus import wait_or_wake
 from sali.obs.log import get_logger
 
 log = get_logger("sali.events.investigate")
@@ -66,11 +67,10 @@ class InvestigateLoop:
             log.info("investigated", count=len(driven))
         return driven
 
-    async def run(self, stop: asyncio.Event) -> None:
+    async def run(self, stop: asyncio.Event, wake: asyncio.Event | None = None) -> None:
         while not stop.is_set():
             try:
                 await self.tick()
             except Exception as exc:  # noqa: BLE001 - never let a bad cycle kill the faculty
                 log.warning("investigate tick failed: %s", exc)
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(stop.wait(), timeout=self._interval)
+            await wait_or_wake(stop, wake, self._interval)  # push when subscribed, else heartbeat
