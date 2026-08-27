@@ -247,3 +247,26 @@ async def test_consolidate_skips_when_a_pass_already_holds_the_lock(live_pool: A
         await holder.fetchval("SELECT pg_advisory_xact_lock($1)", _CONSOLIDATE_LOCK)  # hold it
         result = await LearningService(live_pool, FakeModelProvider()).consolidate()
         assert not result.did_something  # blocked pass skipped, no crash
+
+
+async def test_gc_prunes_old_finished_run_journals_only(db_conn: Any) -> None:
+    from sali.memory.retention import gc
+
+    old_done, recent_done, old_running = uuid4(), uuid4(), uuid4()
+    await db_conn.execute(
+        "INSERT INTO agent_runs (run_id, session_id, user_input, state, status, updated_at) VALUES "
+        "($1,$4,'x','done','completed', now() - interval '120 days'), "
+        "($2,$4,'y','done','completed', now()), "
+        "($3,$4,'z','reason_plan','running', now() - interval '120 days')",
+        old_done, recent_done, old_running, uuid4())
+    for run in (old_done, recent_done, old_running):
+        await db_conn.execute(
+            "INSERT INTO run_events (run_id, seq, kind) VALUES ($1,1,'llm_call')", run)
+
+    reclaimed = await gc(db_conn, run_journal_retention_days=90)
+    assert reclaimed == 1  # only the OLD, FINISHED run's journal
+    assert await db_conn.fetchval("SELECT count(*) FROM run_events WHERE run_id=$1", old_done) == 0
+    assert await db_conn.fetchval("SELECT count(*) FROM run_events WHERE run_id=$1", recent_done) == 1  # recent kept
+    assert await db_conn.fetchval("SELECT count(*) FROM run_events WHERE run_id=$1", old_running) == 1  # unfinished kept
+    # the run SUMMARY itself is never touched
+    assert await db_conn.fetchval("SELECT count(*) FROM agent_runs WHERE run_id=$1", old_done) == 1

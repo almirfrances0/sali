@@ -14,7 +14,7 @@ from sali.learning.episodes import consolidate_stm, prune_stm
 from sali.learning.failures import record_failures
 from sali.learning.model import ConsolidationResult
 from sali.learning.procedures import learn_procedures, record_procedure_outcomes
-from sali.memory import embed_worker
+from sali.memory import embed_worker, retention
 from sali.obs.log import get_logger
 from sali.provider.base import ModelProvider
 
@@ -43,6 +43,9 @@ class LearningService:
             failures = await record_failures(conn)
             episodes = await consolidate_stm(conn, self.provider)
             pruned = await prune_stm(conn)
+            reclaimed = await retention.gc(conn)  # §51: bound the event log's routine bookkeeping
+            if reclaimed:
+                await _emit(conn, "learning.gc", {"events_pruned": reclaimed})
             for proc in procedures:
                 await _emit(conn, "learning.procedure",
                             {"name": proc.name, "evidence": proc.evidence})
