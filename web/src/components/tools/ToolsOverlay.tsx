@@ -23,7 +23,6 @@ export function ToolsOverlay(): JSX.Element | null {
     queryKey: ['tool-exec'],
     queryFn: () => api.toolExecutions(20),
     enabled: open,
-    refetchInterval: open ? 5000 : false,
   })
 
   useEffect(() => {

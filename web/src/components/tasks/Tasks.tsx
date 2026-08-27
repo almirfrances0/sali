@@ -39,7 +39,7 @@ function TaskCard({ t }: { t: Task }): JSX.Element {
 }
 
 export function Tasks(): JSX.Element {
-  const { data } = useQuery({ queryKey: ['tasks'], queryFn: api.tasks, refetchInterval: 8000 })
+  const { data } = useQuery({ queryKey: ['tasks'], queryFn: api.tasks})
   const open = data?.open ?? []
   return (
     <Panel>

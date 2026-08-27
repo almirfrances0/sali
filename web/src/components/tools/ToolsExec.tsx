@@ -16,7 +16,7 @@ interface ExecRow {
 // catalog. Appears in the rail only while tools are actually running (§20).
 export function ToolsExec(): JSX.Element {
   const setToolsOpen = useStore((s) => s.setToolsOpen)
-  const { data } = useQuery({ queryKey: ['tool-exec'], queryFn: () => api.toolExecutions(15), refetchInterval: 4000 })
+  const { data } = useQuery({ queryKey: ['tool-exec'], queryFn: () => api.toolExecutions(15)})
   const rows = (data?.executions ?? []) as ExecRow[]
   return (
     <Panel>

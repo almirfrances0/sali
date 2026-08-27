@@ -13,7 +13,7 @@ const TIERS = [
 ] as const
 
 export function Attention(): JSX.Element {
-  const { data } = useQuery({ queryKey: ['attention'], queryFn: () => api.attention(24), refetchInterval: 15000 })
+  const { data } = useQuery({ queryKey: ['attention'], queryFn: () => api.attention(24)})
   const events = useStore((s) => s.events)
 
   // live notable observations (important/critical) straight from the firehose

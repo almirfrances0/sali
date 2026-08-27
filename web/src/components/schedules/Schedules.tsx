@@ -7,7 +7,7 @@ import { ago, Dot, Empty, Panel, PanelHeader } from '../ui/primitives'
 
 export function Schedules(): JSX.Element {
   const qc = useQueryClient()
-  const { data } = useQuery({ queryKey: ['schedules'], queryFn: api.schedules, refetchInterval: 15000 })
+  const { data } = useQuery({ queryKey: ['schedules'], queryFn: api.schedules})
   const list = data?.schedules ?? []
   const [name, setName] = useState('')
   const [when, setWhen] = useState('')

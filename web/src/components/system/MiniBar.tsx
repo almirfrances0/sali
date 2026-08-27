@@ -22,9 +22,9 @@ function op(presence: PresenceState | undefined, self: SelfView | undefined): st
 }
 
 export function MiniBar(): JSX.Element {
-  const { data: presence } = useQuery({ queryKey: ['presence'], queryFn: api.presence, refetchInterval: 4000 })
-  const { data: self } = useQuery({ queryKey: ['self'], queryFn: api.self, refetchInterval: 15000 })
-  const { data: health } = useQuery({ queryKey: ['health'], queryFn: api.health, refetchInterval: 12000 })
+  const { data: presence } = useQuery({ queryKey: ['presence'], queryFn: api.presence})
+  const { data: self } = useQuery({ queryKey: ['self'], queryFn: api.self})
+  const { data: health } = useQuery({ queryKey: ['health'], queryFn: api.health})
   const streamState = useStore((s) => s.streamState)
   const chatState = useStore((s) => s.chatState)
   const pinned = useStore((s) => s.pinned)

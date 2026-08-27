@@ -16,8 +16,8 @@ function Row({ k, v }: { k: string; v: string | null | undefined }): JSX.Element
 }
 
 export function World(): JSX.Element {
-  const { data: self } = useQuery({ queryKey: ['self'], queryFn: api.self, refetchInterval: 15000 })
-  const { data: world } = useQuery({ queryKey: ['world'], queryFn: api.world, refetchInterval: 6000 })
+  const { data: self } = useQuery({ queryKey: ['self'], queryFn: api.self})
+  const { data: world } = useQuery({ queryKey: ['world'], queryFn: api.world})
   const env = self?.environment ?? {}
 
   return (
