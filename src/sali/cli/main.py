@@ -993,6 +993,10 @@ def observe(
 # How often (in observe cycles) the background service also consolidates learning. Learning is
 # heavier (a model call), so it runs far less often than observation.
 _LEARN_EVERY = 10
+# How often the background service refreshes its Tool-Intelligence picture (discover tools, map
+# capabilities, classify authority). Deterministic + diff-based, so cheap; also run once at startup
+# (cycle 1) so a fresh machine is inventoried promptly, then periodically.
+_TOOL_INTEL_EVERY = 20
 
 
 async def _observe(settings: Settings, interval: int) -> None:
@@ -1015,6 +1019,13 @@ async def _observe(settings: Settings, interval: int) -> None:
             console.print(f"[yellow]  - {key}[/]")
 
     async def on_tick(cycle: int) -> None:
+        if cycle == 1 or cycle % _TOOL_INTEL_EVERY == 0:  # keep the tool picture current (§26/§74)
+            from sali.twin import tool_intel
+
+            ti = await tool_intel.run_pass(pool)
+            if not ti.skipped and (ti.added or ti.removed):
+                console.print(f"[cyan]  tools:[/] +{ti.added} / -{ti.removed} "
+                              f"([dim]{ti.discovered} known[/])")
         if cycle % _LEARN_EVERY != 0:
             return
         result = await learning.consolidate()  # §17-19: procedures, failures, episodes
@@ -1024,6 +1035,8 @@ async def _observe(settings: Settings, interval: int) -> None:
             console.print(f"[dim]  noted {result.failures_recorded} past failure(s)[/]")
         if result.episodes_created:
             console.print("[dim]  folded recent activity into an episode[/]")
+        if result.tool_experiences:
+            console.print(f"[dim]  learned {result.tool_experiences} tool experience(s)[/]")
 
     every = interval * _LEARN_EVERY
     console.print(f"[dim]watching every {interval}s, learning every ~{every}s — Ctrl-C to stop[/]")
@@ -1112,6 +1125,10 @@ async def _daemon(settings: Settings) -> None:
     stop = asyncio.Event()
 
     async def on_tick(cycle: int) -> None:
+        if cycle == 1 or cycle % _TOOL_INTEL_EVERY == 0:  # keep the tool picture current (§26/§74)
+            from sali.twin import tool_intel
+
+            await tool_intel.run_pass(pool)
         if cycle % _LEARN_EVERY == 0:
             await learning.consolidate()
 
