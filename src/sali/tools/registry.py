@@ -39,6 +39,7 @@ def default_registry() -> ToolRegistry:
         perception_tool,
         recall_tool,
         schedule_tool,
+        security_tool,
         self_tool,
         ssh,
         system,
@@ -52,6 +53,7 @@ def default_registry() -> ToolRegistry:
     registry = ToolRegistry()
     for module in (system, filesystem, git, exec_tool, web, memory_tool, graph_tool, task_tool,
                    schedule_tool, ingest_tool, ssh, comms_tool, browser_tool, notify_tool,
-                   vision_tool, perception_tool, recall_tool, tool_advice, self_tool, timeline_tool):
+                   vision_tool, perception_tool, recall_tool, tool_advice, self_tool, timeline_tool,
+                   security_tool):
         module.register_builtins(registry)
     return registry
