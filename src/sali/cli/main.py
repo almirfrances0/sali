@@ -263,6 +263,35 @@ async def _seed_core(settings: Settings) -> None:
 
 
 @app.command()
+def backup(
+    dest: str = typer.Option("", help="Where to write the backup (default ~/.local/share/sali/backups)."),
+    keep: int = typer.Option(7, help="How many backups to keep (older ones are rotated out)."),
+) -> None:
+    """Back up the datastore + config/vault locally, and rotate old backups (§52). The datastore holds
+    no raw secrets; the vault stays encrypted. Secrets never leave the machine."""
+    from pathlib import Path
+
+    from sali.db import backup as db_backup
+
+    settings = load_settings()
+    where = Path(dest).expanduser() if dest else db_backup.default_dir()
+    try:
+        result = db_backup.run_backup(settings, where, keep=keep)
+    except FileNotFoundError:
+        raise typer.BadParameter("pg_dump not found — install postgresql-client") from None
+    except Exception as exc:  # noqa: BLE001 - a failed backup must be loud, with the reason
+        raise typer.BadParameter(f"backup failed: {str(exc)[:300]}") from exc
+    mb = result["dump_bytes"] / 1_000_000
+    console.print(f"[green]backed up[/] datastore → {result['dump']} [dim]({mb:.1f} MB)[/]")
+    console.print(f"[dim]config/vault → {result['dir']}/config-… ({', '.join(result['config'])})[/]")
+    if result["rotated"]:
+        console.print(f"[dim]rotated out {result['rotated']} old backup(s)[/]")
+    if result["has_secret_key"]:
+        console.print("[yellow]note:[/] this backup contains the vault key — keep the directory as "
+                      "protected as ~/.config/sali (it can decrypt your secrets).")
+
+
+@app.command()
 def doctor() -> None:
     """Check Postgres connectivity, migration state, and Ollama."""
     settings = load_settings()
