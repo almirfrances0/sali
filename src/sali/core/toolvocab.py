@@ -93,3 +93,25 @@ CAPABILITY_VOCAB: dict[str, str] = {
 def is_known_capability(slug: str) -> bool:
     """True if `slug` is part of the controlled capability vocabulary."""
     return slug in CAPABILITY_VOCAB
+
+
+# Command prefixes that wrap the real program — skipped when identifying the binary a command runs.
+_COMMAND_WRAPPERS = frozenset({"sudo", "doas", "env", "time", "nice", "nohup", "stdbuf", "ionice"})
+
+
+def binary_of(command: str) -> str:
+    """The underlying program a shell command invokes: skips env-assignments, flags, and wrappers
+    (sudo/env/…), and strips any leading path. '' if none can be identified. Shared by the experience
+    miner and the coverage report so 'which binary was this' is defined once."""
+    for tok in command.strip().split():
+        if "=" in tok or tok.startswith(("-", "/", ".", "~", "$", "(", "'", '"', "|", "&")):
+            if tok.startswith("/") and "=" not in tok:  # a leading absolute path is still a program
+                base = tok.rsplit("/", 1)[-1].lower()
+                if base and base not in _COMMAND_WRAPPERS:
+                    return base
+            continue
+        base = tok.rsplit("/", 1)[-1].lower()
+        if base in _COMMAND_WRAPPERS:
+            continue
+        return base
+    return ""

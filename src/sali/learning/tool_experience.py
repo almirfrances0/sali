@@ -18,32 +18,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from sali.core.enums import MemoryLayer, MemorySource
+from sali.core.toolvocab import binary_of
 from sali.memory import writer as memory_writer
 from sali.obs.log import get_logger
 
 log = get_logger("sali.learning.tool_experience")
 
-# Command prefixes that wrap the real program — skip them to attribute the run to the actual binary.
-_WRAPPERS = frozenset({"sudo", "doas", "env", "time", "nice", "nohup", "stdbuf", "ionice"})
 _MAX_FAILURE_MODES = 3
-
-
-def binary_of(command: str) -> str:
-    """The underlying program a shell command invokes: skips env-assignments, flags, and wrappers
-    (sudo/env/…), and strips any leading path. '' if none can be identified."""
-    for tok in command.strip().split():
-        if "=" in tok or tok.startswith(("-", "/", ".", "~", "$", "(", "'", '"', "|", "&")):
-            # a leading absolute path is still a program — handle /usr/bin/x explicitly
-            if tok.startswith("/") and "=" not in tok:
-                base = tok.rsplit("/", 1)[-1].lower()
-                if base and base not in _WRAPPERS:
-                    return base
-            continue
-        base = tok.rsplit("/", 1)[-1].lower()
-        if base in _WRAPPERS:
-            continue
-        return base
-    return ""
 
 
 @dataclass(slots=True)

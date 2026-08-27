@@ -11,7 +11,8 @@ from uuid import uuid4
 
 import pytest
 
-from sali.learning.tool_experience import binary_of, learn_tool_experiences
+from sali.core.toolvocab import binary_of
+from sali.learning.tool_experience import learn_tool_experiences
 
 pytestmark = pytest.mark.db
 

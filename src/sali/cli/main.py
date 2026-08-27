@@ -31,6 +31,9 @@ app.add_typer(secrets_cli, name="secrets")
 memory_cli = typer.Typer(help="Inspect Sali's memory.")
 app.add_typer(memory_cli, name="memory")
 
+tools_cli = typer.Typer(help="Inspect the tools Sali has discovered on this machine.")
+app.add_typer(tools_cli, name="tools")
+
 
 @memory_cli.command("eval")
 def memory_eval() -> None:
@@ -100,6 +103,146 @@ async def _memory_status(settings: Settings) -> None:
     if g["orphan_nodes"]:
         soft.append(f"{g['orphan_nodes']} orphan nodes")
     console.print("[yellow]Soft spots:[/] " + (", ".join(soft) if soft else "none — memory is healthy"))
+
+
+@tools_cli.command("discover")
+def tools_discover() -> None:
+    """Scan the machine now: discover tools, map capabilities, classify authority (§26)."""
+    settings = load_settings()
+    configure_logging("ERROR")
+    asyncio.run(_tools_discover(settings))
+
+
+async def _tools_discover(settings: Settings) -> None:
+    from sali.db.pool import create_pool
+    from sali.twin import tool_intel
+
+    pool = await create_pool(settings)
+    try:
+        with console.status("scanning PATH, resolving packages, classifying…"):
+            res = await tool_intel.run_pass(pool)
+    finally:
+        await pool.close()
+    if res.skipped:
+        console.print("[yellow]another discovery pass is already running — skipped.[/]")
+        return
+    console.print(f"[green]{res.discovered} tools[/] known "
+                  f"([green]+{res.added}[/] / [yellow]-{res.removed}[/]), "
+                  f"{res.capability_edges} capability links, {res.authority_written} (re)classified.")
+
+
+@tools_cli.command("list")
+def tools_list(
+    capability: str = typer.Option(None, "--capability", "-c", help="only tools providing this capability"),
+    authority: str = typer.Option(None, "--authority", "-a", help="normal | elevated | system_critical"),
+    limit: int = typer.Option(60, "--limit", "-n"),
+) -> None:
+    """List discovered tools, optionally filtered by capability or authority tier."""
+    settings = load_settings()
+    configure_logging("ERROR")
+    asyncio.run(_tools_list(settings, capability, authority, limit))
+
+
+async def _tools_list(settings: Settings, capability: str | None, authority: str | None,
+                      limit: int) -> None:
+    from sali.db.pool import create_pool
+    from sali.twin import tool_report
+
+    pool = await create_pool(settings)
+    try:
+        async with pool.acquire() as conn:
+            rows = await tool_report.list_tools(
+                conn, capability=capability, authority=authority, limit=limit)
+    finally:
+        await pool.close()
+    if not rows:
+        console.print("[dim]no matching tools (try `sali tools discover` first).[/]")
+        return
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("tool")
+    table.add_column("authority")
+    table.add_column("capabilities")
+    table.add_column("package", style="dim")
+    _auth_style = {"system_critical": "red", "elevated": "yellow", "normal": "green"}
+    for r in rows:
+        auth = r["authority"] or "—"
+        caps = ", ".join(r["capabilities"]) if r["capabilities"] else "[dim]—[/]"
+        table.add_row(r["name"], f"[{_auth_style.get(auth, 'white')}]{auth}[/]", caps,
+                      r["package"] or "")
+    console.print(table)
+    console.print(f"[dim]{len(rows)} tool(s).[/]")
+
+
+@tools_cli.command("inspect")
+def tools_inspect(name: str) -> None:
+    """Everything Sali knows about one tool: path, package, capabilities, authority, and experience."""
+    settings = load_settings()
+    configure_logging("ERROR")
+    asyncio.run(_tools_inspect(settings, name))
+
+
+async def _tools_inspect(settings: Settings, name: str) -> None:
+    from sali.db.pool import create_pool
+    from sali.twin import tool_report
+
+    pool = await create_pool(settings)
+    try:
+        async with pool.acquire() as conn:
+            info = await tool_report.inspect_tool(conn, name)
+    finally:
+        await pool.close()
+    if info is None:
+        console.print(f"[yellow]'{name}' is not in Sali's tool inventory.[/] "
+                      "It may not be installed, or run `sali tools discover`.")
+        return
+    console.print(f"[bold]{info['name']}[/]" + (f"  [dim]{info['path']}[/]" if info["path"] else ""))
+    if info["package"]:
+        console.print(f"  package: {info['package']}"
+                      + (f" · version {info['version']}" if info["version"] else ""))
+    auth = info["authority"] or "unclassified"
+    console.print(f"  authority: [bold]{auth}[/]"
+                  + (f" — [dim]{info['authority_rationale']}[/]" if info["authority_rationale"] else ""))
+    console.print("  capabilities: " + (", ".join(info["capabilities"]) if info["capabilities"]
+                                        else "[dim]none known[/]"))
+    if info["experience_summary"]:
+        console.print(f"  experience: {info['experience_summary']}")
+        exp = info["experience"] or {}
+        if exp.get("failure_modes"):
+            console.print("    common failures: " + "; ".join(exp["failure_modes"]))
+    else:
+        console.print("  experience: [dim]not used yet[/]")
+
+
+@tools_cli.command("coverage")
+def tools_coverage() -> None:
+    """Tool-knowledge coverage: discovered vs mapped vs classified vs actually-used (§25)."""
+    settings = load_settings()
+    configure_logging("ERROR")
+    asyncio.run(_tools_coverage(settings))
+
+
+async def _tools_coverage(settings: Settings) -> None:
+    from sali.db.pool import create_pool
+    from sali.tools.registry import default_registry
+    from sali.twin import tool_report
+
+    pool = await create_pool(settings)
+    try:
+        async with pool.acquire() as conn:
+            cov = await tool_report.coverage(conn)
+    finally:
+        await pool.close()
+    registered = len(default_registry())
+    console.print(f"[bold]Discovered tools[/] — {cov['discovered']} installed")
+    console.print(f"  with known capability : {cov['with_capability']} "
+                  f"([dim]{cov['capabilities']} capabilities in the vocabulary[/])")
+    console.print(f"  classified for authority: {cov['classified']}  "
+                  + "  ".join(f"{k}={v}" for k, v in sorted(cov["by_authority"].items())))
+    console.print(f"  actually used by Sali : {cov['used']}  "
+                  f"([yellow]{cov['never_used']} never used[/])")
+    if cov["top_used"]:
+        console.print("  most used: " + ", ".join(f"{b} ({n})" for b, n in cov["top_used"]))
+    console.print(f"[dim]Built-in agent tools registered: {registered}[/]")
 
 
 @secrets_cli.command("set")
