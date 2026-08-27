@@ -81,13 +81,21 @@ async def remember(
         raise SaliError("working memory is not persistent; use observe()")
 
     policy = await conn.fetchrow(
-        "SELECT default_freshness, base_importance FROM layer_policy WHERE layer=$1::memory_layer",
+        "SELECT default_freshness, base_importance, promote_min_conf "
+        "FROM layer_policy WHERE layer=$1::memory_layer",
         layer.value,
     )
     fresh = freshness or (
         FreshnessPolicy(policy["default_freshness"]) if policy else FreshnessPolicy.SLOW
     )
     imp = importance if importance is not None else (policy["base_importance"] if policy else 0.5)
+    # Write-policy gate (§57): a fresh NON-functional memory whose one-observation confidence is below
+    # the layer's promotion bar isn't yet trusted knowledge — it's a CANDIDATE (flagged needs_grounding),
+    # and it PROMOTES only once corroboration lifts it past the bar (see _corroborate). Strong sources
+    # (a user statement, a live observation) clear the bar immediately, so they're never gated.
+    promote_min = float(policy["promote_min_conf"]) if policy else 0.55
+    if not functional and initial_confidence(source, obs_conf) < promote_min:
+        needs_grounding = True
 
     if functional and claim_key is not None:
         return await _resolve_claim(
@@ -262,6 +270,21 @@ async def _corroborate(
         "VALUES ('memory.corroborated','memory',$1,$2)",
         existing["id"], {"source": source.value},
     )
+    # Promotion (§57): a candidate that corroboration has now lifted past the layer's confidence AND
+    # evidence bar becomes trusted knowledge — clear the candidate flag.
+    if row["needs_grounding"]:
+        bar = await conn.fetchrow(
+            "SELECT promote_min_conf, promote_min_evidence FROM layer_policy WHERE layer=$1::memory_layer",
+            row["layer"])
+        if bar and new_conf >= float(bar["promote_min_conf"]) \
+                and row["evidence_count"] >= int(bar["promote_min_evidence"]):
+            row = await conn.fetchrow(
+                "UPDATE memory SET needs_grounding=false, updated_at=now() WHERE id=$1 RETURNING *",
+                existing["id"])
+            await conn.execute(
+                "INSERT INTO event (event_type, subject_type, subject_id, payload) "
+                "VALUES ('memory.promoted','memory',$1,$2)",
+                existing["id"], {"confidence": round(new_conf, 3), "evidence": row["evidence_count"]})
     return row_to_memory(row)
 
 

@@ -66,3 +66,28 @@ async def test_forget_and_verify_tools_end_to_end(live_pool: Any) -> None:
     forgotten = await ForgetBelief().run(
         {"belief": "staging server is 10.0.0.5", "reason": "it moved"}, ctx)
     assert forgotten.ok and forgotten.output["found"] and forgotten.output["closed"]
+
+
+async def test_weak_inference_is_a_candidate_then_promotes(live_pool: Any) -> None:
+    # §57 write-policy gate: a lone unverified INFERENCE is held as a candidate (needs_grounding),
+    # and PROMOTES only once corroboration lifts it past the layer's confidence + evidence bar.
+    from sali.memory import writer as w
+
+    async with live_pool.acquire() as c:
+        m = await w.remember(c, layer=MemoryLayer.SEMANTIC, content="the cache is probably Redis",
+                             source=MemorySource.INFERENCE)
+        assert m.needs_grounding is True  # gated — a weak conclusion isn't first-class memory yet
+
+        # a stronger source corroborating the same content raises confidence + evidence → promoted
+        promoted = await w.remember(c, layer=MemoryLayer.SEMANTIC, content="the cache is probably Redis",
+                                    source=MemorySource.USER_EXPLICIT)
+        assert promoted.needs_grounding is False and promoted.evidence_count >= 2
+
+
+async def test_a_direct_statement_is_never_gated(live_pool: Any) -> None:
+    from sali.memory import writer as w
+
+    async with live_pool.acquire() as c:
+        m = await w.remember(c, layer=MemoryLayer.SEMANTIC, content="Project X uses PostgreSQL",
+                             source=MemorySource.USER_EXPLICIT)
+    assert m.needs_grounding is False  # a user statement clears the bar immediately
