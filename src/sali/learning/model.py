@@ -25,7 +25,9 @@ class ConsolidationResult:
     failures_recorded: int = 0
     episodes_created: int = 0
     stm_pruned: int = 0
+    tool_experiences: int = 0
 
     @property
     def did_something(self) -> bool:
-        return bool(self.procedures or self.failures_recorded or self.episodes_created)
+        return bool(self.procedures or self.failures_recorded or self.episodes_created
+                    or self.tool_experiences)
