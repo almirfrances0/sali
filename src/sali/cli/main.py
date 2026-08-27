@@ -1087,7 +1087,7 @@ def _twin_service(pool: Any, settings: Settings) -> Any:
     from sali.provider.registry import build_provider
     from sali.twin.service import TwinService
 
-    return TwinService(pool, memory=MemoryService(pool, build_provider(settings)))
+    return TwinService(pool, memory=MemoryService(pool, build_provider(settings)), settings=settings)
 
 
 async def _twin(settings: Settings, refresh: bool) -> None:

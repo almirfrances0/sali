@@ -34,9 +34,10 @@ _GROUPS: tuple[tuple[str, str], ...] = (
 
 
 class TwinService:
-    def __init__(self, pool: Any, memory: MemoryService | None = None) -> None:
+    def __init__(self, pool: Any, memory: MemoryService | None = None, settings: Any = None) -> None:
         self.pool = pool
         self.memory = memory  # when given, refresh also writes+embeds system-env memories
+        self.settings = settings  # when given, refresh also links agent:sali into its world (§1)
 
     async def refresh(self, *, exclude_projects: tuple[str, ...] = ()) -> SyncResult:
         """Observe the machine, reconcile the snapshot into the graph, and (if a memory service
@@ -47,6 +48,15 @@ class TwinService:
             result = await sync_snapshot(conn, snapshot)
             if self.memory is not None:
                 await write_twin_memories(conn, snapshot)
+            if self.settings is not None:  # §1: stitch the agent to machine/model/user/workspace/source
+                from sali.twin.self_link import link_self
+
+                perms = self.settings.permissions
+                await link_self(
+                    conn, machine_id=result.machine_id,
+                    model_name=self.settings.model.chat_model,
+                    workspace=perms.workspace,
+                    source_dir=(perms.fs_readonly[0] if perms.fs_readonly else ""))
         if self.memory is not None:
             await self.memory.embed_pending()  # make the new/updated facts searchable
         log.info("twin_refreshed", entities=result.entities,
