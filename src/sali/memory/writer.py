@@ -28,6 +28,7 @@ from sali.core.enums import (
 from sali.core.errors import SaliError
 from sali.memory.confidence import apply_evidence, bump_reliability, initial_confidence
 from sali.memory.models import Memory, row_to_memory
+from sali.security.redact import redact
 
 
 async def observe(
@@ -48,7 +49,7 @@ async def observe(
         "INSERT INTO stm_observation "
         "  (session_id, run_id, kind, content, source, source_ref, confidence, salience, structured) "
         "VALUES ($1,$2,$3,$4,$5::memory_source,$6,$7,$8,$9) RETURNING id",
-        session_id, run_id, kind, content, source.value, source_ref, confidence, salience,
+        session_id, run_id, kind, redact(content), source.value, source_ref, confidence, salience,
         structured or {},
     )
     await conn.execute(
@@ -79,6 +80,12 @@ async def remember(
     """Persist a fact. Corroborates on restatement; resolves functional-claim conflicts."""
     if layer is MemoryLayer.WORKING:
         raise SaliError("working memory is not persistent; use observe()")
+
+    # Never let a raw secret land in the durable store or a backup (§27) — redact at the write
+    # boundary, exactly as ingest does. A password/tokened-URL Almir mentions is remembered scrubbed.
+    content = redact(content)
+    if note:
+        note = redact(note)
 
     policy = await conn.fetchrow(
         "SELECT default_freshness, base_importance, promote_min_conf "
@@ -270,21 +277,26 @@ async def _corroborate(
         "VALUES ('memory.corroborated','memory',$1,$2)",
         existing["id"], {"source": source.value},
     )
-    # Promotion (§57): a candidate that corroboration has now lifted past the layer's confidence AND
-    # evidence bar becomes trusted knowledge — clear the candidate flag.
-    if row["needs_grounding"]:
+    # Promotion (§57): a candidate becomes trusted knowledge once it clears the confidence bar AND has
+    # been attested by enough INDEPENDENT sources (distinct sources, not mere restatements — §6) — so
+    # Sali restating its own inference can't self-promote it. A web/external fact is EXCLUDED: its
+    # needs_grounding is a reality-grounding requirement (§11) that only an actual check
+    # (reground / memory_verify) clears, never textual corroboration.
+    if row["needs_grounding"] and MemorySource(row["source"]) is not MemorySource.EXTERNAL_SOURCE:
         bar = await conn.fetchrow(
             "SELECT promote_min_conf, promote_min_evidence FROM layer_policy WHERE layer=$1::memory_layer",
             row["layer"])
+        distinct = await conn.fetchval(
+            "SELECT count(DISTINCT source) FROM memory_evidence WHERE memory_id=$1", existing["id"])
         if bar and new_conf >= float(bar["promote_min_conf"]) \
-                and row["evidence_count"] >= int(bar["promote_min_evidence"]):
+                and int(distinct or 0) >= int(bar["promote_min_evidence"]):
             row = await conn.fetchrow(
                 "UPDATE memory SET needs_grounding=false, updated_at=now() WHERE id=$1 RETURNING *",
                 existing["id"])
             await conn.execute(
                 "INSERT INTO event (event_type, subject_type, subject_id, payload) "
                 "VALUES ('memory.promoted','memory',$1,$2)",
-                existing["id"], {"confidence": round(new_conf, 3), "evidence": row["evidence_count"]})
+                existing["id"], {"confidence": round(new_conf, 3), "sources": int(distinct or 0)})
     return row_to_memory(row)
 
 

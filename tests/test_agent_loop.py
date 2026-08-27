@@ -117,11 +117,13 @@ async def test_loop_denies_unknown_tool_but_continues(live_pool: Any) -> None:
 
 
 async def test_loop_recover_surfaces_interrupted_run(live_pool: Any) -> None:
-    # Simulate a crash: a run left 'running' in EXECUTE_TOOL with a non-idempotent tool.
+    # Simulate a crash: a run left 'running' in EXECUTE_TOOL with a non-idempotent tool, STALE
+    # (no FSM transition for minutes) — the mark of a dead process, not a live long turn.
     async with live_pool.acquire() as c:
         run_id = await c.fetchval(
-            "INSERT INTO agent_runs (run_id, session_id, user_input, state, status) "
-            "VALUES (gen_random_uuid(), gen_random_uuid(), 'x', 'execute_tool', 'running') "
+            "INSERT INTO agent_runs (run_id, session_id, user_input, state, status, updated_at) "
+            "VALUES (gen_random_uuid(), gen_random_uuid(), 'x', 'execute_tool', 'running', "
+            "        now() - interval '5 minutes') "
             "RETURNING run_id"
         )
         await c.execute(
@@ -140,6 +142,24 @@ async def test_loop_recover_surfaces_interrupted_run(live_pool: Any) -> None:
     async with live_pool.acquire() as c:
         status = await c.fetchval("SELECT status FROM agent_runs WHERE run_id=$1", run_id)
         assert status == "aborted"
+
+
+async def test_recover_never_touches_a_live_in_flight_run(live_pool: Any) -> None:
+    # A run that JUST transitioned (fresh updated_at) belongs to a live process — a second `sali`
+    # starting up (or a new WebSocket connection) must not abort it out from under that process.
+    async with live_pool.acquire() as c:
+        run_id = await c.fetchval(
+            "INSERT INTO agent_runs (run_id, session_id, user_input, state, status, updated_at) "
+            "VALUES (gen_random_uuid(), gen_random_uuid(), 'y', 'execute_tool', 'running', now()) "
+            "RETURNING run_id"
+        )
+
+    resolved = await _loop(live_pool, FakeModelProvider()).recover()
+
+    assert resolved == []  # nothing stale → nothing touched
+    async with live_pool.acquire() as c:
+        status = await c.fetchval("SELECT status FROM agent_runs WHERE run_id=$1", run_id)
+        assert status == "running"  # the live run is left strictly alone
 
 
 async def test_astream_streams_tokens_then_final(live_pool: Any) -> None:

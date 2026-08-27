@@ -633,7 +633,9 @@ class AgentLoop:
                             yield LoopEvent("status", "on it")
                             iteration += 1
                             continue
-                        final_text = res.content  # already streamed live as tokens
+                        # Recovery exhausted but the content is STILL a leaked tool-call blob — never
+                        # show Almir raw JSON. Treat it as empty so the wrap-up path speaks in voice.
+                        final_text = "" if _looks_like_leaked_tool_call(res.content) else res.content
                         break
                     messages.append(
                         ChatMessage(role="assistant", content=res.content, tool_calls=res.tool_calls)
@@ -873,7 +875,12 @@ class AgentLoop:
         retries); the correct resume action is computed and journaled for each."""
         resolved: list[dict[str, str]] = []
         async with self.pool.acquire() as conn:
-            runs = await conn.fetch("SELECT run_id, state FROM agent_runs WHERE status='running'")
+            # Only STALE runs — a live run in another process (the daemon, a second `sali agent`, a
+            # WebSocket turn) bumps updated_at on every FSM transition, so a fresh timestamp means it's
+            # still in flight. Without this, one process starting up would abort another's active run.
+            runs = await conn.fetch(
+                "SELECT run_id, state FROM agent_runs "
+                "WHERE status='running' AND updated_at < now() - interval '2 minutes'")
             for row in runs:
                 state = RunState(row["state"])
                 idempotent: bool | None = None

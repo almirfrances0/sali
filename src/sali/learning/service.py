@@ -35,26 +35,35 @@ class LearningService:
         """One consolidation pass (§17-19): learn procedures (evidence-gated), record failures +
         their fixes, fold short-term observations into an episode, prune stale raw — then embed.
         Skipped (no-op) if another consolidation is already running — never a duplicate-key crash."""
-        async with self.pool.acquire() as conn, conn.transaction():
-            if not await conn.fetchval("SELECT pg_try_advisory_xact_lock($1)", _CONSOLIDATE_LOCK):
+        # A SESSION advisory lock (not a transaction-scoped one) serializes consolidation WITHOUT
+        # keeping a transaction open — so the model calls below (naming a procedure, distilling an
+        # episode) never run inside an open transaction holding a pooled connection idle. Each
+        # sub-step is individually atomic + idempotent (dedup by key), so no outer transaction is
+        # needed for correctness; a partial pass is safely re-done next time. asyncpg releases the
+        # lock on connection return too, so a crash mid-pass can't leak it.
+        async with self.pool.acquire() as conn:
+            if not await conn.fetchval("SELECT pg_try_advisory_lock($1)", _CONSOLIDATE_LOCK):
                 return ConsolidationResult()  # another pass holds the lock — skip cleanly
-            procedures = await learn_procedures(conn, self.provider, threshold=threshold)
-            outcomes = await record_procedure_outcomes(conn)  # §43: reinforce/penalize by how they ran
-            failures = await record_failures(conn)
-            episodes = await consolidate_stm(conn, self.provider)
-            pruned = await prune_stm(conn)
-            reclaimed = await retention.gc(conn)  # §51: bound the event log's routine bookkeeping
-            if reclaimed:
-                await _emit(conn, "learning.gc", {"events_pruned": reclaimed})
-            for proc in procedures:
-                await _emit(conn, "learning.procedure",
-                            {"name": proc.name, "evidence": proc.evidence})
-            if failures:
-                await _emit(conn, "learning.failure", {"count": failures})
-            if episodes:
-                await _emit(conn, "learning.episode", {"count": episodes})
-            if outcomes:
-                await _emit(conn, "learning.procedure_outcome", {"count": outcomes})
+            try:
+                procedures = await learn_procedures(conn, self.provider, threshold=threshold)
+                outcomes = await record_procedure_outcomes(conn)  # §43: reinforce/penalize by how they ran
+                failures = await record_failures(conn)
+                episodes = await consolidate_stm(conn, self.provider)
+                pruned = await prune_stm(conn)
+                reclaimed = await retention.gc(conn)  # §51: bound the event log's routine bookkeeping
+                if reclaimed:
+                    await _emit(conn, "learning.gc", {"events_pruned": reclaimed})
+                for proc in procedures:
+                    await _emit(conn, "learning.procedure",
+                                {"name": proc.name, "evidence": proc.evidence})
+                if failures:
+                    await _emit(conn, "learning.failure", {"count": failures})
+                if episodes:
+                    await _emit(conn, "learning.episode", {"count": episodes})
+                if outcomes:
+                    await _emit(conn, "learning.procedure_outcome", {"count": outcomes})
+            finally:
+                await conn.execute("SELECT pg_advisory_unlock($1)", _CONSOLIDATE_LOCK)
         await embed_worker.embed_pending(self.pool, self.provider)  # make the new memories usable
         log.info("consolidated", procedures=len(procedures), outcomes=outcomes, failures=failures,
                  episodes=episodes, pruned=pruned)

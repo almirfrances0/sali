@@ -12,6 +12,7 @@ Old backups are rotated so the directory can't grow without bound.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
@@ -47,11 +48,20 @@ def run_backup(settings: Any, dest: Path | None = None, *, keep: int = 7,
     dest.mkdir(mode=0o700, parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")  # noqa: DTZ005 - local time is the right label here
 
+    # Dump to a temp sibling first, then atomically rename — so a failed/timed-out pg_dump never
+    # leaves a truncated file under the real backup name (a restore must never find a corrupt dump).
     dump = dest / f"sali-{stamp}.dump"
-    subprocess.run(  # noqa: S603,S607 - fixed argv, peer auth over the unix socket, Sali's own machine
-        ["pg_dump", "-d", settings.db.name, "-Fc", "-f", str(dump)],
-        check=True, capture_output=True, text=True, timeout=timeout)
-    os.chmod(dump, 0o600)
+    partial = dest / f".sali-{stamp}.dump.partial"
+    try:
+        subprocess.run(  # noqa: S603,S607 - fixed argv, peer auth over the unix socket, own machine
+            ["pg_dump", "-d", settings.db.name, "-Fc", "-f", str(partial)],
+            check=True, capture_output=True, text=True, timeout=timeout)
+        os.chmod(partial, 0o600)
+        os.replace(partial, dump)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(partial)
+        raise
 
     conf = dest / f"config-{stamp}"
     conf.mkdir(mode=0o700, exist_ok=True)

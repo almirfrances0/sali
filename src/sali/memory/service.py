@@ -16,6 +16,7 @@ from uuid import UUID
 
 from sali.core.clock import Clock, SystemClock
 from sali.core.enums import FreshnessPolicy, MemoryLayer, MemorySource
+from sali.core.errors import ProviderError
 from sali.memory import embed_worker, retriever, writer
 from sali.memory.decay import (
     decayed_importance,
@@ -49,9 +50,14 @@ class MemoryService:
         return await embed_worker.embed_pending(self.pool, self.provider, batch)
 
     async def retrieve(self, query: str, k: int = 8, *, scope: str | None = None) -> list[MemoryHit]:
-        query_vec = (await self.provider.embed([embed_worker.QUERY_PREFIX + query]))[0]
+        # The embedder is a SEPARATE (CPU-only) model — it can be down while chat works. If it is,
+        # degrade to lexical-only recall rather than failing the whole turn (§53 graceful degradation).
+        try:
+            query_vec: list[float] | None = (await self.provider.embed([embed_worker.QUERY_PREFIX + query]))[0]
+        except ProviderError:
+            query_vec = None
         async with self.pool.acquire() as conn:
-            vector_rows = await retriever.retrieve_vector(conn, query_vec, k)
+            vector_rows = await retriever.retrieve_vector(conn, query_vec, k) if query_vec is not None else []
             keyword_rows = await retriever.retrieve_keyword(conn, query, k)
 
         fused: dict[UUID, dict[str, Any]] = {}

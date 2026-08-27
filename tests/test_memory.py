@@ -7,13 +7,30 @@ from typing import Any
 import pytest
 
 from sali.core.enums import MemoryLayer, MemorySource
-from sali.core.errors import SaliError
+from sali.core.errors import ProviderError, SaliError
 from sali.memory import writer
 from sali.memory.embed_worker import DOC_PREFIX, embed_pending_conn
 from sali.memory.retriever import retrieve_keyword, retrieve_vector
+from sali.memory.service import MemoryService
 from sali.provider.fake import FakeModelProvider
 
 pytestmark = pytest.mark.db
+
+
+class _EmbedderDown(FakeModelProvider):
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        raise ProviderError("embedder offline")
+
+
+async def test_retrieve_degrades_to_keyword_when_the_embedder_is_down(live_pool: Any) -> None:
+    # §53: the embedder is a SEPARATE CPU model — if it's down, recall must degrade to lexical, not
+    # fail the whole turn. remember() still works (its embedding just stays pending).
+    mem = MemoryService(live_pool, _EmbedderDown())
+    await mem.remember(layer=MemoryLayer.SEMANTIC, content="Sali runs on Kali Linux",
+                       source=MemorySource.USER_EXPLICIT)
+    hits = await mem.retrieve("Kali Linux")  # must NOT raise
+    assert any("Kali" in h.memory.content for h in hits)
+    assert all(h.retriever == "keyword" for h in hits)  # no vector hits when the embedder is down
 
 
 async def test_remember_then_keyword_retrieve(db_conn: Any) -> None:

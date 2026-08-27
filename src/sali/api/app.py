@@ -18,7 +18,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from sali.core.ids import new_id
 from sali.runtime.session import persistent_session_id
-from sali.security.redact import redact_obj
+from sali.security.redact import redact, redact_obj
 
 
 class WSConfirmer:
@@ -71,8 +71,8 @@ def create_app(kernel: Any) -> FastAPI:
             try:
                 await asyncio.sleep(0.45)
                 hunch = await loop.sense(text)
-                if hunch:
-                    await websocket.send_json({"kind": "sense", "text": hunch, "data": {}})
+                if hunch:  # redact at the boundary (§27) — the hunch is raw memory/graph text
+                    await websocket.send_json({"kind": "sense", "text": redact(hunch), "data": {}})
             except asyncio.CancelledError:
                 pass
             except Exception:  # noqa: BLE001 - a hunch must never break the socket
@@ -116,5 +116,6 @@ def create_app(kernel: Any) -> FastAPI:
             receive_task.cancel()
             for task in sensing.values():
                 task.cancel()
+            await loop.aclose()  # release the per-connection loop's resources (Sali's browser, etc.)
 
     return app

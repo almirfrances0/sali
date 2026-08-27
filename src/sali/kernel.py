@@ -20,6 +20,7 @@ class Kernel:
         self.provider = provider
         self.log = get_logger("sali")
         self._pool: Any = None
+        self._recovered = False  # crash-recovery runs ONCE per process, not per loop/WS connection
 
     @classmethod
     def create(cls, settings: Settings | None = None) -> Kernel:
@@ -56,14 +57,16 @@ class Kernel:
             learning=LearningService(pool, self.provider),  # so memory actually ACCRUES (§17-19)
         )
         # Clean up any run a prior process left 'running' (hard crash / kill): mark it aborted so it
-        # doesn't linger. Best-effort — a recovery hiccup must never block starting a session. No
-        # turn is in flight yet, so this can't touch the run we're about to do.
-        try:
-            recovered = await loop.recover()
-            if recovered:
-                self.log.info("recovered_orphan_runs", count=len(recovered))
-        except Exception as exc:  # noqa: BLE001 - startup recovery is best-effort
-            self.log.warning("startup_recover_failed", error=str(exc))
+        # doesn't linger. Runs ONCE per process (not per WebSocket connection) and only over STALE
+        # runs, so it can never touch a turn in flight — here or in another live process.
+        if not self._recovered:
+            self._recovered = True
+            try:
+                recovered = await loop.recover()
+                if recovered:
+                    self.log.info("recovered_orphan_runs", count=len(recovered))
+            except Exception as exc:  # noqa: BLE001 - startup recovery is best-effort
+                self.log.warning("startup_recover_failed", error=str(exc))
         return loop
 
     async def close(self) -> None:
