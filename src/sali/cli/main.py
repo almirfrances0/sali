@@ -245,6 +245,46 @@ async def _tools_coverage(settings: Settings) -> None:
     console.print(f"[dim]Built-in agent tools registered: {registered}[/]")
 
 
+@tools_cli.command("classify")
+def tools_classify(name: str) -> None:
+    """Ask the local model to judge a tool's danger (§34) — it can only RAISE the deterministic tier,
+    never lower it. Records an escalation; the safe default always stands."""
+    settings = load_settings()
+    configure_logging("ERROR")
+    asyncio.run(_tools_classify(settings, name))
+
+
+async def _tools_classify(settings: Settings, name: str) -> None:
+    from sali.core.enums import MemorySource
+    from sali.db.pool import create_pool
+    from sali.provider.registry import build_provider
+    from sali.twin.authority import classify_authority, current_authority, set_authority
+    from sali.twin.interpret import interpret_authority
+
+    det_tier, _ = classify_authority(name)
+    with console.status(f"asking the model about {name}…"):
+        tier, rationale = await interpret_authority(build_provider(settings), name)
+    console.print(f"[bold]{name}[/] — deterministic: [bold]{det_tier.value}[/]; "
+                  f"final: [bold]{tier.value}[/]")
+    if tier is not det_tier:
+        console.print(f"  [yellow]{rationale}[/]")
+    pool = await create_pool(settings)
+    try:
+        async with pool.acquire() as conn:
+            was = await current_authority(conn, name)
+            if was is None:
+                console.print("[dim](not in the inventory — run `sali tools discover`; nothing recorded)[/]")
+                return
+            recorded = await set_authority(conn, name, tier, rationale=rationale,
+                                           classifier="llm_interpret", source=MemorySource.EXTERNAL_SOURCE)
+    finally:
+        await pool.close()
+    if recorded and tier is not was:
+        console.print(f"  [green]recorded[/] {was.value} → {tier.value}")
+    else:
+        console.print(f"  [dim]unchanged ({tier.value})[/]")
+
+
 @secrets_cli.command("set")
 def secrets_set(ref: str) -> None:
     """Store a secret (e.g. 'mail.personal.password'), ENCRYPTED at rest in ~/.config/sali/vault.json."""

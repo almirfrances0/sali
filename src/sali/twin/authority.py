@@ -111,3 +111,26 @@ async def current_authority(conn: Any, name: str) -> ExecAuthority | None:
         "SELECT a.authority FROM tool_authority a JOIN discovered_tool t ON t.id=a.tool_id "
         "WHERE t.name=$1 AND a.valid_until IS NULL", name)
     return ExecAuthority(value) if value is not None else None
+
+
+async def set_authority(
+    conn: Any, name: str, tier: ExecAuthority, *, rationale: str = "", classifier: str = "user",
+    source: MemorySource = MemorySource.INFERENCE,
+) -> bool:
+    """Record a new current authority for a tool by name, superseding any prior (never overwriting).
+    Returns False if the tool isn't in the inventory; True if set or already at this tier."""
+    tool_id = await conn.fetchval("SELECT id FROM discovered_tool WHERE name=$1", name)
+    if tool_id is None:
+        return False
+    current = await conn.fetchrow(
+        "SELECT id, authority FROM tool_authority WHERE tool_id=$1 AND valid_until IS NULL", tool_id)
+    if current is not None and current["authority"] == tier.value:
+        return True
+    if current is not None:
+        await conn.execute("UPDATE tool_authority SET valid_until=now() WHERE id=$1", current["id"])
+    await conn.execute(
+        "INSERT INTO tool_authority (tool_id, authority, rationale, classifier, capabilities, "
+        "  source, confidence) VALUES ($1,$2,$3,$4,$5,$6::memory_source,$7)",
+        tool_id, tier.value, rationale, classifier,
+        sorted(c.value for c in authority_capabilities(tier)), source.value, 0.8)
+    return True

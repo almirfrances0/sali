@@ -25,10 +25,11 @@ from sali.config.secrets import SecretStore
 from sali.config.settings import Settings
 from sali.context.engine import LIVE_NOTE, ContextEngine
 from sali.core.clock import Clock, SystemClock
-from sali.core.enums import MemoryLayer, MemorySource
+from sali.core.enums import MemoryLayer, MemorySource, RiskLevel
 from sali.core.errors import ProviderError
 from sali.core.ids import new_id
 from sali.core.scope import project_scope
+from sali.core.toolvocab import binary_of
 from sali.graph.service import GraphService
 from sali.ingest.service import IngestService
 from sali.learning.episodes import prune_stm
@@ -42,7 +43,7 @@ from sali.runtime.journal import RunJournal
 from sali.runtime.state import RunState, resume_action
 from sali.scheduler.store import ScheduleStore
 from sali.security.confirm import Confirmer
-from sali.security.policy import Action, PolicyEngine, SessionGrants
+from sali.security.policy import Action, PolicyDecision, PolicyEngine, SessionGrants
 from sali.security.redact import redact_obj
 from sali.tasks.store import TaskStore
 from sali.tools import dispatch
@@ -51,6 +52,18 @@ from sali.tools.context import ToolContext
 from sali.tools.registry import ToolRegistry
 from sali.tools.remote import build_remote_runner
 from sali.twin import awareness as twin_awareness
+
+# Tools whose arguments carry a raw shell command — the binary they run is what the tool-authority
+# floor is keyed on.
+_COMMAND_TOOLS = frozenset({"execute_command", "ssh_run"})
+_AUTHORITY_TTL = 300.0  # seconds — refresh the system-critical binary set at most this often
+
+
+def _command_binary(tool_name: str, args: dict[str, Any]) -> str | None:
+    if tool_name not in _COMMAND_TOOLS:
+        return None
+    cmd = args.get("command")
+    return binary_of(cmd) if isinstance(cmd, str) and cmd else None
 
 # Warmer sampling so Sali sounds like a person, not a deterministic tool. Tool-calling is
 # rendered structurally by the model, so it still works reliably at this temperature.
@@ -384,6 +397,7 @@ class AgentLoop:
         self._vision = _VisionSink(provider)  # look at the screen locally (sali3 §33-35)
         self._perception = build_perception(settings)  # focused app/window + a11y tree (sali3 §2,8,9)
         self._catalog = _ToolCatalogSink(pool)  # lets Sali query its own toolset (§53/§21)
+        self._syscrit: tuple[frozenset[str], float] | None = None  # (system-critical binaries, loaded_at)
         self._consolidating: asyncio.Task[Any] | None = None
         self._last_consolidate: Any = None
 
@@ -790,6 +804,7 @@ class AgentLoop:
             return _tool_message(call.name, {"error": f"unknown tool '{call.name}'"}), False, "unknown tool"
 
         decision = self.policy.decide(tool, call.arguments, grants)
+        decision = await self._authority_floor(tool, call.arguments, decision)
         await journal.event(
             "policy",
             {"tool": tool.name, "action": decision.action.value, "risk": int(decision.risk)},
@@ -893,6 +908,41 @@ class AgentLoop:
             run_id, tool.name, int(decision.risk), redact_obj(args), decision.action.value,
             ok, verified, duration_ms,
         )
+
+    async def _system_critical_binaries(self) -> frozenset[str]:
+        """The binaries classified SYSTEM_CRITICAL (§34), cached with a short TTL. On any DB hiccup,
+        keep the last-known set (or empty) — the enforcement must never itself break a turn."""
+        now = self.clock.now().timestamp()
+        if self._syscrit is not None and (now - self._syscrit[1]) < _AUTHORITY_TTL:
+            return self._syscrit[0]
+        names: frozenset[str] = self._syscrit[0] if self._syscrit else frozenset()
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT t.name FROM tool_authority a JOIN discovered_tool t ON t.id=a.tool_id "
+                    "WHERE a.valid_until IS NULL AND a.authority='system_critical' AND t.available")
+            names = frozenset(r["name"] for r in rows)
+        except Exception as exc:  # noqa: BLE001 - enforcement is best-effort over a cache
+            self.log.warning("authority_floor_load_failed", error=str(exc))
+        self._syscrit = (names, now)
+        return names
+
+    async def _authority_floor(
+        self, tool: Any, args: dict[str, Any], decision: PolicyDecision
+    ) -> PolicyDecision:
+        """Enforce the discovered-tool authority record (§34/§35/§88): a command whose binary is
+        classified SYSTEM_CRITICAL pauses to confirm, even if the tool's own risk assessment would
+        auto-allow it. Model-external and immutable — the classification comes from the datastore, not
+        from anything the model said. Complements exec_tool's command-level destructive check."""
+        if decision.action is not Action.AUTO_ALLOW:
+            return decision  # already gated or denied — nothing to tighten
+        binary = _command_binary(tool.name, args)
+        if binary and binary in await self._system_critical_binaries():
+            return PolicyDecision(
+                Action.CONFIRM,
+                f"'{binary}' is classified system-critical — pausing to confirm first",
+                RiskLevel.R4)
+        return decision
 
     async def recover(self) -> list[dict[str, str]]:
         """Resolve runs left 'running' by a crash. Phase 1 surfaces them (never silently
