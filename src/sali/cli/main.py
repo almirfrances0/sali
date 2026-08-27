@@ -1213,6 +1213,9 @@ _TOOL_INTEL_EVERY = 20
 # How often the daemon researches a few pending learning gaps online (§9). Rare + internet-gated +
 # budget-bounded, so it never crawls — at the 5-min twin cadence this is a few times a day.
 _RESEARCH_EVERY = 30
+# How often the daemon infers capabilities for a few still-unmapped discovered tools (§8). Bounded +
+# each tool attempted once, so it gradually covers the whole PATH without re-probing.
+_CAP_INFER_EVERY = 25
 
 
 async def _observe(settings: Settings, interval: int) -> None:
@@ -1351,6 +1354,11 @@ async def _daemon(settings: Settings) -> None:
             from sali.learning.research import research_pass
 
             await research_pass(pool, build_provider(settings))
+        if cycle % _CAP_INFER_EVERY == 0:  # §8: give a few unmapped tools capabilities via the model
+            from sali.twin.capabilities import infer_unmapped
+
+            async with pool.acquire() as conn:  # no outer txn — makes model + subprocess calls
+                await infer_unmapped(conn, build_provider(settings))
 
     # Each faculty runs under a supervisor: one crashing is logged and restarted (with backoff) rather
     # than cancelling its siblings — a hiccup in perception never takes the scheduler down with it.

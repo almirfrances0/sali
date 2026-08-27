@@ -229,6 +229,51 @@ def capability_slugs_in(query: str) -> list[str]:
     return out
 
 
+async def _probe_help(binary: str) -> str:
+    """Best-effort `<binary> --help` synopsis for capability inference. Bounded + degrades to ''."""
+    from sali.tools.exec import CommandTimeout, run_argv
+
+    try:
+        _, out, err = await run_argv([binary, "--help"], timeout=4.0)
+    except (CommandTimeout, FileNotFoundError, OSError):
+        return ""
+    return (out or err).strip()[:2000]
+
+
+async def infer_unmapped(conn: Any, provider: Any, *, limit: int = 3, probe: Any = None) -> int:
+    """Give a few UNMAPPED discovered tools capabilities via the model, from their --help text — written
+    as INFERENCE-source edges BELOW the curated EXTERNAL_SOURCE rules, so a real rule always wins (§8).
+    Each tool is attempted at most once (marked), so over many passes the whole PATH gets covered without
+    ever re-probing. Bounded per pass. The caller must NOT hold an open transaction (this makes model +
+    subprocess calls); each write is individually committed and idempotent."""
+    from sali.twin.interpret import interpret_capabilities
+
+    probe = probe or _probe_help
+    rows = await conn.fetch(
+        "SELECT t.name, t.node_id FROM discovered_tool t "
+        "WHERE t.available AND t.node_id IS NOT NULL AND (t.structured->>'cap_attempted') IS NULL "
+        "  AND NOT EXISTS (SELECT 1 FROM graph_edge e WHERE e.src_id=t.node_id "
+        "                  AND e.rel_type='provides_capability' AND e.valid_until IS NULL) "
+        "ORDER BY t.name LIMIT $1", limit)
+    inferred = 0
+    for r in rows:
+        synopsis = await probe(r["name"])
+        slugs = await interpret_capabilities(provider, r["name"], synopsis) if synopsis else []
+        for slug in slugs:
+            cap = await ensure_node(
+                conn, node_type=NODE_CAPABILITY, name=slug, canonical_key=capability_key(slug),
+                source=MemorySource.INFERENCE, props={"description": CAPABILITY_VOCAB.get(slug, "")})
+            await relate(conn, src_id=r["node_id"], dst_id=cap.id,
+                         rel_type=REL_PROVIDES_CAPABILITY, source=MemorySource.INFERENCE)
+        # mark attempted regardless of result, so it's never re-probed (bounds cost over ~2500 tools)
+        await conn.execute(
+            "UPDATE discovered_tool SET structured = structured || '{\"cap_attempted\": true}' "
+            "WHERE name=$1", r["name"])
+        if slugs:
+            inferred += 1
+    return inferred
+
+
 async def tools_with_capability(conn: Any, slug: str) -> list[str]:
     """Names of available tools that provide capability ``slug`` — a structural graph lookup (§7)."""
     rows = await conn.fetch(

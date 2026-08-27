@@ -11,6 +11,7 @@ system-critical adds protection. On any parse failure the deterministic classifi
 from __future__ import annotations
 
 from sali.core.enums import ExecAuthority
+from sali.core.toolvocab import CAPABILITY_VOCAB
 from sali.provider.base import ChatMessage, ModelProvider
 from sali.twin.authority import classify_authority
 
@@ -45,6 +46,32 @@ async def _ask_model(provider: ModelProvider, name: str, synopsis: str) -> ExecA
     except Exception:  # noqa: BLE001 - interpretation is best-effort; fall back deterministically
         return None
     return _parse_tier(res.content or "")
+
+
+_CAP_SYS = (
+    "You label a Linux command-line tool with the capabilities it provides, choosing ONLY from this "
+    "fixed list (use the exact names): {vocab}. Given the tool's name and its --help text, reply with a "
+    "comma-separated list of the 1-3 best-matching capability names from the list — or 'none' if none "
+    "fit. Do not invent capabilities outside the list. Reply with ONLY the names."
+)
+
+
+async def interpret_capabilities(
+    provider: ModelProvider, name: str, synopsis: str
+) -> list[str]:
+    """Map an unmapped tool to capability slugs from the controlled vocabulary, using its --help text.
+    Only slugs that exist in CAPABILITY_VOCAB are returned (the model can't invent one); [] on failure.
+    Recorded downstream as INFERENCE-source edges, so a curated rule always out-ranks a guess (§8)."""
+    system = _CAP_SYS.format(vocab=", ".join(sorted(CAPABILITY_VOCAB)))
+    try:
+        res = await provider.chat(
+            [ChatMessage(role="system", content=system),
+             ChatMessage(role="user", content=f"Tool: {name}\n--help:\n{synopsis[:1500]}")],
+            options={"temperature": 0.0, "top_k": 40})
+    except Exception:  # noqa: BLE001 - interpretation is best-effort
+        return []
+    answer = (res.content or "").lower()
+    return [slug for slug in CAPABILITY_VOCAB if slug in answer][:3]
 
 
 async def interpret_authority(
