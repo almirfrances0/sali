@@ -33,16 +33,21 @@ def _lesson(text: str) -> FakeModelProvider:
     return FakeModelProvider(responses=[ChatResult(text, None, [], 3, 3, "fake")])
 
 
-async def test_a_substantial_run_produces_a_lesson(db_conn: Any) -> None:
+async def test_a_substantial_run_produces_a_structured_experience(db_conn: Any) -> None:
     await _run(db_conn, "deploy the app", tools=4)
     provider = _lesson("Always free port 3000 before starting the dev server.")
 
     kept = await reflect_on_recent(db_conn, provider, min_tools=3)
     assert kept == 1
     row = await db_conn.fetchrow(
-        "SELECT content, structured FROM memory WHERE structured->>'kind'='reflection'")
-    assert row is not None and "port 3000" in row["content"]
-    assert row["structured"]["certainty"] == "learned"
+        "SELECT content, layer, structured FROM memory WHERE structured->>'kind'='experience'")
+    assert row is not None and row["layer"] == "episodic"           # ONE structured experience (§36)
+    assert "port 3000" in row["structured"]["lesson"]
+    assert row["structured"]["task"] == "deploy the app"
+    assert row["structured"]["outcome"] == "success" and row["structured"]["certainty"] == "learned"
+    # no separate bare "Lesson learned" semantic is emitted (the near-duplicate is gone)
+    assert await db_conn.fetchval(
+        "SELECT count(*) FROM memory WHERE content LIKE 'Lesson learned:%'") == 0
     # a second pass does NOT re-reflect the same run
     assert await reflect_on_recent(db_conn, provider, min_tools=3) == 0
 
@@ -51,15 +56,15 @@ async def test_trivial_runs_are_not_reflected_on(db_conn: Any) -> None:
     await _run(db_conn, "hi", tools=1)  # below the tool threshold
     assert await reflect_on_recent(db_conn, _lesson("x"), min_tools=3) == 0
     assert await db_conn.fetchval(
-        "SELECT count(*) FROM memory WHERE structured->>'kind'='reflection'") == 0
+        "SELECT count(*) FROM memory WHERE structured->>'kind'='experience'") == 0
 
 
-async def test_none_keeps_nothing_but_marks_the_run(db_conn: Any) -> None:
-    run_id = await _run(db_conn, "listed some files", tools=3)
+async def test_clean_run_with_no_lesson_keeps_nothing_but_marks_it(db_conn: Any) -> None:
+    run_id = await _run(db_conn, "listed some files", tools=3)  # all succeed, no errors
     kept = await reflect_on_recent(db_conn, _lesson("none"), min_tools=3)
     assert kept == 0
     assert await db_conn.fetchval(
-        "SELECT count(*) FROM memory WHERE structured->>'kind'='reflection'") == 0
+        "SELECT count(*) FROM memory WHERE structured->>'kind'='experience'") == 0
     # still marked reflected, so it isn't retried forever
     marked = await db_conn.fetchval(
         "SELECT count(*) FROM event WHERE event_type='learning.reflected' AND subject_id=$1", run_id)
