@@ -22,6 +22,7 @@ from sali.core.enums import (
     MemoryLayer,
     MemorySource,
     compare_sources,
+    contradiction_lifecycle,
     source_priority,
 )
 from sali.core.errors import SaliError
@@ -268,16 +269,18 @@ async def _record_memory_contradiction(
     new_source: MemorySource,
     resolution: str,
 ) -> None:
+    # Memory facts have no automatic re-observer, so we never leave one 'open' (it would never close).
+    # But a fact settled by a live inspection is honestly labelled 'verification', not a priority guess.
+    _, resolved_by = contradiction_lifecycle(old_source, new_source, verifiable=False)
     await conn.execute(
         "INSERT INTO contradiction (subject_type, old_id, new_id, status, old_source, new_source, "
         "  old_priority, new_priority, resolution, resolved_by, resolved_at) "
-        "VALUES ('memory',$1,$2,'resolved',$3::memory_source,$4::memory_source,$5,$6,$7,"
-        "  'evidence_priority', now())",
+        "VALUES ('memory',$1,$2,'resolved',$3::memory_source,$4::memory_source,$5,$6,$7,$8,now())",
         old_id, new_id, old_source.value, new_source.value,
-        source_priority(old_source), source_priority(new_source), resolution,
+        source_priority(old_source), source_priority(new_source), resolution, resolved_by,
     )
     await conn.execute(
         "INSERT INTO event (event_type, subject_type, subject_id, payload) "
         "VALUES ('memory.contradiction','memory',$1,$2)",
-        old_id, {"resolution": resolution, "new_id": str(new_id)},
+        old_id, {"resolution": resolution, "new_id": str(new_id), "resolved_by": resolved_by},
     )

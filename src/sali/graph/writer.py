@@ -15,7 +15,13 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sali.core.enums import MemorySource, compare_sources, source_priority
+from sali.core.enums import (
+    MemorySource,
+    compare_sources,
+    contradiction_lifecycle,
+    is_observation,
+    source_priority,
+)
 from sali.graph.models import ContradictionOutcome, Edge, Node, row_to_edge, row_to_node
 
 
@@ -122,6 +128,10 @@ async def set_fact(
             "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", f"gedge:{src_id}:{rel_type}"
         )
         effective_at = at if at is not None else await conn.fetchval("SELECT now()")
+        # A fresh live look at this slot settles any open contradiction about it — the "then verify"
+        # step (§20/§25). Runs whether or not the observed value changed (it may just confirm).
+        if is_observation(source):
+            await _verify_open_by_observation(conn, src_id, rel_type, effective_at)
         current = await conn.fetch(
             "SELECT * FROM graph_edge WHERE src_id=$1 AND rel_type=$2 "
             "  AND valid_until IS NULL AND superseded_by IS NULL FOR UPDATE",
@@ -204,17 +214,43 @@ async def _record_contradiction(
     new_source: MemorySource,
     resolution: str,
 ) -> UUID:
+    # A graph fact is VERIFIABLE — the twin re-observes the machine — so a priority-only resolution
+    # of an observable slot stays 'open' until a live re-observation settles it (§20/§25).
+    status, resolved_by = contradiction_lifecycle(old_source, new_source, verifiable=True)
     cid: UUID = await conn.fetchval(
         "INSERT INTO contradiction (subject_type, old_id, new_id, status, old_source, new_source, "
         "  old_priority, new_priority, resolution, resolved_by, resolved_at) "
-        "VALUES ($1,$2,$3,'resolved',$4::memory_source,$5::memory_source,$6,$7,$8,"
-        "  'evidence_priority', now()) RETURNING id",
-        subject_type, old_id, new_id, old_source.value, new_source.value,
-        source_priority(old_source), source_priority(new_source), resolution,
+        "VALUES ($1,$2,$3,$4::contradiction_status,$5::memory_source,$6::memory_source,$7,$8,$9,$10,"
+        "  CASE WHEN $11 THEN now() ELSE NULL END) RETURNING id",
+        subject_type, old_id, new_id, status, old_source.value, new_source.value,
+        source_priority(old_source), source_priority(new_source), resolution, resolved_by,
+        status != "open",
     )
     await conn.execute(
         "INSERT INTO event (event_type, subject_type, subject_id, payload) "
         "VALUES ('memory.contradiction', $1, $2, $3)",
-        subject_type, old_id, {"resolution": resolution, "contradiction_id": str(cid)},
+        subject_type, old_id,
+        {"resolution": resolution, "contradiction_id": str(cid), "status": status},
     )
     return cid
+
+
+async def _verify_open_by_observation(
+    conn: Any, src_id: UUID, rel_type: str, at: datetime
+) -> None:
+    """A live re-observation of this slot just happened — settle any OPEN contradiction about it by
+    VERIFICATION (§20/§25 'then verify'). This is what closes the loop: a priority guess becomes a
+    checked fact once the machine is actually re-inspected."""
+    rows = await conn.fetch(
+        "UPDATE contradiction SET status='resolved', resolved_by='verification', resolved_at=$3 "
+        "WHERE status='open' AND subject_type='graph_edge' AND ("
+        "  old_id IN (SELECT id FROM graph_edge WHERE src_id=$1 AND rel_type=$2) OR "
+        "  new_id IN (SELECT id FROM graph_edge WHERE src_id=$1 AND rel_type=$2)) RETURNING id",
+        src_id, rel_type, at,
+    )
+    for row in rows:
+        await conn.execute(
+            "INSERT INTO event (event_type, subject_type, subject_id, payload) "
+            "VALUES ('memory.verified', 'graph_edge', $1, $2)",
+            src_id, {"contradiction_id": str(row["id"]), "by": "observation"},
+        )

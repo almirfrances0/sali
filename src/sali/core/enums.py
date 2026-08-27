@@ -83,3 +83,31 @@ def compare_sources(new: MemorySource, old: MemorySource) -> str:
     if new_p < old_p:
         return "old"
     return "tie"
+
+
+# Sources that come from directly INSPECTING reality (not a claim about it) — a live look.
+_OBSERVED = frozenset({MemorySource.SYSTEM_OBSERVATION, MemorySource.FILE_OBSERVATION})
+
+
+def is_observation(source: MemorySource) -> bool:
+    """True if this source is a direct inspection of reality (vs a claim about it) — the thing that
+    can VERIFY a contested fact rather than merely out-rank it by priority."""
+    return source in _OBSERVED
+
+
+def contradiction_lifecycle(
+    old_source: MemorySource, new_source: MemorySource, *, verifiable: bool
+) -> tuple[str, str]:
+    """How a contradiction should be recorded (spec §20/§25 'create CONTRADICTION, then verify').
+
+    Returns (status, resolved_by):
+    - a live inspection just settled it              → ('resolved', 'verification')
+    - a system-OBSERVABLE slot resolved only by      → ('open', 'evidence_priority')
+      priority, and something can re-inspect it later   (a best guess, flagged to verify by re-observation)
+    - not checkable against reality                  → ('resolved', 'evidence_priority')  (priority is final)
+    """
+    if new_source in _OBSERVED:
+        return "resolved", "verification"
+    if verifiable and old_source in _OBSERVED:
+        return "open", "evidence_priority"
+    return "resolved", "evidence_priority"

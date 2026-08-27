@@ -44,6 +44,11 @@ async def health(pool: Any) -> dict[str, Any]:
         contradictions = {
             "total": await conn.fetchval("SELECT count(*) FROM contradiction"),
             "open": await conn.fetchval("SELECT count(*) FROM contradiction WHERE status = 'open'"),
+            "verified": await conn.fetchval(
+                "SELECT count(*) FROM contradiction WHERE resolved_by = 'verification'"),
+            "by_priority": await conn.fetchval(
+                "SELECT count(*) FROM contradiction WHERE resolved_by = 'evidence_priority' "
+                "AND status = 'resolved'"),
         }
         events = await conn.fetchval("SELECT count(*) FROM event")
     return {"memory": memory, "graph": graph, "contradictions": contradictions, "events": events}

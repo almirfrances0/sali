@@ -112,3 +112,54 @@ async def test_relate_is_idempotent(db_conn: Any) -> None:
     e2 = await writer.relate(db_conn, src_id=x.id, dst_id=y.id, rel_type="contains",
                              source=MemorySource.USER_EXPLICIT)
     assert e1.id == e2.id
+
+
+# ── contradiction verify-loop (§20/§25): open on a priority guess, close by re-observation ──
+
+async def test_priority_conflict_on_observable_slot_opens_then_verifies(db_conn: Any) -> None:
+    ollama = await _node(db_conn, "e:ov", "Ollama")
+    v1 = await _node(db_conn, "e:v1", "0.32")
+    v2 = await _node(db_conn, "e:v2", "0.33")
+    v3 = await _node(db_conn, "e:v3", "0.34")
+    # the machine established the slot; then a user CLAIMS a different version
+    await writer.set_fact(db_conn, src_id=ollama.id, rel_type="has_version", dst_id=v1.id,
+                          source=MemorySource.SYSTEM_OBSERVATION)
+    await writer.set_fact(db_conn, src_id=ollama.id, rel_type="has_version", dst_id=v2.id,
+                          source=MemorySource.USER_EXPLICIT)
+    # priority kept the observation, but the conflict is OPEN — verify against the machine, don't guess
+    assert await db_conn.fetchval("SELECT count(*) FROM contradiction WHERE status='open'") == 1
+
+    # the machine is re-observed → the open contradiction is SETTLED BY VERIFICATION (§20 'then verify')
+    await writer.set_fact(db_conn, src_id=ollama.id, rel_type="has_version", dst_id=v3.id,
+                          source=MemorySource.SYSTEM_OBSERVATION)
+    assert await db_conn.fetchval("SELECT count(*) FROM contradiction WHERE status='open'") == 0
+    assert await db_conn.fetchval(
+        "SELECT count(*) FROM contradiction WHERE resolved_by='verification'") >= 1
+
+
+async def test_observation_driven_conflict_resolves_by_verification_immediately(db_conn: Any) -> None:
+    gpu = await _node(db_conn, "e:gpu", "GPU")
+    guess = await _node(db_conn, "e:guess", "guessed")
+    actual = await _node(db_conn, "e:actual", "actual")
+    await writer.set_fact(db_conn, src_id=gpu.id, rel_type="is", dst_id=guess.id,
+                          source=MemorySource.INFERENCE)
+    await writer.set_fact(db_conn, src_id=gpu.id, rel_type="is", dst_id=actual.id,
+                          source=MemorySource.SYSTEM_OBSERVATION)  # a live look settles it now
+    row = await db_conn.fetchrow(
+        "SELECT status, resolved_by FROM contradiction WHERE subject_type='graph_edge' "
+        "ORDER BY created_at DESC LIMIT 1")
+    assert row["status"] == "resolved" and row["resolved_by"] == "verification"
+
+
+async def test_non_observable_conflict_stays_evidence_priority(db_conn: Any) -> None:
+    topic = await _node(db_conn, "e:np", "topic")
+    a = await _node(db_conn, "e:p1", "one")
+    b = await _node(db_conn, "e:p2", "two")
+    await writer.set_fact(db_conn, src_id=topic.id, rel_type="is", dst_id=a.id,
+                          source=MemorySource.CONVERSATION)
+    await writer.set_fact(db_conn, src_id=topic.id, rel_type="is", dst_id=b.id,
+                          source=MemorySource.INFERENCE)  # neither side is a live look
+    row = await db_conn.fetchrow(
+        "SELECT status, resolved_by FROM contradiction WHERE subject_type='graph_edge' "
+        "ORDER BY created_at DESC LIMIT 1")
+    assert row["status"] == "resolved" and row["resolved_by"] == "evidence_priority"

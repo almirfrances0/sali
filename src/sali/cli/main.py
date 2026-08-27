@@ -55,7 +55,8 @@ async def _memory_status(settings: Settings) -> None:
         console.print(f"  {layer:12s} {n}")
     console.print(f"[bold]Graph[/] — {g['nodes']} nodes, {g['edges']} edges "
                   f"({g['historical_edges']} historical), {g['orphan_nodes']} orphans")
-    console.print(f"[bold]Contradictions[/] — {c['total']} total, {c['open']} open  "
+    console.print(f"[bold]Contradictions[/] — {c['total']} total, {c['open']} open, "
+                  f"{c.get('verified', 0)} verified, {c.get('by_priority', 0)} by-priority  "
                   f"[bold]Events[/] — {h['events']}")
     soft = []
     if m["unverified"]:
