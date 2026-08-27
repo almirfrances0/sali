@@ -58,6 +58,47 @@ class Capability(StrEnum):
     DESTRUCTIVE = "destructive"
 
 
+class ExecAuthority(StrEnum):
+    """The execution-authority tier of a *discovered* external tool (spec §34/§35).
+
+    It is computed OUTSIDE the model and stored immutably (`tool_authority`); the model can request
+    a tool but never redefine its tier. The tier maps to a `RiskLevel`/`Capability` set (below) so
+    the single `PolicyEngine.decide()` gate enforces it — this is a mapping, not a second gate.
+    Kept in lockstep with the SQL CHECK on `tool_authority.authority`.
+    """
+
+    NORMAL = "normal"                    # everyday tooling — runs freely (the 'freedom' default)
+    ELEVATED = "elevated"                # meaningful/dangerous — still autonomous under policy
+    SYSTEM_CRITICAL = "system_critical"  # destructive/irreversible — the immutable boundary (confirm)
+
+
+# Authority → declared RiskLevel. Only R4 is gated (freedom policy auto-allows R0–R3), so
+# SYSTEM_CRITICAL → R4 is exactly the immutable boundary; NORMAL/ELEVATED stay autonomous. This is a
+# coarse per-tool FLOOR — a wrapper's per-call assess() may still refine the risk of a given call.
+_AUTHORITY_RISK: dict[ExecAuthority, RiskLevel] = {
+    ExecAuthority.NORMAL: RiskLevel.R2,
+    ExecAuthority.ELEVATED: RiskLevel.R3,
+    ExecAuthority.SYSTEM_CRITICAL: RiskLevel.R4,
+}
+
+
+def authority_risk(authority: ExecAuthority) -> RiskLevel:
+    """The RiskLevel the single policy gate should enforce for a tool of this authority tier."""
+    return _AUTHORITY_RISK[authority]
+
+
+def authority_capabilities(authority: ExecAuthority) -> frozenset[Capability]:
+    """Security capabilities a tier implies. Every discovered tool can EXECUTE; SYSTEM_CRITICAL
+    activates Capability.SYSTEM (the immutable-boundary anchor) plus DESTRUCTIVE; ELEVATED marks
+    SYSTEM without DESTRUCTIVE. The policy's DESTRUCTIVE/SYSTEM floors then apply automatically."""
+    caps = {Capability.EXECUTE}
+    if authority is ExecAuthority.SYSTEM_CRITICAL:
+        caps |= {Capability.SYSTEM, Capability.DESTRUCTIVE}
+    elif authority is ExecAuthority.ELEVATED:
+        caps |= {Capability.SYSTEM}
+    return frozenset(caps)
+
+
 _SOURCE_PRIORITY: dict[MemorySource, int] = {
     MemorySource.SYSTEM_OBSERVATION: 100,
     MemorySource.FILE_OBSERVATION: 100,
