@@ -68,3 +68,18 @@ load · quiet-when-idle · terminal/web parity.
   - `/stream` (live WS) → smoke event arrived with `api_key` **redacted**, plus a real daemon `tool.failed`
     — the genuine firehose, redacted at the boundary (§34).
   - TODO (Phase D): a systemd unit for `sali serve` (prod runs the daemon, not the API yet).
+- **Phase B + C DONE (frontend cockpit)** — Vite+React+TS+Tailwind under `web/`, R3F brain, Zustand store
+  fed by both live streams, TanStack Query snapshots. `npm run build` + `tsc --noEmit` green (0 errors).
+  Live-verified via headless Chromium against the running backend:
+  - The full cockpit renders on ONE screen (no scroll): TopBar (SALI ● Thinking — a real daemon run),
+    World (real machine/kernel/model/workspace + live commands/files), Attention (real tiers), Activity
+    (honest quiet state), Tasks, Chat.
+  - **The brain renders the REAL graph in WebGL** — Kali as the central hub wired to its models, running
+    services (docker/ssh/postgresql/ollama), and projects; degree-ranked core, 2477 tools collapsed.
+  - **`/ws` live round-trip proven**: typing "what postgres runs here" surfaced a real retrieval hunch
+    ("Services running: postgresql (running), ollama (running), docker…") — no model turn, no console errors.
+  - Components built: Brain (data-driven activation on real retrieval frames), Chat (continuous session,
+    tool/thinking/token stream, sense hunches, confirm modal), Activity (firehose, click→inspect), World,
+    Attention, Tasks, Presence, Memory/node Inspector (provenance "why Sali knows this"), Proactive toasts.
+  - Remaining polish: a dedicated Tools catalog panel; brain neighborhood-expand on node click; ARIA pass;
+    prod systemd unit for `sali serve`.
