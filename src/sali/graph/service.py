@@ -10,7 +10,14 @@ from uuid import UUID
 from sali.core.enums import MemorySource
 from sali.graph import traverse as _traverse
 from sali.graph import writer as _writer
-from sali.graph.models import ContradictionOutcome, Edge, Node, Resolution
+from sali.graph.models import (
+    ContradictionOutcome,
+    Edge,
+    Node,
+    Resolution,
+    row_to_edge,
+    row_to_node,
+)
 
 # Canonical-entity-type priority for tie-breaking name resolution: a first-class entity Sali reasons
 # about (its own agent node, the person, the machine, its model) outranks incidental nodes that merely
@@ -108,8 +115,6 @@ class GraphService:
     async def find_by_name(self, name: str, *, limit: int = 5) -> list[Node]:
         """Map a surface form ('my VPS', 'project-x', 'me', 'Ollama') to CURRENT nodes, best-first and
         deterministically (see ``_ranked_rows``)."""
-        from sali.graph.models import row_to_node
-
         async with self.pool.acquire() as conn:
             rows = await self._ranked_rows(conn, name, limit)
         return [row_to_node(r) for r in rows]
@@ -117,8 +122,6 @@ class GraphService:
     async def resolve(self, name: str, *, limit: int = 8) -> Resolution:
         """Resolve a surface form AND explain it (§5/§6): the chosen node, how it matched, and the other
         entities the same name matched (ambiguity). Used so a graph query is traceable, never a mystery."""
-        from sali.graph.models import row_to_node
-
         async with self.pool.acquire() as conn:
             rows = await self._ranked_rows(conn, name, limit)
         if not rows:
@@ -140,6 +143,55 @@ class GraphService:
         async with self.pool.acquire() as conn:
             return await _traverse.get_node(conn, node_type, canonical_key, as_of=as_of)
 
+    async def get(self, node_id: UUID) -> Node | None:
+        """Fetch one current node by id — the brain viz clicks a node by UUID (get_node needs a key)."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM graph_node WHERE id=$1 AND valid_until IS NULL", node_id)
+        return row_to_node(row) if row is not None else None
+
+    async def snapshot(self, *, limit: int = 250) -> dict[str, list[Any]]:
+        """A bounded, importance-ranked slice of the CURRENT graph (nodes + the edges among them) for
+        the brain's initial load — never the whole hairball. Strongest/most-recently-seen nodes first."""
+        limit = max(1, min(limit, 2000))
+        async with self.pool.acquire() as conn:
+            nodes = await conn.fetch(
+                "SELECT * FROM graph_node WHERE valid_until IS NULL "
+                "ORDER BY confidence DESC, last_seen DESC, id LIMIT $1", limit)
+            ids = [n["id"] for n in nodes]
+            edges = await conn.fetch(
+                "SELECT * FROM graph_edge WHERE valid_until IS NULL AND superseded_by IS NULL "
+                "AND src_id = ANY($1) AND dst_id = ANY($1)", ids)
+        return {"nodes": [row_to_node(n) for n in nodes],
+                "edges": [row_to_edge(e) for e in edges]}
+
+    async def subgraph(self, node_id: UUID, *, depth: int = 1, limit: int = 80) -> dict[str, list[Any]]:
+        """The BIDIRECTIONAL neighborhood around a node (full nodes AND edges, both directions) out to
+        `depth` hops — for click-to-expand. neighbors()/traverse() are outbound-only and edge-less, so
+        this is the shape the graph view actually needs to draw a subgraph."""
+        depth = max(1, min(depth, 3))
+        limit = max(1, min(limit, 500))
+        async with self.pool.acquire() as conn:
+            reached = await conn.fetch(
+                "WITH RECURSIVE reach(id, d) AS ("
+                "  SELECT $1::uuid, 0 "
+                "  UNION "
+                "  SELECT CASE WHEN e.src_id = r.id THEN e.dst_id ELSE e.src_id END, r.d + 1 "
+                "  FROM reach r JOIN graph_edge e "
+                "    ON (e.src_id = r.id OR e.dst_id = r.id) "
+                "   AND e.valid_until IS NULL AND e.superseded_by IS NULL "
+                "  WHERE r.d < $2"
+                ") SELECT DISTINCT id FROM reach LIMIT $3",
+                node_id, depth, limit)
+            ids = [r["id"] for r in reached]
+            nodes = await conn.fetch(
+                "SELECT * FROM graph_node WHERE id = ANY($1) AND valid_until IS NULL", ids)
+            edges = await conn.fetch(
+                "SELECT * FROM graph_edge WHERE valid_until IS NULL AND superseded_by IS NULL "
+                "AND src_id = ANY($1) AND dst_id = ANY($1)", ids)
+        return {"nodes": [row_to_node(n) for n in nodes],
+                "edges": [row_to_edge(e) for e in edges]}
+
     async def names_for(self, ids: Sequence[UUID]) -> dict[UUID, str]:
         """Resolve node ids to names in one query — for naming the targets of a history timeline."""
         if not ids:
@@ -155,8 +207,6 @@ class GraphService:
                 "SELECT * FROM graph_edge WHERE src_id=$1 AND rel_type=$2 ORDER BY valid_from",
                 src_id, rel_type,
             )
-        from sali.graph.models import row_to_edge
-
         return [row_to_edge(r) for r in rows]
 
 

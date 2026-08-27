@@ -20,6 +20,10 @@ class ToolRegistry:
         """Specs offered to the model — available tools only (discover-on-install stays hidden)."""
         return [t.spec() for t in self._tools.values() if t.available]
 
+    def tools(self, *, available_only: bool = True) -> list[Tool]:
+        """The registered Tool objects (for a read-only catalog view — name, risk, capabilities)."""
+        return [t for t in self._tools.values() if t.available or not available_only]
+
     def __len__(self) -> int:
         return len(self._tools)
 

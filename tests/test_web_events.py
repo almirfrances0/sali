@@ -13,11 +13,10 @@ from typing import Any
 import pytest
 
 from sali.core.ids import new_id
-from sali.provider.base import ChatResult, ToolCall
+from sali.provider.base import ChatResult
 from sali.provider.fake import FakeModelProvider
 from sali.runtime.self_state import SelfStateStore
 from sali.tasks.store import TaskStore
-
 from tests.test_agent_loop import _loop  # reuse the wired AgentLoop builder
 
 pytestmark = pytest.mark.db

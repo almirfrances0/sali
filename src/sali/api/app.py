@@ -12,13 +12,23 @@ back a ``sense`` event — so the UI can show it noticing while you're still typ
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
+from sali.api.routes import add_routes, add_stream_route
 from sali.core.ids import new_id
 from sali.runtime.session import persistent_session_id
 from sali.security.redact import redact, redact_obj
+
+# The built SPA (web/dist), served same-origin so the whole cockpit is one process, one origin.
+_WEB_DIST = Path(__file__).resolve().parents[3] / "web" / "dist"
 
 
 class WSConfirmer:
@@ -50,7 +60,26 @@ class WSConfirmer:
 
 
 def create_app(kernel: Any) -> FastAPI:
-    app = FastAPI(title="Sali", docs_url=None, redoc_url=None)
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # Build the read facades + start the ONE shared event-fan-out hub for all browser clients.
+        from sali.api.services import WebServices
+
+        app.state.services = await WebServices.create(kernel)
+        try:
+            yield
+        finally:
+            with contextlib.suppress(Exception):
+                await app.state.services.stop()
+
+    app = FastAPI(title="Sali", docs_url=None, redoc_url=None, lifespan=lifespan)
+    # Localhost trust model (peer-auth datastore, no added auth gate — freedom, not restricted): allow
+    # the Vite dev server and same-origin, any localhost port. The API is never bound beyond loopback.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+        allow_methods=["*"], allow_headers=["*"], allow_credentials=True,
+    )
 
     @app.get("/health")
     async def health() -> dict[str, bool]:
@@ -117,5 +146,12 @@ def create_app(kernel: Any) -> FastAPI:
             for task in sensing.values():
                 task.cancel()
             await loop.aclose()  # release the per-connection loop's resources (Sali's browser, etc.)
+
+    # Read snapshots + the live firehose bridge, on the SAME app. Registered BEFORE the static mount
+    # so /health, /ws, /api/*, /stream win over the SPA catch-all.
+    add_routes(app)
+    add_stream_route(app)
+    if _WEB_DIST.is_dir():  # serve the built cockpit same-origin (absent during backend-only dev)
+        app.mount("/", StaticFiles(directory=str(_WEB_DIST), html=True), name="web")
 
     return app
