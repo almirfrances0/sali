@@ -148,6 +148,7 @@ async def test_world_snapshot_with_resources(live_pool: Any) -> None:
 
     ws = await WorldStateBuilder(live_pool).snapshot(with_resources=True)
     # /proc-backed readings are always available on Linux; gpu is optional (may be None without a GPU)
-    assert ws.cpu_mem and "MiB" in ws.cpu_mem
-    assert ws.disk and "GiB" in ws.disk
+    assert ws.memory and ws.memory["total_mib"] > 0
+    assert ws.disk and ws.disk["total_gib"] > 0
+    assert ws.cpu_pct is not None and ws.processes and ws.processes > 0
     assert "Memory:" in ws.render() and "Disk:" in ws.render()

@@ -7,6 +7,7 @@ These let the loop answer "what is true *right now*" instead of trusting stale m
 
 from __future__ import annotations
 
+import asyncio
 import platform
 import shutil
 from pathlib import Path
@@ -69,6 +70,42 @@ def read_disk(path: str = "/") -> dict[str, Any]:
         "path": path, "total_gib": round(usage.total / gib, 1), "used_gib": round(usage.used / gib, 1),
         "free_gib": round(usage.free / gib, 1), "percent_used": round(usage.used / usage.total * 100, 1),
     }
+
+
+async def read_cpu() -> float:
+    """Overall CPU utilisation % from a short /proc/stat delta (deterministic, ~120ms)."""
+    def sample() -> tuple[int, int]:
+        parts = Path("/proc/stat").read_text().splitlines()[0].split()[1:]
+        vals = [int(x) for x in parts]
+        idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
+        return sum(vals), idle
+    t0, i0 = sample()
+    await asyncio.sleep(0.12)
+    t1, i1 = sample()
+    dt = t1 - t0
+    return round(100.0 * (1 - (i1 - i0) / dt), 1) if dt > 0 else 0.0
+
+
+def read_uptime() -> int:
+    return int(float(Path("/proc/uptime").read_text().split()[0]))
+
+
+def read_processes() -> int:
+    return sum(1 for p in Path("/proc").iterdir() if p.name.isdigit())
+
+
+def read_listen_ports() -> int:
+    """Count distinct listening TCP ports (state 0A) from /proc/net/tcp{,6}."""
+    ports: set[str] = set()
+    for f in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            for line in Path(f).read_text().splitlines()[1:]:
+                cols = line.split()
+                if len(cols) > 3 and cols[3] == "0A":
+                    ports.add(cols[1].split(":")[1])
+        except OSError:
+            continue
+    return len(ports)
 
 
 async def read_gpu() -> dict[str, Any] | None:
