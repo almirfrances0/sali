@@ -215,6 +215,7 @@ export function Brain(): JSX.Element {
     queryFn: () => api.graphSnapshot(220),
     staleTime: 30_000,
   })
+  const setToolsOpen = useStore((s) => s.setToolsOpen)
   const collapsed = data?.collapsed ?? {}
   const collapsedCount = Object.values(collapsed).reduce((a, b) => a + b, 0)
 
@@ -226,7 +227,14 @@ export function Brain(): JSX.Element {
           data ? (
             <span className="font-mono text-2xs text-faint">
               {data.nodes.length} entities · {data.edges.length} links
-              {collapsedCount > 0 ? ` · ${collapsedCount} tools clustered` : ''}
+              {collapsedCount > 0 && (
+                <>
+                  {' · '}
+                  <button onClick={() => setToolsOpen(true)} className="text-accent-dim hover:text-accent">
+                    {collapsedCount} tools ▸
+                  </button>
+                </>
+              )}
             </span>
           ) : null
         }

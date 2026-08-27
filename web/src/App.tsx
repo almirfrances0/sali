@@ -10,6 +10,7 @@ import { Inspector } from './components/memory/Inspector'
 import { Proactive } from './components/system/Proactive'
 import { TopBar } from './components/system/TopBar'
 import { Tasks } from './components/tasks/Tasks'
+import { ToolsOverlay } from './components/tools/ToolsOverlay'
 import { World } from './components/world/World'
 import { useStore } from './stores/store'
 import { useEventStream } from './websocket/useEventStream'
@@ -77,6 +78,7 @@ export default function App(): JSX.Element {
 
       <Inspector />
       <Proactive />
+      <ToolsOverlay />
       <ConfirmModal />
     </div>
   )

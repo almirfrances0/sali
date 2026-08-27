@@ -38,6 +38,7 @@ interface StoreState {
   // ui
   selection: Selection | null
   focus: string | null // which region is dominant (null = balanced cockpit)
+  toolsOpen: boolean // the tool-catalog overlay (Sali's hands — §20/§21)
 
   // firehose actions
   ingestEvents: (evs: SaliEvent[]) => void
@@ -51,6 +52,7 @@ interface StoreState {
   // ui actions
   select: (s: Selection | null) => void
   setFocus: (f: string | null) => void
+  setToolsOpen: (b: boolean) => void
 }
 
 function newId(): string {
@@ -69,6 +71,7 @@ export const useStore = create<StoreState>((set) => ({
   confirm: null,
   selection: null,
   focus: null,
+  toolsOpen: false,
 
   ingestEvents: (evs) =>
     set((st) => {
@@ -172,6 +175,7 @@ export const useStore = create<StoreState>((set) => ({
   resolveConfirm: () => set({ confirm: null }),
   select: (s) => set({ selection: s }),
   setFocus: (f) => set({ focus: f }),
+  setToolsOpen: (b) => set({ toolsOpen: b }),
 }))
 
 export function presenceColor(p: Presence | undefined): string {
