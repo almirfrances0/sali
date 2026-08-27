@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
@@ -70,6 +71,24 @@ class GraphService:
     async def set_fact(self, **kwargs: Any) -> tuple[Edge, ContradictionOutcome | None]:
         async with self.pool.acquire() as conn:
             return await _writer.set_fact(conn, **kwargs)
+
+    async def reach_host(
+        self, host: str, *, source: MemorySource = MemorySource.SYSTEM_OBSERVATION
+    ) -> None:
+        """Record that Sali can reach a REMOTE host — NOT its home (§9). Mints a distinct node
+        ``host:<slug>`` (node_type 'host', never marked is_self) and an ``agent:sali --can_access-->
+        host`` edge, so a VPS is a separate entity whose state can never merge with the local machine's
+        (which is the only node marked is_self/home). Slug matches the ssh vault-ref convention."""
+        hostname = host.rsplit("@", 1)[-1].split()[0] if host else ""
+        slug = re.sub(r"[^a-z0-9]+", "_", hostname.lower()).strip("_") or "host"
+        async with self.pool.acquire() as conn, conn.transaction():
+            sali = await _writer.ensure_node(
+                conn, node_type="agent", name="Sali", canonical_key="agent:sali", source=source)
+            node = await _writer.ensure_node(
+                conn, node_type="host", name=hostname or host, canonical_key=f"host:{slug}",
+                source=source, confidence=0.9, props={"is_self": "false", "role": "remote"})
+            await _writer.relate(
+                conn, src_id=sali.id, dst_id=node.id, rel_type="can_access", source=source)
 
     async def neighbors(
         self, node_id: UUID, *, rel_types: Sequence[str] | None = None, as_of: datetime | None = None

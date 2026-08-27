@@ -17,6 +17,9 @@ class _FakeGraph:
                    confidence: float = 0.6) -> None:
         self.links.append((subject, relation, obj, source, confidence))
 
+    async def reach_host(self, host: str) -> None:
+        self.links.append(("Sali", "can_access", host, MemorySource.SYSTEM_OBSERVATION, 0.9))
+
 
 def _ctx(graph: _FakeGraph | None) -> ToolContext:
     return ToolContext(settings=Settings(), clock=SystemClock(), graph=graph)

@@ -8,6 +8,7 @@ uses), so an unattended run won't wipe a server. Host is a ~/.ssh/config alias o
 
 from __future__ import annotations
 
+import contextlib
 import re
 from typing import Any
 
@@ -75,10 +76,15 @@ class SshRun(Tool):
             return ToolResult(ok=False, display="need host + command",
                               error="host and command are required")
         res = await ctx.remote.run(host, command, password=password)
+        if res.ok and ctx.graph is not None:
+            # First reach of a remote host — record it as a DISTINCT host node Sali can_access, so a VPS
+            # is never conflated with the local home machine (§9). Best-effort; never breaks the tool.
+            with contextlib.suppress(Exception):
+                await ctx.graph.reach_host(host)
         return ToolResult(
             ok=res.ok,
-            output={"host": res.host, "returncode": res.returncode,
-                    "stdout": res.stdout[:_MAX], "stderr": res.stderr[:_MAX]},
+            output={"host": res.host, "returncode": res.returncode, "source": "live_observation",
+                    "host_id": res.host, "stdout": res.stdout[:_MAX], "stderr": res.stderr[:_MAX]},
             display=f"{host}: exit {res.returncode}",
             error=None if res.ok else (res.stderr.strip()[:300] or "ssh failed"),
         )

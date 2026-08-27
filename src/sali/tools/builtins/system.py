@@ -46,6 +46,50 @@ class SystemInfo(Tool):
         return ToolResult(ok=True, output=out, display=f"{distro or uname.system} · {uname.release}")
 
 
+# Deterministic metric bodies, factored out so the World-State (runtime/world_state.py) reads them from
+# the SAME source as these tools — no duplicate /proc parsing / nvidia-smi handling (§92).
+def read_memory() -> dict[str, int]:
+    fields: dict[str, int] = {}
+    for line in Path("/proc/meminfo").read_text().splitlines():
+        key, _, rest = line.partition(":")
+        fields[key] = int(rest.strip().split()[0])  # kB
+    total = fields["MemTotal"] // 1024
+    avail = fields.get("MemAvailable", fields["MemFree"]) // 1024
+    return {
+        "total_mib": total, "available_mib": avail, "used_mib": total - avail,
+        "swap_total_mib": fields.get("SwapTotal", 0) // 1024,
+        "swap_used_mib": (fields.get("SwapTotal", 0) - fields.get("SwapFree", 0)) // 1024,
+    }
+
+
+def read_disk(path: str = "/") -> dict[str, Any]:
+    usage = shutil.disk_usage(path)
+    gib = 1024**3
+    return {
+        "path": path, "total_gib": round(usage.total / gib, 1), "used_gib": round(usage.used / gib, 1),
+        "free_gib": round(usage.free / gib, 1), "percent_used": round(usage.used / usage.total * 100, 1),
+    }
+
+
+async def read_gpu() -> dict[str, Any] | None:
+    """Live GPU stats via nvidia-smi, or None if unavailable (no GPU / not installed / timeout)."""
+    argv = [
+        "nvidia-smi",
+        "--query-gpu=name,memory.total,memory.used,utilization.gpu,temperature.gpu",
+        "--format=csv,noheader,nounits",
+    ]
+    try:
+        rc, out, _err = await run_argv(argv, timeout=8.0)
+    except (CommandTimeout, FileNotFoundError):
+        return None
+    if rc != 0 or not out.strip():
+        return None
+    fields = [c.strip() for c in out.splitlines()[0].split(",")]
+    total, used, util, temp = (_as_int(fields[i]) if i < len(fields) else None for i in (1, 2, 3, 4))
+    return {"name": fields[0] if fields else "unknown", "vram_total_mib": total,
+            "vram_used_mib": used, "gpu_util_percent": util, "temperature_c": temp}
+
+
 class MemoryInfo(Tool):
     name = "memory_info"
     description = "Current RAM and swap usage (total/available/used), in MiB."
@@ -53,19 +97,7 @@ class MemoryInfo(Tool):
     risk_level = RiskLevel.R0
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        fields: dict[str, int] = {}
-        for line in Path("/proc/meminfo").read_text().splitlines():
-            key, _, rest = line.partition(":")
-            fields[key] = int(rest.strip().split()[0])  # kB
-        total = fields["MemTotal"] // 1024
-        avail = fields.get("MemAvailable", fields["MemFree"]) // 1024
-        out = {
-            "total_mib": total,
-            "available_mib": avail,
-            "used_mib": total - avail,
-            "swap_total_mib": fields.get("SwapTotal", 0) // 1024,
-            "swap_used_mib": (fields.get("SwapTotal", 0) - fields.get("SwapFree", 0)) // 1024,
-        }
+        out = read_memory()
         return ToolResult(ok=True, output=out, display=f"{out['available_mib']} MiB available")
 
 
@@ -80,17 +112,8 @@ class DiskInfo(Tool):
     risk_level = RiskLevel.R0
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        path = str(args.get("path") or "/")
-        usage = shutil.disk_usage(path)
-        gib = 1024**3
-        out = {
-            "path": path,
-            "total_gib": round(usage.total / gib, 1),
-            "used_gib": round(usage.used / gib, 1),
-            "free_gib": round(usage.free / gib, 1),
-            "percent_used": round(usage.used / usage.total * 100, 1),
-        }
-        return ToolResult(ok=True, output=out, display=f"{out['free_gib']} GiB free on {path}")
+        out = read_disk(str(args.get("path") or "/"))
+        return ToolResult(ok=True, output=out, display=f"{out['free_gib']} GiB free on {out['path']}")
 
 
 class GpuInfo(Tool):
@@ -101,30 +124,11 @@ class GpuInfo(Tool):
     timeout_s = 8.0
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        argv = [
-            "nvidia-smi",
-            "--query-gpu=name,memory.total,memory.used,utilization.gpu,temperature.gpu",
-            "--format=csv,noheader,nounits",
-        ]
-        try:
-            rc, out, err = await run_argv(argv, timeout=self.timeout_s)
-        except CommandTimeout as exc:
-            return ToolResult(ok=False, display="gpu timeout", error=str(exc))
-        except FileNotFoundError:
-            return ToolResult(ok=False, display="no nvidia-smi", error="nvidia-smi not installed")
-        if rc != 0:
-            return ToolResult(ok=False, display="nvidia-smi failed", error=err.strip() or f"rc={rc}")
-        fields = [c.strip() for c in out.splitlines()[0].split(",")]
-        name = fields[0] if fields else "unknown"
-        total, used, util, temp = (_as_int(fields[i]) if i < len(fields) else None for i in (1, 2, 3, 4))
-        result = {
-            "name": name,
-            "vram_total_mib": total,
-            "vram_used_mib": used,
-            "gpu_util_percent": util,
-            "temperature_c": temp,
-        }
-        display = f"{name}: {used}/{total} MiB VRAM" + (f", {temp}C" if temp is not None else "")
+        result = await read_gpu()
+        if result is None:
+            return ToolResult(ok=False, display="no gpu", error="nvidia-smi unavailable or no NVIDIA GPU")
+        display = (f"{result['name']}: {result['vram_used_mib']}/{result['vram_total_mib']} MiB VRAM"
+                   + (f", {result['temperature_c']}C" if result["temperature_c"] is not None else ""))
         return ToolResult(ok=True, output=result, display=display)
 
 

@@ -54,6 +54,8 @@ class GraphSink(Protocol):
         confidence: float = 0.6,
     ) -> Any: ...  # concrete returns the Edge; tools ignore it
 
+    async def reach_host(self, host: str) -> Any: ...  # record a REMOTE host Sali can_access (§9)
+
 
 class TaskSink(Protocol):
     """How a tool records and advances a persistent multi-step task (§24). Concrete impl (TaskStore)

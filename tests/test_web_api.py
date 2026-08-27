@@ -157,3 +157,28 @@ async def test_http_routes_end_to_end(test_settings: Any, db_available: bool) ->
             bad = await ac.get("/api/graph/node/not-a-uuid")
             assert bad.status_code == 400  # invalid id is a clean 400, not a crash
     await kernel.close()
+
+
+async def test_schedule_create_and_delete(test_settings: Any, db_available: bool) -> None:
+    if not db_available:
+        pytest.skip("Postgres not reachable")
+    import httpx
+    from httpx import ASGITransport
+
+    from sali.api.app import create_app
+    from sali.kernel import Kernel
+
+    app = create_app(Kernel.create(test_settings))
+    async with app.router.lifespan_context(app):
+        async with app.state.services.pool.acquire() as c:
+            await c.execute("DELETE FROM schedule WHERE name='web-test-sched'")
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as ac:
+            r = await ac.post("/api/schedules",
+                              json={"name": "web-test-sched", "when": "30m", "prompt": "check the vps"})
+            assert r.status_code == 200 and r.json()["schedule"]["name"] == "web-test-sched"
+            listed = (await ac.get("/api/schedules")).json()["schedules"]
+            assert any(s["name"] == "web-test-sched" for s in listed)
+            bad = await ac.post("/api/schedules", json={"name": "x", "when": "not-a-spec", "prompt": "y"})
+            assert bad.status_code == 400  # invalid cron/interval is a clean 400
+            assert (await ac.delete("/api/schedules/web-test-sched")).json()["deleted"] == 1

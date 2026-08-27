@@ -694,7 +694,9 @@ class AgentLoop:
                 tasks_note = await self._open_tasks_note()  # §24: resume any task in progress
                 world_note = ""
                 with contextlib.suppress(Exception):  # world-state is best-effort, never breaks a turn
-                    world_note = (await self._world.snapshot()).render()
+                    # probe live gpu/ram/disk only when the query is about the system/live state (§7)
+                    ws = await self._world.snapshot(with_resources=plan.needs_live or plan.system_query)
+                    world_note = ws.render()
                 # SELF-STATE and HEALTH: kept DISTINCT from identity and world (§2), and — unlike before —
                 # surfaced into the prompt every turn (§11), so Sali knows what it's doing and how its
                 # faculties are without a tool round-trip, and knows this host IS its own home/body (§1).
@@ -1018,14 +1020,19 @@ class AgentLoop:
             {"tool": tool.name, "verified": verify.success, "success": success},
         )
 
+        # Provenance (§10): a tool result IS a live observation made just now — tag it with source +
+        # timestamp so the model treats it as current ground truth, never confuses it with a memory, and
+        # can prefer it over a stale recall. (ssh_run additionally carries the remote host_id in output.)
+        now_iso = self.clock.now().isoformat()
         if success:
             return (
-                _tool_message(tool.name, {"ok": True, "output": redact_obj(result.output),
-                                          "verified": True}),
+                _tool_message(tool.name, {"ok": True, "source": "live_observation", "observed_at": now_iso,
+                                          "output": redact_obj(result.output), "verified": True}),
                 True, result.display or tool.name,
             )
         return (
-            _tool_message(tool.name, {"ok": False, "error": redact_obj(result.error or verify.detail)}),
+            _tool_message(tool.name, {"ok": False, "source": "live_observation", "observed_at": now_iso,
+                                      "error": redact_obj(result.error or verify.detail)}),
             False, result.error or verify.detail or result.display or "failed",
         )
 

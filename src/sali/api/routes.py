@@ -13,7 +13,7 @@ import contextlib
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 
 from sali.api.serialize import safe, to_jsonable
 from sali.api.stream import frame
@@ -72,7 +72,7 @@ def add_routes(app: FastAPI) -> None:  # noqa: C901 - a flat table of thin read 
 
     @app.get("/api/world")
     async def api_world(request: Request) -> Any:
-        return safe(await _svc(request).world.snapshot())
+        return safe(await _svc(request).world.snapshot(with_resources=True))
 
     @app.get("/api/attention/counts")
     async def api_attention(request: Request, hours: int = 24) -> Any:
@@ -149,6 +149,26 @@ def add_routes(app: FastAPI) -> None:  # noqa: C901 - a flat table of thin read 
     @app.get("/api/schedules")
     async def api_schedules(request: Request) -> Any:
         return safe({"schedules": await _svc(request).schedules.list_all()})
+
+    @app.post("/api/schedules")
+    async def api_create_schedule(request: Request, body: dict[str, Any] = Body(...)) -> Any:  # noqa: B008
+        from sali.scheduler.cron import ScheduleError
+
+        name = str(body.get("name", "")).strip()
+        when = str(body.get("when", "")).strip()
+        prompt = str(body.get("prompt", "")).strip()
+        if not (name and when and prompt):
+            raise HTTPException(status_code=400, detail="name, when, and prompt are required")
+        try:
+            sched = await _svc(request).schedules.create(name, when, prompt)
+        except ScheduleError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return safe({"schedule": sched})
+
+    @app.delete("/api/schedules/{name}")
+    async def api_delete_schedule(request: Request, name: str) -> Any:
+        deleted = await _svc(request).schedules.delete(name)
+        return {"deleted": deleted}
 
     @app.get("/api/learning/queue")
     async def api_learning_queue(request: Request) -> Any:

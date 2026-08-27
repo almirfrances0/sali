@@ -122,3 +122,32 @@ async def test_observation_outranks_inference(live_pool: Any) -> None:
     from sali.core.clock import SystemClock
     now = SystemClock().now()
     assert mem._to_hit(entry_obs, now).score > mem._to_hit(entry_inf, now).score
+
+
+# ── §9: a remote host is a DISTINCT entity Sali can_access — never the home machine ──────────────────
+async def test_reach_host_makes_distinct_remote_node(live_pool: Any) -> None:
+    from sali.graph.service import GraphService
+
+    g = GraphService(live_pool)
+    await g.reach_host("root@vps-01.example.com")
+    async with live_pool.acquire() as conn:
+        host = await conn.fetchrow(
+            "SELECT node_type, props->>'is_self' AS is_self, props->>'role' AS role FROM graph_node "
+            "WHERE canonical_key LIKE 'host:%' AND valid_until IS NULL")
+        edge = await conn.fetchval(
+            "SELECT e.rel_type FROM graph_edge e JOIN graph_node a ON a.id=e.src_id "
+            "WHERE a.canonical_key='agent:sali' AND e.rel_type='can_access' AND e.valid_until IS NULL")
+    assert host is not None and host["node_type"] == "host"
+    assert host["is_self"] == "false" and host["role"] == "remote"  # NOT the home machine
+    assert edge == "can_access"
+
+
+# ── §7: live host resources are folded into the world snapshot when asked ─────────────────────────────
+async def test_world_snapshot_with_resources(live_pool: Any) -> None:
+    from sali.runtime.world_state import WorldStateBuilder
+
+    ws = await WorldStateBuilder(live_pool).snapshot(with_resources=True)
+    # /proc-backed readings are always available on Linux; gpu is optional (may be None without a GPU)
+    assert ws.cpu_mem and "MiB" in ws.cpu_mem
+    assert ws.disk and "GiB" in ws.disk
+    assert "Memory:" in ws.render() and "Disk:" in ws.render()
