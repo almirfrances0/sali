@@ -39,7 +39,8 @@ interface StoreState {
   selection: Selection | null
   focus: string | null // which region is dominant (null = balanced cockpit)
   toolsOpen: boolean // the tool-catalog overlay (Sali's hands — §20/§21)
-  collapsed: Record<string, boolean> // per-widget collapse state (movable/collapsible cockpit)
+  collapsed: Record<string, boolean> // per-widget collapse state
+  pinned: string[] // widgets the user chose to keep open (beyond the ones Sali auto-raises on activity)
 
   // firehose actions
   ingestEvents: (evs: SaliEvent[]) => void
@@ -55,6 +56,7 @@ interface StoreState {
   setFocus: (f: string | null) => void
   setToolsOpen: (b: boolean) => void
   toggleCollapse: (id: string) => void
+  togglePinned: (id: string) => void
 }
 
 function newId(): string {
@@ -75,6 +77,7 @@ export const useStore = create<StoreState>((set) => ({
   focus: null,
   toolsOpen: false,
   collapsed: {},
+  pinned: [],
 
   ingestEvents: (evs) =>
     set((st) => {
@@ -180,6 +183,8 @@ export const useStore = create<StoreState>((set) => ({
   setFocus: (f) => set({ focus: f }),
   setToolsOpen: (b) => set({ toolsOpen: b }),
   toggleCollapse: (id) => set((st) => ({ collapsed: { ...st.collapsed, [id]: !st.collapsed[id] } })),
+  togglePinned: (id) =>
+    set((st) => ({ pinned: st.pinned.includes(id) ? st.pinned.filter((x) => x !== id) : [...st.pinned, id] })),
 }))
 
 export function presenceColor(p: Presence | undefined): string {

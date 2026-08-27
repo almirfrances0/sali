@@ -25,16 +25,12 @@ export function PanelHeader({
   const toggle = useStore((s) => s.toggleCollapse)
   return (
     <header className="flex shrink-0 items-center justify-between border-b border-line px-3 py-2">
-      <div className="panel-drag flex cursor-move select-none items-center gap-2">
-        <span className="text-sm leading-none text-faint/50">⠿</span>
-        <span className="panel-label">{label}</span>
-      </div>
+      <span className="panel-label">{label}</span>
       <div className="flex items-center gap-2">
         {right}
         {id && (
           <button
             onClick={() => toggle(id)}
-            onMouseDown={(e) => e.stopPropagation()}
             className="px-0.5 font-mono text-2xs text-faint hover:text-ink"
             aria-label={collapsed ? `expand ${label}` : `collapse ${label}`}
             title={collapsed ? 'expand' : 'collapse'}

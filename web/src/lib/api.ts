@@ -8,6 +8,7 @@ import type {
   MemoryHitView,
   PresenceState,
   SaliEvent,
+  Schedule,
   SelfView,
   Task,
   WorldState,
@@ -16,6 +17,24 @@ import type {
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(path, { headers: { accept: 'application/json' } })
   if (!res.ok) throw new Error(`${path} → ${res.status}`)
+  return (await res.json()) as T
+}
+
+async function send<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method,
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  })
+  if (!res.ok) {
+    let detail = `${res.status}`
+    try {
+      detail = ((await res.json()) as { detail?: string }).detail ?? detail
+    } catch {
+      /* no JSON body */
+    }
+    throw new Error(String(detail))
+  }
   return (await res.json()) as T
 }
 
@@ -41,7 +60,10 @@ export const api = {
       `/api/events?since=${since}&limit=${limit}${type ? `&type=${encodeURIComponent(type)}` : ''}`,
     ),
   tasks: () => get<{ open: Task[]; current: Task | null }>('/api/tasks'),
-  schedules: () => get<{ schedules: unknown[] }>('/api/schedules'),
+  schedules: () => get<{ schedules: Schedule[] }>('/api/schedules'),
+  createSchedule: (name: string, when: string, prompt: string) =>
+    send<{ schedule: Schedule }>('POST', '/api/schedules', { name, when, prompt }),
+  deleteSchedule: (name: string) => send<{ deleted: number }>('DELETE', `/api/schedules/${encodeURIComponent(name)}`),
   learningQueue: () => get<{ pending: unknown[]; count: number }>('/api/learning/queue'),
   tools: () =>
     get<{ tools: { name: string; description: string; risk: number; capabilities: string[]; idempotent: boolean }[] }>(

@@ -148,6 +148,18 @@ export interface Task {
   updated_at: string
 }
 
+export interface Schedule {
+  id: string
+  name: string
+  kind: string // 'cron' | 'interval'
+  spec: string
+  prompt: string
+  enabled: boolean
+  next_run_at: string | null
+  last_run_at: string | null
+  last_status: string | null
+}
+
 export interface AttentionCounts {
   critical: number
   important: number

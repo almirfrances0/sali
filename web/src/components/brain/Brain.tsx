@@ -2,7 +2,7 @@ import { Html, Line, OrbitControls } from '@react-three/drei'
 import { Canvas, useFrame } from '@react-three/fiber'
 import { useQuery } from '@tanstack/react-query'
 import { useEffect, useMemo, useRef } from 'react'
-import type { Mesh, MeshStandardMaterial } from 'three'
+import { BufferAttribute, BufferGeometry, type Mesh, type MeshStandardMaterial } from 'three'
 
 import { api } from '../../lib/api'
 import type { GraphEdge, GraphNode } from '../../lib/types'
@@ -11,223 +11,86 @@ import { Empty, Panel, PanelHeader } from '../ui/primitives'
 import { layout, nodeColor, nodeRadius, prefersReducedMotion, type Vec3 } from './graph'
 
 const HUB_TYPES = new Set(['agent', 'machine', 'person', 'model', 'service', 'project'])
-const ACTIVE_MS = 2600 // how long a retrieved node/edge stays lit after a real retrieval
-const SIG_DUR = 1600 // ms for one electrical signal to travel a synapse
-const SIG_MAX = 160 // hard cap on concurrent signals (backpressure)
+// Firing dynamics (a small, bounded neural simulation — SEEDED by real events/retrievals, never a timer).
+const THRESHOLD = 1.0 // charge at which a neuron fires an action potential
+const REFRACTORY = 260 // ms a neuron cannot re-fire (real refractory period → bounds cascades)
+const FLASH = 360 // ms the soma stays lit after firing (the spike)
+const AP_MS = 520 // ms an action potential takes to travel a synapse
+const ARRIVE = 0.6 // charge delivered to the downstream neuron when an AP arrives (2 inputs → it fires)
+const DECAY = 0.94 // per-frame charge decay → isolated charge fades, so activity dissipates (calm)
+const FANOUT = 4 // max synapses an firing neuron drives (bounds the cascade)
+const MAX_AP = 220 // hard cap on action potentials in flight
 
-// ── a neuron: a glowing cell + a soft halo; the agent cell breathes while Sali is actually working ──
-function NodeMesh({
-  node,
-  position,
-  isActiveRef,
-  selected,
-  dim,
-  pulsing,
-  onSelect,
-}: {
-  node: GraphNode
-  position: Vec3
-  isActiveRef: { current: (id: string) => number }
-  selected: boolean
-  dim: boolean
-  pulsing: boolean
-  onSelect: (n: GraphNode) => void
-}): JSX.Element {
-  const ref = useRef<Mesh>(null)
-  const halo = useRef<Mesh>(null)
-  const color = nodeColor(node.node_type)
-  const r = nodeRadius(node)
-  useFrame(({ clock }) => {
-    const m = ref.current
-    if (!m) return
-    const act = isActiveRef.current(node.id) // 0..1 recent-activation intensity (real retrieval)
-    const boost = selected ? 1 : 0
-    // the agent neuron breathes only when presence is genuinely active — real state, not a timer
-    const breathe = pulsing ? (Math.sin(clock.elapsedTime * 3) * 0.5 + 0.5) * 0.35 : 0
-    const target = (1 + act * 0.55 + boost * 0.35 + breathe) * (dim ? 0.6 : 1)
-    m.scale.setScalar(m.scale.x + (target - m.scale.x) * 0.2)
-    const mat = m.material as MeshStandardMaterial
-    mat.emissiveIntensity = (0.4 + act * 2.6 + boost * 0.6 + breathe * 1.4) * (dim ? 0.18 : 1)
-    mat.opacity += ((dim ? 0.28 : 1) - mat.opacity) * 0.2
-    if (halo.current) {
-      const hm = halo.current.material as MeshStandardMaterial
-      hm.opacity = (0.06 + act * 0.22 + breathe * 0.18) * (dim ? 0.3 : 1)
-      halo.current.scale.setScalar(m.scale.x)
-    }
-  })
-  return (
-    <group position={position}>
-      <mesh ref={halo} scale={1}>
-        <sphereGeometry args={[r * 2.1, 16, 16]} />
-        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={1} transparent opacity={0.08} depthWrite={false} />
-      </mesh>
-      <mesh
-        ref={ref}
-        onClick={(e) => {
-          e.stopPropagation()
-          onSelect(node)
-        }}
-        onPointerOver={(e) => {
-          e.stopPropagation()
-          document.body.style.cursor = 'pointer'
-        }}
-        onPointerOut={() => {
-          document.body.style.cursor = 'auto'
-        }}
-      >
-        <sphereGeometry args={[r, 20, 20]} />
-        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.4} roughness={0.35} metalness={0.1} transparent />
-      </mesh>
-    </group>
-  )
-}
-
-// ── a synapse: a thin dendrite; brightens while carrying real retrieval activity ──
-function EdgeLine({ a, b, activeRef, dim }: { a: Vec3; b: Vec3; activeRef: { current: number }; dim: boolean }): JSX.Element {
-  const ref = useRef<any>(null)
-  useFrame(() => {
-    const l = ref.current
-    if (!l) return
-    const k = activeRef.current
-    l.material.opacity = (0.1 + k * 0.7) * (dim ? 0.22 : 1)
-    l.material.color.setRGB(0.4 + k * 0.1, 0.55 + k * 0.35, 0.62 + k * 0.3)
-  })
-  return <Line ref={ref} points={[a, b]} color="#5f7d92" lineWidth={1} transparent opacity={0.1} />
-}
-
-// ── the electrical activity: bright pulses travelling real synapses, spawned by REAL events ──
-// Retrieval frames light the specific synapses a turn used; every durable event fires one pulse along a
-// real synapse of the hub. The COUNT and TIMING are real — the brain is busy exactly when Sali is busy,
-// and quiet when Sali is quiet (§7/§23/§37). Nothing loops on a timer.
-interface Sig {
+interface AP {
   a: Vec3
   b: Vec3
   start: number
+  dst: number // index of the downstream neuron this action potential charges on arrival
 }
-function Signals({
-  edges,
-  positions,
-  activeEdgeIdx,
-  activeAt,
-}: {
-  edges: GraphEdge[]
-  positions: Map<string, Vec3>
-  activeEdgeIdx: number[]
-  activeAt: number
-}): JSX.Element {
-  const refs = useRef<(Mesh | null)[]>([])
-  const pool = useRef<Sig[]>([])
-  const lastSeq = useStore((s) => s.lastSeq)
-  const prevSeq = useRef(0)
 
-  const push = (idx: number, offset = 0) => {
-    const e = edges[idx]
-    if (!e) return
-    const a = positions.get(e.src_id)
-    const b = positions.get(e.dst_id)
-    if (a && b && pool.current.length < SIG_MAX) pool.current.push({ a, b, start: performance.now() + offset })
-  }
-
-  // real retrieval → fire a short train of pulses along the exact synapses that turn used
-  useEffect(() => {
-    for (const i of activeEdgeIdx) {
-      push(i, 0)
-      push(i, 220)
-      push(i, 440)
+function Dendrites({ nodes, positions }: { nodes: GraphNode[]; positions: Map<string, Vec3> }): JSX.Element | null {
+  // short spiky dendrite tufts radiating from each soma, in ONE line-segments geometry (one draw call).
+  const geom = useMemo(() => {
+    const pts: number[] = []
+    const hash = (s: string, i: number) => {
+      let h = 2166136261 ^ i
+      for (let k = 0; k < s.length; k++) h = Math.imul(h ^ s.charCodeAt(k), 16777619)
+      return ((h >>> 0) % 1000) / 1000
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeAt])
-
-  // every durable event → a pulse along a real synapse somewhere in the network; a burst of N events
-  // fires ~N pulses (seq is monotonic, so the delta IS the real event count — the brain is as busy as
-  // Sali is, quiet when Sali is quiet). Deterministic by seq, spread across the graph — never random.
-  useEffect(() => {
-    const delta = Math.min(Math.max(lastSeq - prevSeq.current, 1), 8)
-    prevSeq.current = lastSeq
-    if (edges.length) for (let k = 0; k < delta; k++) push((lastSeq + k * 17) % edges.length)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lastSeq])
-
-  useFrame(() => {
-    const now = performance.now()
-    pool.current = pool.current.filter((s) => now - s.start < SIG_DUR)
-    for (let i = 0; i < SIG_MAX; i++) {
-      const m = refs.current[i]
-      if (!m) continue
-      const s = pool.current[i]
-      const t = s ? (now - s.start) / SIG_DUR : -1
-      if (s && t >= 0) {
-        const e = t * t * (3 - 2 * t) // smoothstep along the synapse
-        m.position.set(s.a[0] + (s.b[0] - s.a[0]) * e, s.a[1] + (s.b[1] - s.a[1]) * e, s.a[2] + (s.b[2] - s.a[2]) * e)
-        m.scale.setScalar(0.11 + Math.sin(t * Math.PI) * 0.26)
-        m.visible = true
-      } else {
-        m.visible = false // not started yet (future offset) or empty slot
+    for (const n of nodes) {
+      const p = positions.get(n.id)
+      if (!p) continue
+      const r = nodeRadius(n)
+      const tufts = 5
+      for (let i = 0; i < tufts; i++) {
+        const t = (i + 0.5) / tufts
+        const phi = Math.acos(1 - 2 * t)
+        const theta = 2 * Math.PI * hash(n.id, i)
+        const dx = Math.sin(phi) * Math.cos(theta)
+        const dy = Math.cos(phi)
+        const dz = Math.sin(phi) * Math.sin(theta)
+        const len = r * (1.6 + hash(n.id, i + 9) * 1.2)
+        pts.push(p[0] + dx * r, p[1] + dy * r, p[2] + dz * r)
+        pts.push(p[0] + dx * len, p[1] + dy * len, p[2] + dz * len)
       }
     }
-  })
-
+    const g = new BufferGeometry()
+    g.setAttribute('position', new BufferAttribute(new Float32Array(pts), 3))
+    return g
+  }, [nodes, positions])
+  if (!geom) return null
   return (
-    <>
-      {Array.from({ length: SIG_MAX }, (_, i) => (
-        <mesh
-          key={i}
-          ref={(el) => {
-            refs.current[i] = el
-          }}
-          visible={false}
-        >
-          <sphereGeometry args={[1, 12, 12]} />
-          <meshBasicMaterial color="#a6fbee" toneMapped={false} transparent opacity={0.95} />
-        </mesh>
-      ))}
-    </>
+    <lineSegments geometry={geom}>
+      <lineBasicMaterial color="#3f5468" transparent opacity={0.35} />
+    </lineSegments>
   )
 }
 
 function Scene({ nodes, edges }: { nodes: GraphNode[]; edges: GraphEdge[] }): JSX.Element {
   const positions = useMemo(() => layout(nodes, edges), [nodes, edges])
+  const index = useMemo(() => new Map(nodes.map((n, i) => [n.id, i])), [nodes])
   const nameToId = useMemo(() => {
     const m = new Map<string, string>()
     for (const n of nodes) m.set(n.name.toLowerCase(), n.id)
     return m
   }, [nodes])
+  const adjacency = useMemo(() => {
+    const a = new Map<string, string[]>()
+    for (const e of edges) {
+      ;(a.get(e.src_id) ?? a.set(e.src_id, []).get(e.src_id)!).push(e.dst_id)
+      ;(a.get(e.dst_id) ?? a.set(e.dst_id, []).get(e.dst_id)!).push(e.src_id)
+    }
+    return a
+  }, [edges])
 
   const activation = useStore((s) => s.activation)
   const selection = useStore((s) => s.selection)
   const select = useStore((s) => s.select)
   const presence = useStore((s) => s.presence?.presence)
-  const pulsingHub = presence === 'thinking' || presence === 'executing' || presence === 'learning'
+  const lastSeq = useStore((s) => s.lastSeq)
+  const pulsing = presence === 'thinking' || presence === 'executing' || presence === 'learning'
 
-  // the central neuron = Sali's agent node (fallback: the highest-degree hub)
-  const hubId = useMemo(() => {
-    const agent = nodes.find((n) => n.node_type === 'agent')
-    if (agent) return agent.id
-    const deg = new Map<string, number>()
-    for (const e of edges) {
-      deg.set(e.src_id, (deg.get(e.src_id) ?? 0) + 1)
-      deg.set(e.dst_id, (deg.get(e.dst_id) ?? 0) + 1)
-    }
-    return [...deg.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null
-  }, [nodes, edges])
-
-  const activeNodeIds = useMemo(() => {
-    const s = new Set<string>()
-    if (activation) {
-      for (const f of activation.graph) {
-        const a = nameToId.get(f.src.toLowerCase())
-        const b = nameToId.get(f.dst.toLowerCase())
-        if (a) s.add(a)
-        if (b) s.add(b)
-      }
-    }
-    return s
-  }, [activation, nameToId])
-  const activeEdgeIdx = useMemo(
-    () => edges.map((e, i) => (activeNodeIds.has(e.src_id) && activeNodeIds.has(e.dst_id) ? i : -1)).filter((i) => i >= 0),
-    [edges, activeNodeIds],
-  )
-
+  const hubId = useMemo(() => nodes.find((n) => n.node_type === 'agent')?.id ?? null, [nodes])
   const focusId = selection?.kind === 'node' ? selection.id : null
   const neighborIds = useMemo(() => {
     if (!focusId) return null
@@ -239,61 +102,159 @@ function Scene({ nodes, edges }: { nodes: GraphNode[]; edges: GraphEdge[] }): JS
     return s
   }, [focusId, edges])
 
-  const activeAt = activation?.at ?? 0
-  const intensity = () => Math.max(0, 1 - (Date.now() - activeAt) / ACTIVE_MS)
-  const nodeActiveRef = useRef((id: string) => (activeNodeIds.has(id) ? intensity() : 0))
-  nodeActiveRef.current = (id: string) => (activeNodeIds.has(id) ? intensity() : 0)
+  // ── the firing simulation (mutable refs; never re-renders React) ───────────────────────────────────
+  const somaRefs = useRef<(Mesh | null)[]>([])
+  const haloRefs = useRef<(Mesh | null)[]>([])
+  const apRefs = useRef<(Mesh | null)[]>([])
+  const charge = useRef<Float32Array>(new Float32Array(nodes.length))
+  const lastFire = useRef<Float32Array>(new Float32Array(nodes.length).fill(-1e9))
+  const aps = useRef<AP[]>([])
+  const prevSeq = useRef(0)
 
-  const edgeActive = useMemo(
-    () => edges.map((e) => ({ ref: { current: 0 }, lit: activeNodeIds.has(e.src_id) && activeNodeIds.has(e.dst_id) })),
-    [edges, activeNodeIds],
-  )
-  useFrame(() => {
-    const k = intensity()
-    for (const e of edgeActive) e.ref.current = e.lit ? k : 0
+  useEffect(() => {
+    charge.current = new Float32Array(nodes.length)
+    lastFire.current = new Float32Array(nodes.length).fill(-1e9)
+    aps.current = []
+  }, [nodes.length])
+
+  const seedFire = (nodeId: string) => {
+    const i = index.get(nodeId)
+    if (i !== undefined) charge.current[i] = THRESHOLD // will fire next frame
+  }
+  // a real retrieval → the REAL nodes it used fire, seeding a cascade through their real synapses
+  useEffect(() => {
+    if (activation) for (const f of activation.graph) {
+      const a = nameToId.get(f.src.toLowerCase())
+      const b = nameToId.get(f.dst.toLowerCase())
+      if (a) seedFire(a)
+      if (b) seedFire(b)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activation])
+  // every real event → a neuron fires (deterministic by seq); a burst fires ~N neurons
+  useEffect(() => {
+    const delta = Math.min(Math.max(lastSeq - prevSeq.current, 1), 6)
+    prevSeq.current = lastSeq
+    if (nodes.length) for (let k = 0; k < delta; k++) seedFire(nodes[(lastSeq + k * 7) % nodes.length].id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastSeq])
+
+  useFrame(({ clock }) => {
+    const now = performance.now()
+    const ch = charge.current
+    const lf = lastFire.current
+
+    // 1) advance action potentials; when one arrives, it charges its downstream neuron (a synapse)
+    const live: AP[] = []
+    for (const ap of aps.current) {
+      if (now - ap.start >= AP_MS) ch[ap.dst] = Math.min(THRESHOLD * 1.4, ch[ap.dst] + ARRIVE)
+      else live.push(ap)
+    }
+    aps.current = live
+
+    // 2) fire eligible neurons → spawn action potentials to neighbours
+    for (let i = 0; i < nodes.length; i++) {
+      if (ch[i] >= THRESHOLD && now - lf[i] > REFRACTORY) {
+        lf[i] = now
+        ch[i] = 0
+        const neigh = adjacency.get(nodes[i].id) ?? []
+        const pa = positions.get(nodes[i].id)
+        for (let k = 0; k < neigh.length && k < FANOUT; k++) {
+          if (aps.current.length >= MAX_AP) break
+          const nb = neigh[(i + k) % neigh.length]
+          const pb = positions.get(nb)
+          const di = index.get(nb)
+          if (pa && pb && di !== undefined) aps.current.push({ a: pa, b: pb, start: now, dst: di })
+        }
+      }
+      ch[i] *= DECAY
+    }
+
+    // 3) render neurons: flash on fire, subtle glow while charging, calm when quiet
+    for (let i = 0; i < nodes.length; i++) {
+      const soma = somaRefs.current[i]
+      if (!soma) continue
+      const fire = Math.max(0, 1 - (now - lf[i]) / FLASH)
+      const dim = neighborIds != null && !neighborIds.has(nodes[i].id) ? 0.16 : 1
+      const breathe = pulsing && nodes[i].id === hubId ? (Math.sin(clock.elapsedTime * 3) * 0.5 + 0.5) * 0.4 : 0
+      const sel = focusId === nodes[i].id ? 0.4 : 0
+      const mat = soma.material as MeshStandardMaterial
+      mat.emissiveIntensity = (0.32 + fire * 3.2 + ch[i] * 0.6 + breathe * 1.4 + sel) * dim
+      const scale = (1 + fire * 0.55 + breathe + sel * 0.4) * (dim < 1 ? 0.7 : 1)
+      soma.scale.setScalar(soma.scale.x + (scale - soma.scale.x) * 0.3)
+      const halo = haloRefs.current[i]
+      if (halo) {
+        ;(halo.material as MeshStandardMaterial).opacity = (0.05 + fire * 0.5 + breathe * 0.2) * dim
+        halo.scale.setScalar(soma.scale.x * (1 + fire * 0.6))
+      }
+    }
+
+    // 4) render action potentials travelling the synapses
+    for (let i = 0; i < MAX_AP; i++) {
+      const m = apRefs.current[i]
+      if (!m) continue
+      const ap = aps.current[i]
+      if (ap) {
+        const t = (now - ap.start) / AP_MS
+        const e = t * t * (3 - 2 * t)
+        m.position.set(ap.a[0] + (ap.b[0] - ap.a[0]) * e, ap.a[1] + (ap.b[1] - ap.a[1]) * e, ap.a[2] + (ap.b[2] - ap.a[2]) * e)
+        m.scale.setScalar(0.09 + Math.sin(t * Math.PI) * 0.16)
+        m.visible = true
+      } else m.visible = false
+    }
   })
 
   return (
     <>
       <ambientLight intensity={0.5} />
-      <pointLight position={[8, 10, 12]} intensity={0.7} />
+      <pointLight position={[8, 10, 12]} intensity={0.65} />
       <pointLight position={[-10, -6, -8]} intensity={0.25} color="#4fe0cf" />
-      {edges.map((e, i) => {
+      <Dendrites nodes={nodes} positions={positions} />
+      {edges.map((e) => {
         const a = positions.get(e.src_id)
         const b = positions.get(e.dst_id)
         if (!a || !b) return null
-        const edgeDim = focusId != null && e.src_id !== focusId && e.dst_id !== focusId
-        return <EdgeLine key={e.id} a={a} b={b} activeRef={edgeActive[i].ref} dim={edgeDim} />
+        return <Line key={e.id} points={[a, b]} color="#4d6376" lineWidth={1} transparent opacity={0.14} />
       })}
-      <Signals edges={edges} positions={positions} activeEdgeIdx={activeEdgeIdx} activeAt={activeAt} />
-      {nodes.map((n) => {
+      {nodes.map((n, i) => {
+        const p = positions.get(n.id)
+        if (!p) return null
+        const color = nodeColor(n.node_type)
+        const r = nodeRadius(n)
+        return (
+          <group key={n.id} position={p}>
+            <mesh ref={(el) => { haloRefs.current[i] = el }} scale={1}>
+              <sphereGeometry args={[r * 2.1, 14, 14]} />
+              <meshStandardMaterial color={color} emissive={color} emissiveIntensity={1} transparent opacity={0.06} depthWrite={false} />
+            </mesh>
+            <mesh
+              ref={(el) => { somaRefs.current[i] = el }}
+              onClick={(ev) => { ev.stopPropagation(); select({ kind: 'node', id: n.id, label: n.name }) }}
+              onPointerOver={(ev) => { ev.stopPropagation(); document.body.style.cursor = 'pointer' }}
+              onPointerOut={() => { document.body.style.cursor = 'auto' }}
+            >
+              <icosahedronGeometry args={[r, 1]} />
+              <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.32} roughness={0.4} metalness={0.1} transparent />
+            </mesh>
+          </group>
+        )
+      })}
+      {Array.from({ length: MAX_AP }, (_, i) => (
+        <mesh key={`ap-${i}`} ref={(el) => { apRefs.current[i] = el }} visible={false}>
+          <sphereGeometry args={[1, 8, 8]} />
+          <meshBasicMaterial color="#b9fff2" toneMapped={false} transparent opacity={0.95} />
+        </mesh>
+      ))}
+      {nodes.filter((n) => HUB_TYPES.has(n.node_type)).map((n) => {
         const p = positions.get(n.id)
         if (!p) return null
         return (
-          <NodeMesh
-            key={n.id}
-            node={n}
-            position={p}
-            isActiveRef={nodeActiveRef}
-            selected={focusId === n.id}
-            dim={neighborIds != null && !neighborIds.has(n.id)}
-            pulsing={pulsingHub && n.id === hubId}
-            onSelect={(node) => select({ kind: 'node', id: node.id, label: node.name })}
-          />
+          <Html key={`l-${n.id}`} position={[p[0], p[1] + nodeRadius(n) + 0.3, p[2]]} center distanceFactor={12} style={{ pointerEvents: 'none' }}>
+            <div className="whitespace-nowrap font-mono text-[10px] tracking-wide text-ink/80">{n.name}</div>
+          </Html>
         )
       })}
-      {nodes
-        .filter((n) => HUB_TYPES.has(n.node_type))
-        .map((n) => {
-          const p = positions.get(n.id)
-          if (!p) return null
-          return (
-            <Html key={`l-${n.id}`} position={[p[0], p[1] + nodeRadius(n) + 0.25, p[2]]} center distanceFactor={12} style={{ pointerEvents: 'none' }}>
-              <div className="whitespace-nowrap font-mono text-[10px] tracking-wide text-ink/80">{n.name}</div>
-            </Html>
-          )
-        })}
-      <OrbitControls enablePan={false} enableDamping dampingFactor={0.08} minDistance={6} maxDistance={34} autoRotate={!prefersReducedMotion()} autoRotateSpeed={0.24} />
+      <OrbitControls enablePan={false} enableDamping dampingFactor={0.08} minDistance={6} maxDistance={34} autoRotate={!prefersReducedMotion()} autoRotateSpeed={0.22} />
     </>
   )
 }
@@ -312,7 +273,6 @@ export function Brain(): JSX.Element {
     <Panel>
       <PanelHeader
         label="Neural memory"
-        id="brain"
         right={
           data ? (
             <span className="font-mono text-2xs text-faint">
@@ -320,7 +280,7 @@ export function Brain(): JSX.Element {
               {collapsedCount > 0 && (
                 <>
                   {' · '}
-                  <button onClick={() => setToolsOpen(true)} onMouseDown={(e) => e.stopPropagation()} className="text-accent-dim hover:text-accent">
+                  <button onClick={() => setToolsOpen(true)} className="text-accent-dim hover:text-accent">
                     {collapsedCount} tools ▸
                   </button>
                 </>
@@ -332,14 +292,10 @@ export function Brain(): JSX.Element {
       <div
         className="relative min-h-0 flex-1"
         role="img"
-        aria-label={
-          data
-            ? `Sali's knowledge graph: ${data.nodes.length} entities, ${data.edges.length} relationships. Entity details are also in the World panel and by selecting a node.`
-            : 'Sali knowledge graph, loading'
-        }
+        aria-label={data ? `Sali's neural memory: ${data.nodes.length} entities firing across ${data.edges.length} synapses. Details in the World panel and by selecting a neuron.` : 'loading'}
       >
         <div className="pointer-events-none absolute inset-0 z-10 vignette" />
-        {isLoading && <Empty>waking the graph…</Empty>}
+        {isLoading && <Empty>waking the neurons…</Empty>}
         {isError && <Empty>the graph is unreachable — is `sali serve` running?</Empty>}
         {data && (
           <Canvas camera={{ position: [0, 1.5, 17], fov: 50 }} dpr={[1, 2]} gl={{ antialias: true, alpha: true }}>

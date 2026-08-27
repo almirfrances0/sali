@@ -1,19 +1,19 @@
 import { useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef } from 'react'
 
+import { Brain } from './components/brain/Brain'
+import { Chat } from './components/chat/Chat'
 import { ConfirmModal } from './components/chat/ConfirmModal'
 import { Inspector } from './components/memory/Inspector'
-import { Cockpit } from './components/system/Cockpit'
+import { MiniBar } from './components/system/MiniBar'
+import { ProcessRail } from './components/system/ProcessRail'
 import { Proactive } from './components/system/Proactive'
-import { TopBar } from './components/system/TopBar'
 import { ToolsOverlay } from './components/tools/ToolsOverlay'
 import { useStore } from './stores/store'
 import { useEventStream } from './websocket/useEventStream'
 import { useSaliStream } from './websocket/useSaliStream'
 
-// When real events land on the firehose, refresh the cheap snapshot queries they affect — so the cockpit
-// is event-driven, not blindly polling. The brain animates from the chat retrieval frame; the graph
-// snapshot itself is refreshed lazily (relayout is expensive) only on structural twin changes.
+// Real events refresh the cheap snapshot queries they affect — the cockpit is event-driven, not polling.
 function useLiveInvalidation(): void {
   const qc = useQueryClient()
   const lastSeq = useStore((s) => s.lastSeq)
@@ -33,7 +33,9 @@ function useLiveInvalidation(): void {
       qc.invalidateQueries({ queryKey: ['presence'] })
       qc.invalidateQueries({ queryKey: ['self'] })
     }
+    if (has('tool.')) qc.invalidateQueries({ queryKey: ['tool-exec'] })
     if (has('task.')) qc.invalidateQueries({ queryKey: ['tasks'] })
+    if (has('schedule.')) qc.invalidateQueries({ queryKey: ['schedules'] })
     if (has('desktop.observed')) {
       const now = Date.now()
       if (now - lastWorld.current > 3000) {
@@ -59,8 +61,18 @@ export default function App(): JSX.Element {
 
   return (
     <div className="relative flex h-full flex-col gap-2.5 p-2.5">
-      <TopBar />
-      <Cockpit />
+      <MiniBar />
+      <div className="flex min-h-0 flex-1 gap-2.5">
+        {/* Sali raises process widgets here only while it is doing that thing; empty when calm. */}
+        <ProcessRail />
+        {/* The neural memory and the conversation are always present. */}
+        <div className="min-w-0 flex-1">
+          <Brain />
+        </div>
+        <div className="w-[clamp(340px,28%,520px)] shrink-0">
+          <Chat />
+        </div>
+      </div>
 
       <Inspector />
       <Proactive />
