@@ -38,6 +38,14 @@ _RELATIONAL = (
     "located", "lives on", "belongs to", "runs the",
 )
 _RECENT = ("recent", "lately", "just now", "what happened", "what changed", "changes since")
+# Questions about Sali's OWN tools/capabilities — "which tools do I have?", "is there a tool for X?".
+# These pull from the tool inventory + capability graph, not just memory.
+_TOOL = (
+    "what tool", "which tool", "what tools", "which tools", "tools do i", "tools are",
+    "tool for", "tools for", "do i have", "have a tool", "is there a tool", "any tool",
+    "installed", "what's installed", "whats installed", "list tools", "what can i use",
+    "tools can i", "tool to ", "tools to ", "tools i have", "tools available",
+)
 
 
 @dataclass(slots=True)
@@ -48,6 +56,7 @@ class RetrievalPlan:
     use_graph: bool = False
     use_recent: bool = False
     needs_live: bool = False
+    use_tools: bool = False
 
 
 def _has(query: str, phrases: tuple[str, ...]) -> bool:
@@ -72,8 +81,10 @@ def classify(query: str) -> RetrievalPlan:
     temporal = _has(q, _TEMPORAL)
     relational = _has(q, _RELATIONAL)
     recent = _has(q, _RECENT)
+    tool = _has(q, _TOOL)
     intent = (
         "live" if live
+        else "tool" if tool
         else "relational" if relational
         else "temporal" if temporal
         else "recent" if recent
@@ -84,4 +95,5 @@ def classify(query: str) -> RetrievalPlan:
         use_graph=relational,
         use_recent=recent or temporal,
         needs_live=live,
+        use_tools=tool,
     )

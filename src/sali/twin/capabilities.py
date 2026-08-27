@@ -159,6 +159,76 @@ async def apply_capabilities(
     return CapabilityResult(capabilities=len(cap_nodes), tools_mapped=tools_mapped, edges=edges)
 
 
+# Natural-language cue → capability slugs, so a question like "which networking tools do I have?"
+# routes to the right capabilities without the user naming a slug. Direct slug/phrase matches are
+# handled first (below); these are the fuzzier everyday words.
+_CAPABILITY_CUES: dict[str, tuple[str, ...]] = {
+    "network": ("host_discovery", "port_scanning", "service_detection", "packet_capture", "dns_enumeration"),
+    "networking": ("host_discovery", "port_scanning", "service_detection", "packet_capture", "dns_enumeration"),
+    "scan": ("host_discovery", "port_scanning", "vulnerability_scanning"),
+    "port": ("port_scanning",),
+    "packet": ("packet_capture",),
+    "sniff": ("packet_capture",),
+    "dns": ("dns_enumeration",),
+    "password": ("password_cracking",),
+    "crack": ("password_cracking",),
+    "hash": ("hash_computation",),
+    "encrypt": ("encryption",),
+    "decrypt": ("encryption",),
+    "json": ("json_processing",),
+    "search": ("text_search", "file_search"),
+    "grep": ("text_search",),
+    "container": ("containerization",),
+    "docker": ("containerization",),
+    "compile": ("compilation",),
+    "build": ("compilation",),
+    "package manager": ("package_management",),
+    "install a": ("package_management",),  # "install a package"; NOT the bare "installed" (too eager)
+    "dependency": ("dependency_resolution",),
+    "http": ("http_client", "http_enumeration"),
+    "web": ("http_client", "http_enumeration"),
+    "api": ("http_client",),
+    "video": ("media_transcoding",),
+    "audio": ("media_transcoding",),
+    "convert": ("media_transcoding",),
+    "download": ("media_download",),
+    "reverse": ("reverse_engineering",),
+    "disassemb": ("reverse_engineering",),
+    "forensic": ("forensics",),
+    "git": ("version_control",),
+    "process": ("process_inspection",),
+    "service": ("service_management",),
+    "disk": ("disk_inspection",),
+    "log": ("log_inspection",),
+    "remote": ("remote_access",),
+    "ssh": ("remote_access",),
+    "archive": ("archiving",),
+    "compress": ("archiving",),
+}
+
+
+def capability_slugs_in(query: str) -> list[str]:
+    """Capability slugs a natural-language query refers to — direct slug/phrase matches first, then
+    fuzzier cue words. Ordered, deduped; empty if none recognised."""
+    q = query.lower()
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(slug: str) -> None:
+        if slug not in seen:
+            seen.add(slug)
+            out.append(slug)
+
+    for slug in CAPABILITY_VOCAB:
+        if slug in q or slug.replace("_", " ") in q:
+            _add(slug)
+    for cue, slugs in _CAPABILITY_CUES.items():
+        if cue in q:
+            for slug in slugs:
+                _add(slug)
+    return out
+
+
 async def tools_with_capability(conn: Any, slug: str) -> list[str]:
     """Names of available tools that provide capability ``slug`` — a structural graph lookup (§7)."""
     rows = await conn.fetch(

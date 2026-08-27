@@ -12,11 +12,13 @@ import re
 from typing import Any
 
 from sali.core.clock import Clock, SystemClock
+from sali.core.toolvocab import CAPABILITY_VOCAB
 from sali.graph import traverse
 from sali.memory.service import MemoryService
 from sali.provider.base import ModelProvider
-from sali.retrieval.models import GraphFact, RecentItem, RetrievalBundle
+from sali.retrieval.models import GraphFact, RecentItem, RetrievalBundle, ToolFact
 from sali.retrieval.router import RetrievalPlan
+from sali.twin.capabilities import capability_slugs_in, tools_with_capability
 
 _STOP = {
     "the", "are", "and", "for", "which", "what", "does", "did", "how", "why", "who", "your",
@@ -48,7 +50,34 @@ class RetrievalService:
         # regardless of how the question is phrased. The relational intent is a ranking hint.
         graph_facts = await self._graph_facts(query, k)
         recent = await self._recent(k) if plan.use_recent else []
-        return RetrievalBundle(memories=memories, graph_facts=graph_facts, recent=recent)
+        tool_facts = await self._tool_facts(query, k) if plan.use_tools else []
+        return RetrievalBundle(memories=memories, graph_facts=graph_facts, recent=recent,
+                               tool_facts=tool_facts)
+
+    async def _tool_facts(self, query: str, k: int) -> list[ToolFact]:
+        """Answer a tool question from the inventory + capability graph: the tools that provide each
+        capability the query refers to, or — if none is named — a summary of what's installed."""
+        slugs = capability_slugs_in(query)
+        facts: list[ToolFact] = []
+        async with self.pool.acquire() as conn:
+            for slug in slugs[:k]:
+                names = await tools_with_capability(conn, slug)
+                if names:
+                    facts.append(ToolFact(capability=slug, description=CAPABILITY_VOCAB.get(slug, ""),
+                                          tools=names[:12]))
+            if not facts:  # a general "what tools do I have?" — summarize the inventory honestly
+                total = await conn.fetchval("SELECT count(*) FROM discovered_tool WHERE available")
+                if total:
+                    sample = await conn.fetch(
+                        "SELECT t.name FROM discovered_tool t JOIN graph_edge e ON e.src_id=t.node_id "
+                        "WHERE t.available AND e.rel_type='provides_capability' AND e.valid_until IS NULL "
+                        "GROUP BY t.name ORDER BY t.name LIMIT 15")
+                    known = [r["name"] for r in sample]
+                    facts.append(ToolFact(
+                        capability="inventory",
+                        description=f"{total} tools installed; {len(known)}+ with known capabilities",
+                        tools=known))
+        return facts
 
     async def _graph_facts(self, query: str, k: int) -> list[GraphFact]:
         words = [

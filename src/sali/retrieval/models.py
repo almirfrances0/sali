@@ -24,7 +24,18 @@ class RecentItem:
 
 
 @dataclass(slots=True)
+class ToolFact:
+    """Tools on the machine relevant to a question — either the providers of a capability
+    (capability = a slug) or a general inventory summary (capability = 'inventory')."""
+
+    capability: str
+    description: str
+    tools: list[str]
+
+
+@dataclass(slots=True)
 class RetrievalBundle:
     memories: list[MemoryHit] = field(default_factory=list)
     graph_facts: list[GraphFact] = field(default_factory=list)
     recent: list[RecentItem] = field(default_factory=list)
+    tool_facts: list[ToolFact] = field(default_factory=list)

@@ -147,6 +147,16 @@ class ContextEngine:
             text = "Known relationships:\n" + "\n".join(lines)
             sections.append(Section("graph", Priority.P2, text, self._count(text), score=0.6))
 
+        if bundle.tool_facts:
+            lines = []
+            for tf in bundle.tool_facts:
+                if tf.capability == "inventory":
+                    lines.append(f"- {tf.description}; e.g. {', '.join(tf.tools)}")
+                elif tf.tools:
+                    lines.append(f"- {tf.capability} ({tf.description}): {', '.join(tf.tools)}")
+            text = "Tools on this machine relevant to the question:\n" + "\n".join(lines)
+            sections.append(Section("tools_available", Priority.P2, text, self._count(text), score=0.55))
+
         if bundle.recent:
             lines = [f"- {r.event_type} at {r.at:%Y-%m-%d %H:%M}" for r in bundle.recent]
             text = "Recent activity:\n" + "\n".join(lines)
