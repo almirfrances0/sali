@@ -69,6 +69,33 @@ def _command_binary(tool_name: str, args: dict[str, Any]) -> str | None:
     cmd = args.get("command")
     return binary_of(cmd) if isinstance(cmd, str) and cmd else None
 
+
+def _retrieval_trace(bundle: Any) -> dict[str, Any]:
+    """Why each memory was selected (§7): candidate count, which retriever found it, and the ranking
+    signals (score/similarity/confidence/freshness) + epistemic kind of the top hits. Journaled for
+    diagnostics; never shown to Almir by default."""
+    hits = bundle.memories
+    by_retriever: dict[str, int] = {}
+    for h in hits:
+        by_retriever[h.retriever] = by_retriever.get(h.retriever, 0) + 1
+    top: list[dict[str, Any]] = []
+    for h in hits[:5]:
+        m = h.memory
+        ktype = classify_knowledge(m.source, m.layer, needs_grounding=m.needs_grounding,
+                                   confidence=h.effective_confidence)
+        top.append({
+            "content": m.content[:60], "retriever": h.retriever, "score": round(h.score, 3),
+            "similarity": round(h.similarity, 3) if h.similarity is not None else None,
+            "confidence": round(h.effective_confidence, 2), "freshness": round(h.freshness_factor, 2),
+            "stale": h.stale, "knowledge_type": ktype.value,
+        })
+    return {
+        "candidates": len(hits), "by_retriever": by_retriever,
+        "graph_contribution": len(bundle.graph_facts),
+        "experience_contribution": len(bundle.procedures) + len(bundle.experiences),
+        "top": top,
+    }
+
 # Warmer sampling so Sali sounds like a person, not a deterministic tool. Tool-calling is
 # rendered structurally by the model, so it still works reliably at this temperature.
 _VOICE: dict[str, Any] = {
@@ -608,7 +635,10 @@ class AgentLoop:
                      "graph": len(bundle.graph_facts), "recent": len(bundle.recent),
                      "tools": len(bundle.tool_facts),
                      "experience": len(bundle.procedures) + len(bundle.experiences),
-                     "needs_live": plan.needs_live},
+                     "needs_live": plan.needs_live,
+                     # Full retrieval trace (§7): why each memory was selected — recorded for
+                     # diagnostics, not shown to Almir. Per-hit ranking signals + which retriever found it.
+                     "trace": _retrieval_trace(bundle)},
                 )
 
                 await journal.set_state(RunState.BUILD_CONTEXT)
