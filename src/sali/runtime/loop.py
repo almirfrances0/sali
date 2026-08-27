@@ -39,6 +39,7 @@ from sali.perception.service import build_perception
 from sali.provider.base import ChatMessage, ChatResult, ModelProvider, ToolCall
 from sali.retrieval.router import classify
 from sali.retrieval.service import RetrievalService
+from sali.runtime.health import HealthService
 from sali.runtime.journal import RunJournal
 from sali.runtime.self_state import SelfStateStore
 from sali.runtime.state import RunState, resume_action
@@ -249,6 +250,18 @@ class _SelfSink:
         return await self._store.assemble()
 
 
+class _HealthSink:
+    """Exposes Sali's live subsystem/internet health to the system_health tool (§51/§52/§53)."""
+
+    def __init__(self, service: HealthService) -> None:
+        self._service = service
+
+    async def report(self) -> dict[str, Any]:
+        h = await self._service.check()
+        return {"subsystems": h.subsystems, "degraded": h.degraded, "online": h.internet,
+                "summary": h.render(), "detail": h.detail}
+
+
 class _ToolCatalogSink:
     """Lets Sali query its OWN toolset (§53/§21): which installed tools serve a task (ranked by learned
     reliability + safety) and a tool's alternatives — over the inventory + capability graph. Read-only."""
@@ -412,6 +425,7 @@ class AgentLoop:
         self._self_state = SelfStateStore(pool)  # persistent runtime self-model (§6/§7/§41)
         self._self_sink = _SelfSink(self._self_state)
         self._world = WorldStateBuilder(pool, self._perception)  # live "what's happening now" (§73)
+        self._health = _HealthSink(HealthService(pool, provider, perception=self._perception))  # §51-53
         self._syscrit: tuple[frozenset[str], float] | None = None  # (system-critical binaries, loaded_at)
         self._consolidating: asyncio.Task[Any] | None = None
         self._last_consolidate: Any = None
@@ -869,7 +883,7 @@ class AgentLoop:
                           schedules=self._schedules, documents=self._documents, remote=self._remote,
                           comms=self._comms, browser=self._browser, vision=self._vision,
                           perception=self._perception, catalog=self._catalog,
-                          self_model=self._self_sink)
+                          self_model=self._self_sink, health=self._health)
         result = await dispatch.run_tool(tool, call.arguments, ctx)
 
         await journal.set_state(RunState.OBSERVE)

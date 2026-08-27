@@ -36,5 +36,26 @@ class SelfState(Tool):
         return ToolResult(ok=True, output=report, display=f"self-state (focus: {focus})")
 
 
+class SystemHealth(Tool):
+    name = "system_health"
+    description = (
+        "Check whether your own subsystems are working — your model, datastore, embedder, perception — "
+        "and whether the internet is reachable. Use it when Almir asks if you're OK, when something "
+        "seems broken, or before claiming you researched something online (if you're offline, say so "
+        "instead of pretending). Returns each subsystem's status."
+    )
+    parameters = {"type": "object", "properties": {}}
+    risk_level = RiskLevel.R0
+    capabilities = frozenset({Capability.READ})
+    idempotent = True
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        if ctx.health is None:
+            return ToolResult(ok=False, display="no health probe", error="health isn't available")
+        report = await ctx.health.report()
+        return ToolResult(ok=True, output=report, display=str(report.get("summary", "health checked")))
+
+
 def register_builtins(registry: ToolRegistry) -> None:
     registry.register(SelfState())
+    registry.register(SystemHealth())

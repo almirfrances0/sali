@@ -139,6 +139,14 @@ class SelfSink(Protocol):
     async def report(self) -> dict[str, Any]: ...
 
 
+class HealthSink(Protocol):
+    """How a tool reads Sali's live subsystem health (spec §51/§52/§53): datastore, model, embedder,
+    perception, and internet reachability. Concrete impl (HealthService) is injected by the runtime;
+    returns a JSON-ready dict so the tools layer stays free of runtime/provider types."""
+
+    async def report(self) -> dict[str, Any]: ...
+
+
 @dataclass(slots=True)
 class ToolContext:
     settings: Settings
@@ -158,6 +166,7 @@ class ToolContext:
     perception: PerceptionSink | None = None  # injected by the loop; the focused app/window + UI tree
     catalog: ToolCatalogSink | None = None  # injected by the loop; lets a tool query its own toolset
     self_model: SelfSink | None = None  # injected by the loop; lets a tool read Sali's own self-state
+    health: HealthSink | None = None  # injected by the loop; lets a tool read subsystem/internet health
 
     @property
     def paths(self) -> PathGuard:
