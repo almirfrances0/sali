@@ -1,0 +1,24 @@
+# Sali Web — serves the API (chat /ws, firehose /stream, /api/*) and the built cockpit (web/dist)
+# same-origin on 127.0.0.1:8790. Runs alongside the `sali` daemon; both share the one datastore.
+#
+#   cd web && npm install && npm run build      # build the SPA once (and after UI changes)
+#   sudo cp systemd/sali-web.service /etc/systemd/system/
+#   sudo systemctl enable --now sali-web
+#   # open http://127.0.0.1:8790/
+[Unit]
+Description=Sali Web — local cockpit + API (a window into the live runtime)
+After=network-online.target postgresql.service sali.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=almir
+WorkingDirectory=/home/almir/Desktop/sali
+Environment=DISPLAY=:0
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+ExecStart=/home/almir/Desktop/sali/.venv/bin/sali serve --host 127.0.0.1 --port 8790
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

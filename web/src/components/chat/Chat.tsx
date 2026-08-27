@@ -105,6 +105,7 @@ export function Chat(): JSX.Element {
               }
             }}
             rows={1}
+            aria-label="Message Sali"
             placeholder="Message Sali…"
             className="max-h-28 min-h-[38px] flex-1 resize-none rounded-md border border-line bg-base/60 px-3 py-2 text-sm text-ink outline-none placeholder:text-faint focus:border-line-strong"
           />

@@ -18,12 +18,14 @@ function NodeMesh({
   position,
   isActiveRef,
   selected,
+  dim,
   onSelect,
 }: {
   node: GraphNode
   position: Vec3
   isActiveRef: { current: (id: string) => number }
   selected: boolean
+  dim: boolean
   onSelect: (n: GraphNode) => void
 }): JSX.Element {
   const ref = useRef<Mesh>(null)
@@ -34,10 +36,11 @@ function NodeMesh({
     if (!m) return
     const act = isActiveRef.current(node.id) // 0..1 recent-activation intensity
     const boost = selected ? 1 : 0
-    const target = 1 + act * 0.55 + boost * 0.35
+    const target = (1 + act * 0.55 + boost * 0.35) * (dim ? 0.6 : 1)
     m.scale.setScalar(m.scale.x + (target - m.scale.x) * 0.2)
     const mat = m.material as MeshStandardMaterial
-    mat.emissiveIntensity = 0.35 + act * 2.4 + boost * 0.6
+    mat.emissiveIntensity = (0.35 + act * 2.4 + boost * 0.6) * (dim ? 0.18 : 1)
+    mat.opacity += ((dim ? 0.28 : 1) - mat.opacity) * 0.2
   })
   return (
     <mesh
@@ -62,6 +65,7 @@ function NodeMesh({
         emissiveIntensity={0.35}
         roughness={0.35}
         metalness={0.1}
+        transparent
       />
     </mesh>
   )
@@ -71,17 +75,19 @@ function EdgeLine({
   a,
   b,
   activeRef,
+  dim,
 }: {
   a: Vec3
   b: Vec3
   activeRef: { current: number }
+  dim: boolean
 }): JSX.Element {
   const ref = useRef<any>(null)
   useFrame(() => {
     const l = ref.current
     if (!l) return
     const k = activeRef.current
-    l.material.opacity = 0.12 + k * 0.7
+    l.material.opacity = (0.12 + k * 0.7) * (dim ? 0.22 : 1)
     l.material.color.setRGB(0.42 + k * 0.05, 0.55 + k * 0.35, 0.62 + k * 0.28)
   })
   return <Line ref={ref} points={[a, b]} color="#6a8398" lineWidth={1} transparent opacity={0.12} />
@@ -114,6 +120,19 @@ function Scene({ nodes, edges }: { nodes: GraphNode[]; edges: GraphEdge[] }): JS
     return s
   }, [activation, nameToId])
 
+  // Focus (§11): selecting a node dims everything that isn't it or its direct neighbours, so a click
+  // reveals that entity's neighbourhood in place — no page nav, nothing disappears.
+  const focusId = selection?.kind === 'node' ? selection.id : null
+  const neighborIds = useMemo(() => {
+    if (!focusId) return null
+    const s = new Set<string>([focusId])
+    for (const e of edges) {
+      if (e.src_id === focusId) s.add(e.dst_id)
+      if (e.dst_id === focusId) s.add(e.src_id)
+    }
+    return s
+  }, [focusId, edges])
+
   const activeAt = activation?.at ?? 0
   const intensity = () => Math.max(0, 1 - (Date.now() - activeAt) / ACTIVE_MS)
   const nodeActiveRef = useRef((id: string) => (activeNodeIds.has(id) ? intensity() : 0))
@@ -142,7 +161,8 @@ function Scene({ nodes, edges }: { nodes: GraphNode[]; edges: GraphEdge[] }): JS
         const a = positions.get(e.src_id)
         const b = positions.get(e.dst_id)
         if (!a || !b) return null
-        return <EdgeLine key={e.id} a={a} b={b} activeRef={edgeActive[i].ref} />
+        const edgeDim = focusId != null && e.src_id !== focusId && e.dst_id !== focusId
+        return <EdgeLine key={e.id} a={a} b={b} activeRef={edgeActive[i].ref} dim={edgeDim} />
       })}
       {nodes.map((n) => {
         const p = positions.get(n.id)
@@ -153,7 +173,8 @@ function Scene({ nodes, edges }: { nodes: GraphNode[]; edges: GraphEdge[] }): JS
             node={n}
             position={p}
             isActiveRef={nodeActiveRef}
-            selected={selection?.kind === 'node' && selection.id === n.id}
+            selected={focusId === n.id}
+            dim={neighborIds != null && !neighborIds.has(n.id)}
             onSelect={(node) => select({ kind: 'node', id: node.id, label: node.name })}
           />
         )
@@ -210,7 +231,16 @@ export function Brain(): JSX.Element {
           ) : null
         }
       />
-      <div className="relative min-h-0 flex-1">
+      <div
+        className="relative min-h-0 flex-1"
+        role="img"
+        aria-label={
+          data
+            ? `Sali's knowledge graph: ${data.nodes.length} entities, ${data.edges.length} relationships. ` +
+              `Entity details are also available in the World panel and by selecting a node.`
+            : 'Sali knowledge graph, loading'
+        }
+      >
         <div className="pointer-events-none absolute inset-0 z-10 vignette" />
         {isLoading && <Empty>waking the graph…</Empty>}
         {isError && <Empty>the graph is unreachable — is `sali serve` running?</Empty>}
