@@ -2,76 +2,123 @@ import { Html, Line, OrbitControls } from '@react-three/drei'
 import { Canvas, useFrame } from '@react-three/fiber'
 import { useQuery } from '@tanstack/react-query'
 import { useEffect, useMemo, useRef } from 'react'
-import { BufferAttribute, BufferGeometry, type Mesh, type MeshStandardMaterial } from 'three'
+import { AdditiveBlending, BufferAttribute, BufferGeometry, type Mesh, type MeshStandardMaterial, type Points } from 'three'
 
 import { api } from '../../lib/api'
 import type { GraphEdge, GraphNode } from '../../lib/types'
 import { useStore } from '../../stores/store'
-import { Empty, Panel, PanelHeader } from '../ui/primitives'
-import { layout, nodeColor, nodeRadius, prefersReducedMotion, type Vec3 } from './graph'
+import { Empty, Panel } from '../ui/primitives'
+import type { Vec3 } from './graph'
+import { prefersReducedMotion } from './graph'
+import {
+  BRAIN, brainLayout, neuralDust, REGION_META, REGIONS, regionForPresence, regionOf, regionsForEvent,
+  type Region,
+} from './regions'
 
-const HUB_TYPES = new Set(['agent', 'machine', 'person', 'model', 'service', 'project'])
-// Firing dynamics (a small, bounded neural simulation — SEEDED by real events/retrievals, never a timer).
-const THRESHOLD = 1.0 // charge at which a neuron fires an action potential
-const REFRACTORY = 260 // ms a neuron cannot re-fire (real refractory period → bounds cascades)
-const FLASH = 360 // ms the soma stays lit after firing (the spike)
-const AP_MS = 520 // ms an action potential takes to travel a synapse
-const ARRIVE = 0.6 // charge delivered to the downstream neuron when an AP arrives (2 inputs → it fires)
-const DECAY = 0.94 // per-frame charge decay → isolated charge fades, so activity dissipates (calm)
-const FANOUT = 4 // max synapses an firing neuron drives (bounds the cascade)
-const MAX_AP = 220 // hard cap on action potentials in flight
+// firing dynamics (a bounded neural cascade — seeded by REAL events/retrievals, never a timer)
+const THRESHOLD = 1.0
+const REFRACTORY = 260
+const FLASH = 360
+const AP_MS = 520
+const ARRIVE = 0.6
+const DECAY = 0.94
+const FANOUT = 4
+const MAX_AP = 200
 
-interface AP {
-  a: Vec3
-  b: Vec3
-  start: number
-  dst: number // index of the downstream neuron this action potential charges on arrival
-}
+interface AP { a: Vec3; b: Vec3; start: number; dst: number }
 
-function Dendrites({ nodes, positions }: { nodes: GraphNode[]; positions: Map<string, Vec3> }): JSX.Element | null {
-  // short spiky dendrite tufts radiating from each soma, in ONE line-segments geometry (one draw call).
-  const geom = useMemo(() => {
-    const pts: number[] = []
-    const hash = (s: string, i: number) => {
-      let h = 2166136261 ^ i
-      for (let k = 0; k < s.length; k++) h = Math.imul(h ^ s.charCodeAt(k), 16777619)
-      return ((h >>> 0) % 1000) / 1000
-    }
-    for (const n of nodes) {
-      const p = positions.get(n.id)
-      if (!p) continue
-      const r = nodeRadius(n)
-      const tufts = 5
-      for (let i = 0; i < tufts; i++) {
-        const t = (i + 0.5) / tufts
-        const phi = Math.acos(1 - 2 * t)
-        const theta = 2 * Math.PI * hash(n.id, i)
-        const dx = Math.sin(phi) * Math.cos(theta)
-        const dy = Math.cos(phi)
-        const dz = Math.sin(phi) * Math.sin(theta)
-        const len = r * (1.6 + hash(n.id, i + 9) * 1.2)
-        pts.push(p[0] + dx * r, p[1] + dy * r, p[2] + dz * r)
-        pts.push(p[0] + dx * len, p[1] + dy * len, p[2] + dz * len)
-      }
-    }
-    const g = new BufferGeometry()
-    g.setAttribute('position', new BufferAttribute(new Float32Array(pts), 3))
-    return g
-  }, [nodes, positions])
-  if (!geom) return null
+// ── the brain silhouette: two translucent wireframe hemispheres + a soft inner membrane ─────────────
+function Membrane(): JSX.Element {
   return (
-    <lineSegments geometry={geom}>
-      <lineBasicMaterial color="#3f5468" transparent opacity={0.35} />
-    </lineSegments>
+    <group>
+      {[1, -1].map((s) => (
+        <mesh key={s} position={[s * 1.85, 0, 0]} scale={[BRAIN.A * 0.56, BRAIN.B, BRAIN.C]}>
+          <icosahedronGeometry args={[1, 4]} />
+          <meshBasicMaterial color="#6f8bb0" wireframe transparent opacity={0.05} depthWrite={false} />
+        </mesh>
+      ))}
+      <mesh scale={[BRAIN.A, BRAIN.B, BRAIN.C]}>
+        <sphereGeometry args={[1, 24, 24]} />
+        <meshBasicMaterial color="#101826" transparent opacity={0.06} depthWrite={false} side={2} />
+      </mesh>
+    </group>
   )
 }
 
+// ── ambient neural dust (depth only, clearly not data) ──────────────────────────────────────────────
+function Dust(): JSX.Element {
+  const ref = useRef<Points>(null)
+  const geom = useMemo(() => {
+    const g = new BufferGeometry()
+    g.setAttribute('position', new BufferAttribute(neuralDust(1500), 3))
+    return g
+  }, [])
+  useFrame((_, dt) => {
+    if (ref.current && !prefersReducedMotion()) ref.current.rotation.y += dt * 0.02
+  })
+  return (
+    <points ref={ref} geometry={geom}>
+      <pointsMaterial size={0.045} color="#5c7799" transparent opacity={0.5} sizeAttenuation depthWrite={false} blending={AdditiveBlending} />
+    </points>
+  )
+}
+
+// ── a cognitive region's glow — brightens when Sali actually uses that faculty ──────────────────────
+function RegionGlow({ region, levelRef }: { region: Region; levelRef: { current: number } }): JSX.Element {
+  const ref = useRef<Mesh>(null)
+  const meta = REGION_META[region]
+  useFrame(() => {
+    const m = ref.current
+    if (!m) return
+    const lv = levelRef.current
+    const mat = m.material as MeshStandardMaterial
+    mat.opacity = 0.03 + lv * 0.16
+    m.scale.setScalar(2.6 + lv * 1.4)
+  })
+  return (
+    <mesh ref={ref} position={meta.center}>
+      <sphereGeometry args={[1, 16, 16]} />
+      <meshBasicMaterial color={meta.color} transparent opacity={0.03} depthWrite={false} blending={AdditiveBlending} />
+    </mesh>
+  )
+}
+
+// ── curved neural pathway (a synapse) — brightens while carrying real retrieval activity ────────────
+function bow(a: Vec3, b: Vec3, k = 0.22): Vec3[] {
+  const dir: Vec3 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]]
+  const px = dir[1], py = -dir[0] * 0.4, pz = dir[0] // a gentle out-of-line control offset
+  const pl = Math.hypot(px, py, pz) || 1
+  const off = k * Math.hypot(...dir)
+  const c: Vec3 = [(a[0] + b[0]) / 2 + (px / pl) * off, (a[1] + b[1]) / 2 + (py / pl) * off, (a[2] + b[2]) / 2 + (pz / pl) * off]
+  const pts: Vec3[] = []
+  for (let i = 0; i <= 8; i++) {
+    const t = i / 8
+    const it = 1 - t
+    pts.push([it * it * a[0] + 2 * it * t * c[0] + t * t * b[0], it * it * a[1] + 2 * it * t * c[1] + t * t * b[1], it * it * a[2] + 2 * it * t * c[2] + t * t * b[2]])
+  }
+  return pts
+}
+
+function Pathway({ a, b, activeRef }: { a: Vec3; b: Vec3; activeRef: { current: number } }): JSX.Element {
+  const ref = useRef<any>(null)
+  const pts = useMemo(() => bow(a, b), [a, b])
+  useFrame(() => {
+    const l = ref.current
+    if (!l) return
+    const k = activeRef.current
+    l.material.opacity = 0.08 + k * 0.65
+    l.material.color.setRGB(0.35 + k * 0.2, 0.5 + k * 0.4, 0.6 + k * 0.35)
+  })
+  return <Line ref={ref} points={pts} color="#4a6072" lineWidth={1} transparent opacity={0.08} />
+}
+
 function Scene({ nodes, edges }: { nodes: GraphNode[]; edges: GraphEdge[] }): JSX.Element {
-  const positions = useMemo(() => layout(nodes, edges), [nodes, edges])
+  const positions = useMemo(() => brainLayout(nodes, edges), [nodes, edges])
   const index = useMemo(() => new Map(nodes.map((n, i) => [n.id, i])), [nodes])
-  const nameToId = useMemo(() => {
-    const m = new Map<string, string>()
-    for (const n of nodes) m.set(n.name.toLowerCase(), n.id)
+  const nameToId = useMemo(() => new Map(nodes.map((n) => [n.name.toLowerCase(), n.id])), [nodes])
+  const regionNodes = useMemo(() => {
+    const m = new Map<Region, number[]>(REGIONS.map((r) => [r, []]))
+    nodes.forEach((n, i) => m.get(regionOf(n.node_type))!.push(i))
     return m
   }, [nodes])
   const adjacency = useMemo(() => {
@@ -84,13 +131,12 @@ function Scene({ nodes, edges }: { nodes: GraphNode[]; edges: GraphEdge[] }): JS
   }, [edges])
 
   const activation = useStore((s) => s.activation)
+  const events = useStore((s) => s.events)
+  const lastSeq = useStore((s) => s.lastSeq)
+  const presence = useStore((s) => s.presence?.presence)
   const selection = useStore((s) => s.selection)
   const select = useStore((s) => s.select)
-  const presence = useStore((s) => s.presence?.presence)
-  const lastSeq = useStore((s) => s.lastSeq)
-  const pulsing = presence === 'thinking' || presence === 'executing' || presence === 'learning'
 
-  const hubId = useMemo(() => nodes.find((n) => n.node_type === 'agent')?.id ?? null, [nodes])
   const focusId = selection?.kind === 'node' ? selection.id : null
   const neighborIds = useMemo(() => {
     if (!focusId) return null
@@ -102,13 +148,18 @@ function Scene({ nodes, edges }: { nodes: GraphNode[]; edges: GraphEdge[] }): JS
     return s
   }, [focusId, edges])
 
-  // ── the firing simulation (mutable refs; never re-renders React) ───────────────────────────────────
+  // firing + region-activation state (mutable refs; never re-renders React)
   const somaRefs = useRef<(Mesh | null)[]>([])
   const haloRefs = useRef<(Mesh | null)[]>([])
   const apRefs = useRef<(Mesh | null)[]>([])
-  const charge = useRef<Float32Array>(new Float32Array(nodes.length))
-  const lastFire = useRef<Float32Array>(new Float32Array(nodes.length).fill(-1e9))
+  const charge = useRef(new Float32Array(nodes.length))
+  const lastFire = useRef(new Float32Array(nodes.length).fill(-1e9))
   const aps = useRef<AP[]>([])
+  const region = useRef<Record<Region, number>>(Object.fromEntries(REGIONS.map((r) => [r, 0])) as Record<Region, number>)
+  const regionRefs = useRef<Record<Region, { current: number }>>(
+    Object.fromEntries(REGIONS.map((r) => [r, { current: 0 }])) as Record<Region, { current: number }>,
+  )
+  const edgeActive = useRef(edges.map(() => ({ current: 0 })))
   const prevSeq = useRef(0)
 
   useEffect(() => {
@@ -116,35 +167,57 @@ function Scene({ nodes, edges }: { nodes: GraphNode[]; edges: GraphEdge[] }): JS
     lastFire.current = new Float32Array(nodes.length).fill(-1e9)
     aps.current = []
   }, [nodes.length])
-
-  const seedFire = (nodeId: string) => {
-    const i = index.get(nodeId)
-    if (i !== undefined) charge.current[i] = THRESHOLD // will fire next frame
-  }
-  // a real retrieval → the REAL nodes it used fire, seeding a cascade through their real synapses
   useEffect(() => {
-    if (activation) for (const f of activation.graph) {
-      const a = nameToId.get(f.src.toLowerCase())
-      const b = nameToId.get(f.dst.toLowerCase())
-      if (a) seedFire(a)
-      if (b) seedFire(b)
+    edgeActive.current = edges.map(() => ({ current: 0 }))
+  }, [edges])
+
+  const fire = (i: number | undefined) => { if (i !== undefined) charge.current[i] = THRESHOLD }
+  const activateRegion = (r: Region, amount: number) => {
+    region.current[r] = Math.min(1, region.current[r] + amount)
+    const pool = regionNodes.get(r) ?? []
+    for (let k = 0; k < 3 && pool.length; k++) fire(pool[Math.floor((lastSeq + k * 13) % pool.length)])
+  }
+
+  // a real retrieval → the memory region lights + the exact neurons it used fire, seeding a cascade
+  const activeAt = activation?.at ?? 0
+  useEffect(() => {
+    if (!activation) return
+    activateRegion('memory', 0.9)
+    activateRegion('knowledge', 0.5)
+    for (const f of activation.graph) {
+      fire(index.get(nameToId.get(f.src.toLowerCase()) ?? ''))
+      fire(index.get(nameToId.get(f.dst.toLowerCase()) ?? ''))
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activation])
-  // every real event → a neuron fires (deterministic by seq); a burst fires ~N neurons
+  }, [activeAt])
+
+  // every real firehose event → light the region(s) it belongs to (§5)
   useEffect(() => {
-    const delta = Math.min(Math.max(lastSeq - prevSeq.current, 1), 6)
+    const fresh = events.filter((e) => e.seq > prevSeq.current)
     prevSeq.current = lastSeq
-    if (nodes.length) for (let k = 0; k < delta; k++) seedFire(nodes[(lastSeq + k * 7) % nodes.length].id)
+    for (const e of fresh) for (const r of regionsForEvent(e.type)) activateRegion(r, 0.55)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastSeq])
+
+  const retrievedIds = useMemo(() => {
+    const s = new Set<string>()
+    if (activation) for (const f of activation.graph) {
+      const a = nameToId.get(f.src.toLowerCase()); if (a) s.add(a)
+      const b = nameToId.get(f.dst.toLowerCase()); if (b) s.add(b)
+    }
+    return s
+  }, [activation, nameToId])
 
   useFrame(({ clock }) => {
     const now = performance.now()
     const ch = charge.current
     const lf = lastFire.current
 
-    // 1) advance action potentials; when one arrives, it charges its downstream neuron (a synapse)
+    // presence keeps one region warm while Sali is in that state (real derived state)
+    const pr = regionForPresence(presence)
+    if (pr) region.current[pr] = Math.max(region.current[pr], 0.5)
+
+    // action potentials: deliver charge on arrival
     const live: AP[] = []
     for (const ap of aps.current) {
       if (now - ap.start >= AP_MS) ch[ap.dst] = Math.min(THRESHOLD * 1.4, ch[ap.dst] + ARRIVE)
@@ -152,7 +225,7 @@ function Scene({ nodes, edges }: { nodes: GraphNode[]; edges: GraphEdge[] }): JS
     }
     aps.current = live
 
-    // 2) fire eligible neurons → spawn action potentials to neighbours
+    // fire eligible neurons → send APs to neighbours
     for (let i = 0; i < nodes.length; i++) {
       if (ch[i] >= THRESHOLD && now - lf[i] > REFRACTORY) {
         lf[i] = now
@@ -170,26 +243,38 @@ function Scene({ nodes, edges }: { nodes: GraphNode[]; edges: GraphEdge[] }): JS
       ch[i] *= DECAY
     }
 
-    // 3) render neurons: flash on fire, subtle glow while charging, calm when quiet
+    // region levels decay; publish to the glow refs
+    for (const r of REGIONS) {
+      region.current[r] *= 0.97
+      regionRefs.current[r].current = region.current[r]
+    }
+
+    // neurons: flash on fire, faint charge glow, dim when a selection focuses elsewhere
+    const retrievalK = Math.max(0, 1 - (Date.now() - activeAt) / 2600)
     for (let i = 0; i < nodes.length; i++) {
       const soma = somaRefs.current[i]
       if (!soma) continue
-      const fire = Math.max(0, 1 - (now - lf[i]) / FLASH)
-      const dim = neighborIds != null && !neighborIds.has(nodes[i].id) ? 0.16 : 1
-      const breathe = pulsing && nodes[i].id === hubId ? (Math.sin(clock.elapsedTime * 3) * 0.5 + 0.5) * 0.4 : 0
-      const sel = focusId === nodes[i].id ? 0.4 : 0
+      const f = Math.max(0, 1 - (now - lf[i]) / FLASH)
+      const dim = neighborIds != null && !neighborIds.has(nodes[i].id) ? 0.14 : 1
+      const sel = focusId === nodes[i].id ? 0.5 : 0
       const mat = soma.material as MeshStandardMaterial
-      mat.emissiveIntensity = (0.32 + fire * 3.2 + ch[i] * 0.6 + breathe * 1.4 + sel) * dim
-      const scale = (1 + fire * 0.55 + breathe + sel * 0.4) * (dim < 1 ? 0.7 : 1)
+      mat.emissiveIntensity = (0.28 + f * 3.0 + ch[i] * 0.5 + sel) * dim
+      const scale = (1 + f * 0.5 + sel * 0.4) * (dim < 1 ? 0.72 : 1)
       soma.scale.setScalar(soma.scale.x + (scale - soma.scale.x) * 0.3)
       const halo = haloRefs.current[i]
       if (halo) {
-        ;(halo.material as MeshStandardMaterial).opacity = (0.05 + fire * 0.5 + breathe * 0.2) * dim
-        halo.scale.setScalar(soma.scale.x * (1 + fire * 0.6))
+        ;(halo.material as MeshStandardMaterial).opacity = (0.05 + f * 0.45) * dim
+        halo.scale.setScalar(soma.scale.x * (1 + f * 0.6))
       }
     }
 
-    // 4) render action potentials travelling the synapses
+    // pathways carrying retrieval activity
+    for (let i = 0; i < edges.length; i++) {
+      const e = edges[i]
+      edgeActive.current[i].current = retrievedIds.has(e.src_id) && retrievedIds.has(e.dst_id) ? retrievalK : 0
+    }
+
+    // action-potential sprites travelling the synapses
     for (let i = 0; i < MAX_AP; i++) {
       const m = apRefs.current[i]
       if (!m) continue
@@ -198,34 +283,38 @@ function Scene({ nodes, edges }: { nodes: GraphNode[]; edges: GraphEdge[] }): JS
         const t = (now - ap.start) / AP_MS
         const e = t * t * (3 - 2 * t)
         m.position.set(ap.a[0] + (ap.b[0] - ap.a[0]) * e, ap.a[1] + (ap.b[1] - ap.a[1]) * e, ap.a[2] + (ap.b[2] - ap.a[2]) * e)
-        m.scale.setScalar(0.09 + Math.sin(t * Math.PI) * 0.16)
+        m.scale.setScalar(0.08 + Math.sin(t * Math.PI) * 0.13)
         m.visible = true
       } else m.visible = false
     }
+    void clock
   })
 
   return (
     <>
-      <ambientLight intensity={0.5} />
-      <pointLight position={[8, 10, 12]} intensity={0.65} />
-      <pointLight position={[-10, -6, -8]} intensity={0.25} color="#4fe0cf" />
-      <Dendrites nodes={nodes} positions={positions} />
-      {edges.map((e) => {
+      <fog attach="fog" args={['#05070a', 15, 40]} />
+      <ambientLight intensity={0.45} />
+      <pointLight position={[8, 10, 12]} intensity={0.55} />
+      <pointLight position={[-10, -6, -8]} intensity={0.22} color="#4fe0cf" />
+      <Membrane />
+      <Dust />
+      {REGIONS.map((r) => <RegionGlow key={r} region={r} levelRef={regionRefs.current[r]} />)}
+      {edges.map((e, i) => {
         const a = positions.get(e.src_id)
         const b = positions.get(e.dst_id)
         if (!a || !b) return null
-        return <Line key={e.id} points={[a, b]} color="#4d6376" lineWidth={1} transparent opacity={0.14} />
+        return <Pathway key={e.id} a={a} b={b} activeRef={edgeActive.current[i]} />
       })}
       {nodes.map((n, i) => {
         const p = positions.get(n.id)
         if (!p) return null
-        const color = nodeColor(n.node_type)
-        const r = nodeRadius(n)
+        const color = REGION_META[regionOf(n.node_type)].color
+        const r = 0.13 + n.confidence * 0.14 + (n.node_type === 'agent' ? 0.22 : 0)
         return (
           <group key={n.id} position={p}>
-            <mesh ref={(el) => { haloRefs.current[i] = el }} scale={1}>
-              <sphereGeometry args={[r * 2.1, 14, 14]} />
-              <meshStandardMaterial color={color} emissive={color} emissiveIntensity={1} transparent opacity={0.06} depthWrite={false} />
+            <mesh ref={(el) => { haloRefs.current[i] = el }}>
+              <sphereGeometry args={[r * 2.2, 12, 12]} />
+              <meshStandardMaterial color={color} emissive={color} emissiveIntensity={1} transparent opacity={0.05} depthWrite={false} blending={AdditiveBlending} />
             </mesh>
             <mesh
               ref={(el) => { somaRefs.current[i] = el }}
@@ -234,7 +323,7 @@ function Scene({ nodes, edges }: { nodes: GraphNode[]; edges: GraphEdge[] }): JS
               onPointerOut={() => { document.body.style.cursor = 'auto' }}
             >
               <icosahedronGeometry args={[r, 1]} />
-              <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.32} roughness={0.4} metalness={0.1} transparent />
+              <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.28} roughness={0.4} metalness={0.1} transparent />
             </mesh>
           </group>
         )
@@ -245,16 +334,17 @@ function Scene({ nodes, edges }: { nodes: GraphNode[]; edges: GraphEdge[] }): JS
           <meshBasicMaterial color="#b9fff2" toneMapped={false} transparent opacity={0.95} />
         </mesh>
       ))}
-      {nodes.filter((n) => HUB_TYPES.has(n.node_type)).map((n) => {
-        const p = positions.get(n.id)
-        if (!p) return null
+      {REGIONS.map((r) => {
+        const c = REGION_META[r].center
         return (
-          <Html key={`l-${n.id}`} position={[p[0], p[1] + nodeRadius(n) + 0.3, p[2]]} center distanceFactor={12} style={{ pointerEvents: 'none' }}>
-            <div className="whitespace-nowrap font-mono text-[10px] tracking-wide text-ink/80">{n.name}</div>
+          <Html key={`rl-${r}`} position={[c[0], c[1] + 2.4, c[2]]} center distanceFactor={16} style={{ pointerEvents: 'none' }}>
+            <div className="whitespace-nowrap font-mono text-[9px] uppercase tracking-[0.25em]" style={{ color: REGION_META[r].color, opacity: 0.55 }}>
+              {REGION_META[r].label}
+            </div>
           </Html>
         )
       })}
-      <OrbitControls enablePan={false} enableDamping dampingFactor={0.08} minDistance={6} maxDistance={34} autoRotate={!prefersReducedMotion()} autoRotateSpeed={0.22} />
+      <OrbitControls enablePan={false} enableDamping dampingFactor={0.08} minDistance={9} maxDistance={40} autoRotate={!prefersReducedMotion()} autoRotateSpeed={0.18} />
     </>
   )
 }
@@ -266,39 +356,23 @@ export function Brain(): JSX.Element {
     staleTime: 30_000,
   })
   const setToolsOpen = useStore((s) => s.setToolsOpen)
-  const collapsed = data?.collapsed ?? {}
-  const collapsedCount = Object.values(collapsed).reduce((a, b) => a + b, 0)
+  const collapsedCount = Object.values(data?.collapsed ?? {}).reduce((a, b) => a + b, 0)
 
   return (
-    <Panel>
-      <PanelHeader
-        label="Neural memory"
-        right={
-          data ? (
-            <span className="font-mono text-2xs text-faint">
-              {data.nodes.length} neurons · {data.edges.length} synapses
-              {collapsedCount > 0 && (
-                <>
-                  {' · '}
-                  <button onClick={() => setToolsOpen(true)} className="text-accent-dim hover:text-accent">
-                    {collapsedCount} tools ▸
-                  </button>
-                </>
-              )}
-            </span>
-          ) : null
-        }
-      />
-      <div
-        className="relative min-h-0 flex-1"
-        role="img"
-        aria-label={data ? `Sali's neural memory: ${data.nodes.length} entities firing across ${data.edges.length} synapses. Details in the World panel and by selecting a neuron.` : 'loading'}
-      >
-        <div className="pointer-events-none absolute inset-0 z-10 vignette" />
+    <Panel className="!bg-transparent !border-0 !shadow-none">
+      <div className="pointer-events-none absolute right-3 top-2 z-20 flex items-center gap-2 font-mono text-2xs text-faint">
+        {data && <span>{data.nodes.length} neurons · {data.edges.length} synapses</span>}
+        {collapsedCount > 0 && (
+          <button onClick={() => setToolsOpen(true)} className="pointer-events-auto text-accent-dim hover:text-accent">
+            {collapsedCount} tools ▸
+          </button>
+        )}
+      </div>
+      <div className="relative min-h-0 flex-1" role="img" aria-label={data ? `Sali's neural memory: ${data.nodes.length} entities across cognitive regions` : 'loading'}>
         {isLoading && <Empty>waking the neurons…</Empty>}
-        {isError && <Empty>the graph is unreachable — is `sali serve` running?</Empty>}
+        {isError && <Empty>the brain is unreachable — is `sali serve` running?</Empty>}
         {data && (
-          <Canvas camera={{ position: [0, 1.5, 17], fov: 50 }} dpr={[1, 2]} gl={{ antialias: true, alpha: true }}>
+          <Canvas camera={{ position: [0, 2, 20], fov: 50 }} dpr={[1, 2]} gl={{ antialias: true, alpha: true }}>
             <Scene nodes={data.nodes} edges={data.edges} />
           </Canvas>
         )}
