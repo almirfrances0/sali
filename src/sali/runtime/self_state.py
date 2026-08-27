@@ -62,6 +62,16 @@ class SelfStateStore:
             await conn.execute(
                 "UPDATE sali_state SET mode='working', current_focus=$1, turn_count=turn_count+1, "
                 "updated_at=now() WHERE id", focus or None)
+            await self._emit_presence(conn, "working")
+
+    @staticmethod
+    async def _emit_presence(conn: Any, mode: str) -> None:
+        """Push a presence change onto the durable bus so a live UI reflects idle↔working the instant
+        it happens (§27). Payload is minimal (mode only) — the UI re-reads the redacted self-view;
+        the raw focus text is never persisted here."""
+        await conn.execute(
+            "INSERT INTO event (event_type, subject_type, payload) VALUES ('self.presence','self',$1)",
+            {"mode": mode})
 
     async def set_operation(self, operation: str | None) -> None:
         async with self._pool.acquire() as conn:
@@ -77,6 +87,7 @@ class SelfStateStore:
             await conn.execute(
                 f"UPDATE sali_state SET {col}=$1, {col}_at=now(), active_operation=NULL, "
                 "mode='idle', updated_at=now() WHERE id", summary or None)
+            await self._emit_presence(conn, "idle")
 
     async def assemble(self) -> dict[str, Any]:
         """The full self-view: static self-knowledge + persistent state + composed live facts."""

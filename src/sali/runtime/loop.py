@@ -421,7 +421,7 @@ class AgentResult:
 class LoopEvent:
     """A streamed moment of a turn, for live rendering (terminal or WebSocket)."""
 
-    kind: str  # 'status' | 'token' | 'thinking' | 'tool' | 'final' | 'error'
+    kind: str  # 'run' | 'status' | 'token' | 'thinking' | 'tool' | 'retrieval' | 'final' | 'error'
     text: str = ""
     data: dict[str, Any] = field(default_factory=dict)
 
@@ -621,6 +621,9 @@ class AgentLoop:
             history = await self._load_history(conn, session_id)
             await self._append_message(conn, session_id, "user", user_input)
             journal = await RunJournal.start(conn, session_id, user_input)
+            # Announce the run id at the START (not only at 'final') so a live UI can correlate the
+            # tool rows / journal / presence of a turn while it is still in flight (web parity).
+            yield LoopEvent("run", "", {"run_id": str(journal.run_id), "session_id": str(session_id)})
             with contextlib.suppress(Exception):  # self-model update must never break a turn
                 await self._self_state.note_turn(user_input)
             try:
@@ -640,6 +643,16 @@ class AgentLoop:
                      # diagnostics, not shown to Almir. Per-hit ranking signals + which retriever found it.
                      "trace": _retrieval_trace(bundle)},
                 )
+                # Real brain activity (§7): name the memories + graph relationships this retrieval
+                # actually used, so a live visualization can light up the REAL nodes/edges — never a
+                # timer-driven animation. Ids/labels only (no content), so nothing sensitive streams.
+                if bundle.memories or bundle.graph_facts:
+                    yield LoopEvent("retrieval", "", {
+                        "query": plan.intent,
+                        "memories": [str(h.memory.id) for h in bundle.memories],
+                        "graph": [{"src": f.src, "rel": f.rel, "dst": f.dst,
+                                   "confidence": f.confidence} for f in bundle.graph_facts],
+                    })
 
                 await journal.set_state(RunState.BUILD_CONTEXT)
                 specs = self.registry.advertise()

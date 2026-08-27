@@ -32,6 +32,8 @@ class TaskStore:
                 step_rows.append(await conn.fetchrow(
                     "INSERT INTO task_step (task_id, seq, description) VALUES ($1, $2, $3) RETURNING *",
                     task["id"], i, str(desc)))
+            await _emit_task(conn, "task.created", task["id"],
+                             {"objective": objective, "steps": len(step_rows)})
         return row_to_task(task, step_rows)
 
     async def get(self, task_id: UUID) -> Task | None:
@@ -79,10 +81,13 @@ class TaskStore:
             statuses = [r["status"] for r in await conn.fetch(
                 "SELECT status FROM task_step WHERE task_id = $1", task_id)]
             done = bool(statuses) and all(s in ("done", "skipped") for s in statuses)
+            task_status = "done" if done else "running"
             await conn.execute(
                 "UPDATE task SET status = $1, updated_at = now() "
                 "WHERE id = $2 AND status IN ('open', 'running')",
-                "done" if done else "running", task_id)
+                task_status, task_id)
+            await _emit_task(conn, "task.step_advanced", task_id,
+                             {"seq": step_seq, "status": status, "task_status": task_status})
         return await self.get(task_id)
 
     async def finish(self, task_id: UUID, *, status: str = "done", result: str | None = None) -> None:
@@ -91,3 +96,12 @@ class TaskStore:
             await conn.execute(
                 "UPDATE task SET status = $1, result = coalesce($2, result), updated_at = now() "
                 "WHERE id = $3", status, result, task_id)
+            await _emit_task(conn, "task.finished", task_id, {"status": status})
+
+
+async def _emit_task(conn: Any, event_type: str, task_id: UUID, payload: dict[str, Any]) -> None:
+    """Put a task lifecycle change on the durable bus so a live UI can animate task/step progress
+    (tasks were previously invisible to the event log). Rides the existing sali_events NOTIFY."""
+    await conn.execute(
+        "INSERT INTO event (event_type, subject_type, subject_id, payload) VALUES ($1,'task',$2,$3)",
+        event_type, task_id, payload)
