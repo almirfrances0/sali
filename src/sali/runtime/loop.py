@@ -560,6 +560,37 @@ class AgentLoop:
             + lines
         )
 
+    async def _self_note(self) -> str | None:
+        """A compact SELF-STATE section (§2/§11), grounded in the graph so it can't drift: the canonical
+        fact that THIS host is Sali's own machine/home/body (not just where it runs), the model it thinks
+        with, plus what it's currently doing and unsure about. This is the deterministic self-view — the
+        model discovers its environment from real facts, never from a hardcoded prompt line (§8/§13)."""
+        view = await self._self_state.assemble()
+        env = view.get("environment") or {}
+        parts: list[str] = []
+        if env.get("is_home") and env.get("machine"):
+            spec = ", ".join(x for x in (env.get("kernel"), env.get("arch")) if x)
+            body = f"This host — {env['machine']}" + (f" ({spec})" if spec else "")
+            body += " — is my own machine: my home, my body, the environment I live and run in."
+            if env.get("model"):
+                body += f" I think with {env['model']}."
+            if env.get("workspace"):
+                body += f" My workspace is {env['workspace']}."
+            parts.append(body)
+        if view.get("current_task"):
+            parts.append(f"I'm in the middle of a task: {view['current_task']}.")
+        unc = int(view.get("uncertainty_count") or 0)
+        if unc:
+            parts.append(f"I've flagged {unc} thing(s) as unverified — I'd check them rather than assert them.")
+        return "Myself (self-state):\n" + "\n".join(parts) if parts else None
+
+    async def _health_note(self) -> str | None:
+        """A compact HEALTH section (§11): which of Sali's faculties are up and whether it's online, so a
+        turn can say 'my perception is down' / 'I'm offline' without a tool round-trip."""
+        h = await self._health.report()
+        summary = str(h.get("summary") or "").strip()
+        return f"My faculties right now: {summary}" if summary else None
+
     async def _stalled(
         self, user_input: str, response: str, journal: RunJournal | None = None
     ) -> bool:
@@ -664,11 +695,21 @@ class AgentLoop:
                 world_note = ""
                 with contextlib.suppress(Exception):  # world-state is best-effort, never breaks a turn
                     world_note = (await self._world.snapshot()).render()
+                # SELF-STATE and HEALTH: kept DISTINCT from identity and world (§2), and — unlike before —
+                # surfaced into the prompt every turn (§11), so Sali knows what it's doing and how its
+                # faculties are without a tool round-trip, and knows this host IS its own home/body (§1).
+                self_note: str | None = None
+                health_note: str | None = None
+                with contextlib.suppress(Exception):
+                    self_note = await self._self_note()
+                with contextlib.suppress(Exception):
+                    health_note = await self._health_note()
                 assembled = self.context.assemble(
                     user_input, bundle, specs,
                     live_note=LIVE_NOTE if plan.needs_live else None, history=history,
                     machine_changes=machine_changes, tasks_note=tasks_note,
-                    world_note=world_note or None,
+                    world_note=world_note or None, self_note=self_note, health_note=health_note,
+                    system_query=plan.system_query,
                 )
                 messages = list(assembled.messages)
                 await journal.event(

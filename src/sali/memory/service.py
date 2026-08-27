@@ -15,7 +15,7 @@ from typing import Any
 from uuid import UUID
 
 from sali.core.clock import Clock, SystemClock
-from sali.core.enums import FreshnessPolicy, MemoryLayer, MemorySource
+from sali.core.enums import FreshnessPolicy, MemoryLayer, MemorySource, source_priority
 from sali.core.errors import ProviderError
 from sali.memory import embed_worker, retriever, writer
 from sali.memory.decay import (
@@ -118,7 +118,15 @@ class MemoryService:
             scope_factor = 1.2
         else:
             scope_factor = 1.0
-        score = relevance * (0.6 + 0.25 * eff_conf + 0.15 * dimp) * (1.0 + reuse) * scope_factor
+        # Source precedence at READ time (§3): a live/observed claim (SYSTEM/FILE observation, priority 100)
+        # outranks an inferred/conversational one (priority 20-30) of EQUAL relevance, so current truth wins
+        # a tie over a guess. Reuses the canonical ladder (core.enums.source_priority); relevance still leads.
+        try:
+            src = MemorySource(row["source"])
+        except ValueError:
+            src = MemorySource.INFERENCE
+        source_factor = 0.9 + 0.2 * (source_priority(src) / 100.0)
+        score = relevance * (0.6 + 0.25 * eff_conf + 0.15 * dimp) * (1.0 + reuse) * scope_factor * source_factor
         which = "hybrid" if len(retrievers) > 1 else next(iter(retrievers))
         return MemoryHit(
             memory=row_to_memory(row),

@@ -35,6 +35,9 @@ async def link_self(
     await refresh_props(conn, sali.id, {"aliases": _AGENT_ALIASES})  # canonical aliases (§5)
 
     await relate(conn, src_id=sali.id, dst_id=machine_id, rel_type="runs_on", source=source)
+    # This host is not just where Sali runs — it is Sali's HOME/body (§1). An explicit lives_on edge makes
+    # that a graph fact, distinct from any remote host Sali can_access but does not live on.
+    await relate(conn, src_id=sali.id, dst_id=machine_id, rel_type="lives_on", source=source)
 
     model = await ensure_node(
         conn, node_type="model", name=model_name, canonical_key=f"model:{model_name}", source=source)

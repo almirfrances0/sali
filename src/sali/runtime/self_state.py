@@ -136,6 +136,10 @@ class SelfStateStore:
             if r["rel_type"] == "runs_on":
                 env.update(machine=r["name"], os=props.get("os"), kernel=props.get("kernel"),
                            arch=props.get("arch"))
+                # this host IS Sali's home/body (§1) — a structural fact from the machine node, not prose
+                env["is_home"] = props.get("is_self") == "true" or props.get("role") == "home"
+                if props.get("machine_id"):
+                    env["machine_id"] = props.get("machine_id")
             elif r["rel_type"] == "thinks_with":
                 env["model"] = r["name"]
             elif r["rel_type"] == "works_in":

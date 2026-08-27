@@ -59,7 +59,13 @@ def observe_machine() -> tuple[str, str, dict[str, str]]:
     for line in osr.splitlines():
         if line.startswith("PRETTY_NAME="):
             pretty = line.split("=", 1)[1].strip().strip('"')
-    props = {"hostname": host, "os": pretty, "arch": os.uname().machine}
+    # /etc/machine-id is the stable identity (survives DHCP/rename); dbus is the fallback location.
+    # is_self/role=home mark THIS host as Sali's own machine/body — distinct from any remote host (§1/§9).
+    machine_id = _read("/etc/machine-id").strip() or _read("/var/lib/dbus/machine-id").strip()
+    props = {"hostname": host, "os": pretty, "arch": os.uname().machine,
+             "is_self": "true", "role": "home"}
+    if machine_id:
+        props["machine_id"] = machine_id
     return f"machine:{host}", pretty or host, props
 
 

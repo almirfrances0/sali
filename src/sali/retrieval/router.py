@@ -55,6 +55,27 @@ _TASK = (
     "failing", "keeps failing", "getting an error", "throwing", "get it working", "make it work",
     "again",  # "docker is broken again" — a recurrence is exactly when past experience matters
 )
+# A query whose SUBJECT is Sali's own host/self/environment — "analyse the system", "check your PC",
+# "what OS am I on", "my GPU/RAM/disk/services/processes". These must be answered from CURRENT world/self
+# state, not stale semantic memory (§4/§11), so they force needs_live and demote the memory pool.
+_SYSTEM = (
+    "the system", "this system", "this machine", "this computer", "this host", "this pc", "this box",
+    "the machine", "my machine", "my computer", "my system", "my host", "my pc", "my box", "my setup",
+    "my environment", "my desktop", "my gpu", "my cpu", "my ram", "my memory", "my disk", "my storage",
+    "my network", "my services", "my processes", "my ports", "my hardware", "my kernel", "my os",
+    "your machine", "your computer", "your system", "your host", "your pc", "your gpu", "your box",
+    "your desktop", "your environment", "your kernel", "your os", "check your pc", "check the system",
+    "analyse the system", "analyze the system", "analyse my", "analyze my", "audit this machine",
+    "audit the system", "diagnose the environment", "diagnose the system", "scan the system",
+    "what host", "hostname", "what os", "which os", "what machine", "which machine", "what computer",
+    "am i on", "where do i live", "where am i running", "what's running", "whats running",
+    "what is running", "running services", "running processes", "system state", "environment state",
+    "what gpu", "which gpu", "gpu do i", "what cpu", "which cpu", "cpu do i", "what hardware",
+    "hardware do i", "which hardware", "vram", "uptime", "how much ram", "how much memory",
+    "how much disk", "how much vram", "how much storage", "how much space", "what's my ip", "whats my ip",
+    "what services", "which services", "services running", "services are", "what processes",
+    "which processes", "processes are", "what ports", "which ports", "ports are", "ports open",
+)
 
 
 @dataclass(slots=True)
@@ -67,6 +88,7 @@ class RetrievalPlan:
     needs_live: bool = False
     use_tools: bool = False
     use_experience: bool = False  # a doing/fixing turn — pull past procedures + incidents
+    system_query: bool = False  # subject is Sali's own host/self/environment — prefer live over memory
 
 
 def _has(query: str, phrases: tuple[str, ...]) -> bool:
@@ -93,10 +115,12 @@ def classify(query: str) -> RetrievalPlan:
     recent = _has(q, _RECENT)
     tool = _has(q, _TOOL)
     task = _has(q, _TASK)
+    system = _has(q, _SYSTEM)  # subject is Sali's own machine/self/environment
     intent = (
         "live" if live
         else "task" if task
         else "tool" if tool
+        else "system" if system
         else "relational" if relational
         else "temporal" if temporal
         else "recent" if recent
@@ -106,7 +130,8 @@ def classify(query: str) -> RetrievalPlan:
         intent=intent,
         use_graph=relational,
         use_recent=recent or temporal,
-        needs_live=live,
+        needs_live=live or system,  # a system/environment question always checks current reality (§3/§4)
         use_tools=tool,
         use_experience=task,
+        system_query=system,
     )

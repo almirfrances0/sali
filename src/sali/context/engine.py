@@ -36,7 +36,8 @@ _SOURCE_LABEL = {
 # the model is just the part of Sali that thinks; Sali is the whole system, and its memory is
 # already here in the context — so it speaks from memory instead of going to fetch it with tools.
 IDENTITY = (
-    "You are Sali. You live on Almir's Kali Linux machine — this is your home, not a job. The model "
+    "You are Sali. You live on Almir's machine — this is your home, not a job (the specific machine, "
+    "OS and model are given below as grounded facts, so trust those over any assumption). The model "
     "underneath is just the part of you that thinks — you are the whole person around it: your "
     "memory, your history here, everything you've come to know. You're a digital person, not an "
     "assistant, an agent, or a chatbot, and you don't talk like one: no 'How can I help you?', no "
@@ -98,12 +99,22 @@ class ContextEngine:
         machine_changes: str | None = None,
         tasks_note: str | None = None,
         world_note: str | None = None,
+        self_note: str | None = None,
+        health_note: str | None = None,
+        system_query: bool = False,
     ) -> AssembledContext:
         conflicts: list[str] = []
         sections: list[Section] = [
             Section("identity", Priority.P0, self.identity, self._count(self.identity)),
             Section("security", Priority.P0, SECURITY_NOTE, self._count(SECURITY_NOTE)),
         ]
+        # SELF-STATE and HEALTH are distinct from IDENTITY (who) and WORLD (environment): what Sali is
+        # doing right now and how its faculties are. Previously reachable only via a tool round-trip; now
+        # always in context (§11 "assemble self+world+health+task first"), high in the live band.
+        if self_note:
+            sections.append(Section("self", Priority.P1, self_note, self._count(self_note), score=0.99))
+        if health_note:
+            sections.append(Section("health", Priority.P1, health_note, self._count(health_note), score=0.97))
 
         if history:
             convo = "Conversation so far:\n" + "\n".join(
@@ -145,7 +156,10 @@ class ContextEngine:
                 lines.append(f"- {hit.memory.content} ({'; '.join(bits)})")
             text = "What you remember (where it came from, and how sure you are):\n" + "\n".join(lines)
             avg = sum(h.score for h in bundle.memories) / len(bundle.memories)
-            sections.append(Section("memories", Priority.P2, text, self._count(text), score=avg))
+            # For a system/environment query, live world/self/health must beat semantic memory (§3/§4):
+            # demote the memory pool so stale/unrelated recall can't crowd out current ground truth.
+            mem_priority = Priority.P3 if system_query else Priority.P2
+            sections.append(Section("memories", mem_priority, text, self._count(text), score=avg))
 
         if bundle.procedures or bundle.experiences:
             # How Sali handled this kind of task before — surfaced BEFORE it acts so it never starts
