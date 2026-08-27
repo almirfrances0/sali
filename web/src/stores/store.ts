@@ -39,6 +39,7 @@ interface StoreState {
   selection: Selection | null
   focus: string | null // which region is dominant (null = balanced cockpit)
   toolsOpen: boolean // the tool-catalog overlay (Sali's hands — §20/§21)
+  schedulesOpen: boolean // the schedules overlay (view / create / delete)
   collapsed: Record<string, boolean> // per-widget collapse state
   pinned: string[] // widgets the user chose to keep open (beyond the ones Sali auto-raises on activity)
 
@@ -55,6 +56,7 @@ interface StoreState {
   select: (s: Selection | null) => void
   setFocus: (f: string | null) => void
   setToolsOpen: (b: boolean) => void
+  setSchedulesOpen: (b: boolean) => void
   toggleCollapse: (id: string) => void
   togglePinned: (id: string) => void
 }
@@ -76,6 +78,7 @@ export const useStore = create<StoreState>((set) => ({
   selection: null,
   focus: null,
   toolsOpen: false,
+  schedulesOpen: false,
   collapsed: {},
   pinned: [],
 
@@ -182,6 +185,7 @@ export const useStore = create<StoreState>((set) => ({
   select: (s) => set({ selection: s }),
   setFocus: (f) => set({ focus: f }),
   setToolsOpen: (b) => set({ toolsOpen: b }),
+  setSchedulesOpen: (b) => set({ schedulesOpen: b }),
   toggleCollapse: (id) => set((st) => ({ collapsed: { ...st.collapsed, [id]: !st.collapsed[id] } })),
   togglePinned: (id) =>
     set((st) => ({ pinned: st.pinned.includes(id) ? st.pinned.filter((x) => x !== id) : [...st.pinned, id] })),

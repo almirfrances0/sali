@@ -69,8 +69,7 @@ export function Activity(): JSX.Element {
   return (
     <Panel>
       <PanelHeader
-        label="Activity"
-        id="activity"
+        label="Live activity"
         right={<span className="font-mono text-2xs text-faint">{events.length ? `${events.length} live` : 'quiet'}</span>}
       />
       <div className="min-h-0 flex-1 overflow-y-auto px-1.5 py-1.5">

@@ -136,6 +136,15 @@ export interface WorldState {
   recent_files: string[]
   recent_commands: { binary: string; ok: boolean | null }[]
   recent_errors: string[]
+  gpu: { name: string; vram_total_mib: number; vram_used_mib: number; gpu_util_percent: number; temperature_c: number | null } | null
+  memory: { total_mib: number; available_mib: number; used_mib: number } | null
+  disk: { total_gib: number; used_gib: number; free_gib: number; percent_used: number } | null
+  cpu_pct: number | null
+  uptime_s: number | null
+  processes: number | null
+  listen_ports: number | null
+  services: number | null
+  containers: number | null
 }
 
 export interface Task {
