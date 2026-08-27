@@ -18,6 +18,7 @@ import contextlib
 import shutil
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 from sali.events.base import EventKind, Observation, ObservationSink
 from sali.obs.log import get_logger
@@ -84,10 +85,11 @@ def _parse_disk(df_out: str) -> set[str]:
 
 
 class SystemWatch:
-    def __init__(self, sink: ObservationSink, *, interval: float = 45.0) -> None:
+    def __init__(self, sink: ObservationSink, *, interval: float = 45.0, baseline: Any = None) -> None:
         self._sink = sink
         self._interval = interval
         self._prev: SystemState | None = None
+        self._baseline = baseline  # optional events.baseline.Baseline — persists the port baseline (§19)
 
     async def probe(self) -> SystemState:
         """Snapshot the machine's live system state — listening ports, failed units, disk pressure."""
@@ -113,7 +115,17 @@ class SystemWatch:
 
     async def tick(self, now: datetime) -> list[Observation]:
         cur = await self.probe()
-        surfaced = [] if self._prev is None else self.diff(self._prev, cur, now)  # first poll = baseline
+        if self._baseline is not None:
+            # Ports use the PERSISTENT baseline (§19: recognise a port that appeared while Sali was off);
+            # failed units + disk pressure remain always-notable events via the in-memory diff.
+            surfaced = [self._obs(EventKind.PORT_OPENED, f"new listening socket {p}", 0.72, now,
+                                  {"sample": p})
+                        for p in sorted(await self._baseline.reconcile("port", cur.ports))]
+            if self._prev is not None:
+                surfaced += self.diff(SystemState(ports=cur.ports, failed_services=self._prev.failed_services,
+                                                  disk_pressure=self._prev.disk_pressure), cur, now)
+        else:
+            surfaced = [] if self._prev is None else self.diff(self._prev, cur, now)  # first poll = baseline
         self._prev = cur
         for o in surfaced:
             with contextlib.suppress(Exception):  # a bad sink must never kill the watcher
