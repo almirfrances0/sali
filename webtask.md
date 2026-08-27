@@ -83,3 +83,26 @@ load · quiet-when-idle · terminal/web parity.
     Attention, Tasks, Presence, Memory/node Inspector (provenance "why Sali knows this"), Proactive toasts.
   - Remaining polish: a dedicated Tools catalog panel; brain neighborhood-expand on node click; ARIA pass;
     prod systemd unit for `sali serve`.
+
+## Canonical self/home/environment identity (correction directive §1-§15)
+- **DONE + live-verified** — "this host IS my home/body" is now structural, IDENTITY/SELF/WORLD are
+  distinct, live beats stale, system queries prefer current reality. (commit "Canonical self/home identity")
+  - Graph: `machine:kali` marked `is_self=true, role=home`, stable `/etc/machine-id`, `agent:sali
+    --lives_on--> machine`. Live-confirmed via psql + `/api/self` (is_home:true, machine_id set).
+  - Context: self-state + health now injected EVERY turn (were tool-only), distinct from identity/world;
+    for a system_query the semantic-memory pool is demoted below the live band. IDENTITY no longer
+    hardcodes the OS (drift-prone) — the grounded self_note names the real machine.
+  - Retrieval: `system_query` flag + `_SYSTEM` cues force needs_live; `_to_hit` gives observed claims
+    read-time precedence over inferred ones.
+  - **Live e2e**: `sali agent "what computer am I on, and what kernel?"` → "This is Kali GNU/Linux Rolling
+    … kernel 7.0.12+kali-amd64 … It's my home machine (your machine)." Answered LIVE 7.0.12, NOT the
+    seeded stale "6.13.0-old" memory. Context event: included=[identity,security,self,health,…,world,…,
+    memories] — self/health present, memory demoted last. Daemon + serve restarted on the new code.
+- **Remaining follow-ups (noted, not yet built):**
+  - S6 remote/local: a dedicated GraphSink primitive to mint `host:{slug}` nodes + `agent:sali
+    --can_access--> host` on ssh (so a VPS is a distinct entity, never merged with the home machine).
+    Core invariant already holds: only the local machine is is_self/home; remote state isn't merged into
+    local world-state.
+  - S7 tool provenance (§10): stamp tool results with host_id + observed_at + source-type.
+  - World-state resource fields (§7): fold live gpu/ram/disk/network/services/processes into
+    WorldState.snapshot so system queries get them proactively (today Sali fetches them via tool calls).
