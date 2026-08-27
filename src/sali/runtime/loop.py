@@ -28,6 +28,7 @@ from sali.core.clock import Clock, SystemClock
 from sali.core.enums import MemoryLayer, MemorySource, RiskLevel
 from sali.core.errors import ProviderError
 from sali.core.ids import new_id
+from sali.core.knowledge import classify_knowledge, epistemic_status
 from sali.core.scope import project_scope
 from sali.core.toolvocab import binary_of
 from sali.graph.service import GraphService
@@ -301,8 +302,14 @@ class _RecallSink:
         out: list[dict[str, Any]] = []
         for h in hits[:k]:
             m = h.memory
+            # The epistemic kind — did Sali OBSERVE this, INFER it, or merely BELIEVE it? — so the model
+            # weights each recalled item by how it's actually known, not by how fluent it sounds (§3/§12).
+            ktype = classify_knowledge(m.source, m.layer, needs_grounding=m.needs_grounding,
+                                       confidence=h.effective_confidence)
             entry: dict[str, Any] = {
                 "content": m.content, "layer": m.layer.value, "source": m.source.value,
+                "knowledge_type": ktype.value,
+                "epistemic_status": epistemic_status(ktype, h.effective_confidence),
                 "confidence": round(h.effective_confidence, 2), "stale": h.stale,
                 "recorded": m.valid_from.date().isoformat() if m.valid_from else None,
             }
