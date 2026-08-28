@@ -12,6 +12,7 @@ from sali.core.ids import new_id
 from sali.provider.base import ChatResult, ToolCall
 from sali.provider.fake import FakeModelProvider
 from sali.retrieval.service import RetrievalService
+from sali.runtime import pending
 from sali.runtime.loop import _EMPTY_FALLBACK, _MAX_TOOL_FAILURES, AgentLoop
 from sali.security.confirm import AutoAllowConfirmer
 from sali.security.policy import PolicyEngine
@@ -662,3 +663,120 @@ async def test_compaction_packet_carries_active_task_deterministically(live_pool
         history = await loop._load_history(c, session)
     assert history[0][0] == "earlier"
     assert "TASK: Deploy the site" in history[0][1] and "NEXT: step 2" in history[0][1]
+
+
+# ---- §10 action continuity: "run it" executes the proposed command, deterministically ----------
+async def test_proposal_is_captured_as_a_pending_action(live_pool: Any) -> None:
+    # Sali proposes a command (no tool call) → it is captured as a durable 'planned' tool_execution row.
+    session = new_id()
+    fake = FakeModelProvider(responses=[
+        ChatResult("That's PHP's XML extension. Install it:\n```bash\nsudo apt install php-xml\n```", None, [], 4, 3, "fake")])
+    await _loop(live_pool, fake).run(
+        "i get Class DOMDocument not found, help me install what's missing", session_id=session)
+    async with live_pool.acquire() as c:
+        row = await c.fetchrow(
+            "SELECT te.plan FROM tool_execution te JOIN agent_runs r ON te.run_id=r.run_id "
+            "WHERE r.session_id=$1 AND te.status='planned' ORDER BY te.started_at DESC LIMIT 1", session)
+    assert row is not None and row["plan"]["args"]["command"] == "sudo apt install php-xml"
+
+
+async def test_run_it_executes_the_pending_proposal_not_a_reconstruction(live_pool: Any) -> None:
+    # The Laravel bug, reproduced: propose a (test-safe) command, contaminate context with a socket
+    # observation, then "run it". It must run the PENDING command deterministically — never an ss.
+    session = new_id()
+    await _loop(live_pool, FakeModelProvider(responses=[
+        ChatResult("Do this:\n```\ngit --version\n```", None, [], 3, 3, "fake")])).run(
+        "what should i do to fix this", session_id=session)
+    async with live_pool.acquire() as c:  # the exact seed that misled the model before
+        await c.execute("INSERT INTO event (event_type, subject_type, payload) VALUES "
+                        "('desktop.observed','desktop',$1)",
+                        {"kind": "port_opened", "summary": "new listening socket tcp:0.0.0.0:9999",
+                         "action": "investigate"})
+
+    # "run it" — the model is only consulted AFTER, to narrate; it never picks the command.
+    result = await _loop(live_pool, FakeModelProvider(responses=[
+        ChatResult("Done — that's sorted now.", None, [], 3, 3, "fake")])).run(
+        "hey i want you to run it", session_id=session)
+
+    async with live_pool.acquire() as c:
+        delegated = await c.fetchval(
+            "SELECT count(*) FROM run_events WHERE run_id=$1 AND kind='delegated_execution'", result.run_id)
+        ran = await c.fetchval(
+            "SELECT te.status FROM tool_execution te JOIN agent_runs r ON te.run_id=r.run_id "
+            "WHERE r.session_id=$1 AND te.tool_name='execute_command' "
+            "AND te.plan->'args'->>'command'='git --version'", session)
+        ss = await c.fetchval(
+            "SELECT count(*) FROM tool_execution WHERE run_id=$1 "
+            "AND coalesce(plan->'args'->>'command','') LIKE 'ss%'", result.run_id)
+    assert delegated == 1  # the resolver acted (deterministic), not the model
+    assert ran in ("verified_success", "verified_failure")  # the pending row transitioned planned→verified
+    assert ss == 0  # "run it" did NOT become an unrelated ss diagnostic
+
+
+async def test_delegated_action_still_goes_through_policy(live_pool: Any) -> None:
+    # Binding "run it" to a DESTRUCTIVE pending action does not bypass security: policy still confirms,
+    # the unattended AutoDeny declines, and the command never runs (stays 'planned', never verified).
+    from sali.security.confirm import AutoDenyConfirmer
+
+    session = new_id()
+    async with live_pool.acquire() as c:
+        run_id = await c.fetchval(
+            "INSERT INTO agent_runs (run_id, session_id, user_input, state, status) "
+            "VALUES (gen_random_uuid(), $1, 'x', 'respond', 'completed') RETURNING run_id", session)
+        eid = await pending.capture(c, run_id, "execute_command",
+                                    {"command": "rm -rf /tmp/sali-must-not-run"})
+
+    loop = AgentLoop(
+        pool=live_pool, provider=FakeModelProvider(responses=[
+            ChatResult("That one needs your go-ahead — I didn't run it.", None, [], 3, 3, "fake")]),
+        retrieval=RetrievalService(live_pool, FakeModelProvider()),
+        context=ContextEngine(FakeModelProvider(), ctx_tokens=8192),
+        registry=default_registry(), policy=PolicyEngine(), confirmer=AutoDenyConfirmer(),
+        settings=Settings(db=DbSettings(name="sali_test"), model=ModelSettings(provider="fake")))
+    await loop.run("run it", session_id=session)
+
+    async with live_pool.acquire() as c:
+        status = await c.fetchval("SELECT status FROM tool_execution WHERE id=$1", eid)
+    assert status == "planned"  # policy blocked the destructive bind — never transitioned to executing
+
+
+async def test_port_observation_not_rendered_as_recently_changed(live_pool: Any) -> None:
+    # §14 seed removal: a port/socket observation must NOT be injected as a "recently changed" file.
+    from sali.runtime.world_state import WorldStateBuilder
+
+    async with live_pool.acquire() as c:
+        await c.execute("INSERT INTO event (event_type, subject_type, payload) VALUES "
+                        "('desktop.observed','desktop',$1)",
+                        {"kind": "port_opened", "summary": "new listening socket tcp:0.0.0.0:8080",
+                         "action": "investigate"})
+        await c.execute("INSERT INTO event (event_type, subject_type, payload) VALUES "
+                        "('desktop.observed','desktop',$1)",
+                        {"kind": "file_modified", "summary": "edited main.py", "action": "record"})
+    ws = await WorldStateBuilder(live_pool).snapshot()
+    assert "new listening socket" not in ws.render()  # not a "recently changed" file
+    assert "edited main.py" in ws.recent_files  # real file changes still surface
+
+
+async def test_pending_action_survives_compaction(live_pool: Any) -> None:
+    # §11: even after the proposing message is folded out of the verbatim window, "run it" still
+    # resolves — the pending action is a DURABLE row (tool_execution), not conversation prose.
+    session = new_id()
+    await _loop(live_pool, FakeModelProvider(responses=[
+        ChatResult("Do:\n```\ngit --version\n```", None, [], 3, 3, "fake")])).run(
+        "help me here", session_id=session)
+    # bury the proposal under a long stretch and compact past the verbatim window (_COMPACT_AFTER=24)
+    loop = _loop(live_pool, FakeModelProvider())
+    async with live_pool.acquire() as c:
+        for i in range(30):
+            await c.execute(
+                "INSERT INTO message (conversation_id, seq, role, content) VALUES "
+                "($1, (SELECT coalesce(max(seq),0)+1 FROM message WHERE conversation_id=$1), $2, $3)",
+                session, "user" if i % 2 == 0 else "assistant", f"unrelated chatter {i}")
+        await loop._maybe_compact(c, session)
+
+    result = await _loop(live_pool, FakeModelProvider(responses=[
+        ChatResult("Done.", None, [], 3, 3, "fake")])).run("go ahead and run it", session_id=session)
+    async with live_pool.acquire() as c:
+        delegated = await c.fetchval(
+            "SELECT count(*) FROM run_events WHERE run_id=$1 AND kind='delegated_execution'", result.run_id)
+    assert delegated == 1  # the durable pending action outlived compaction of the conversation

@@ -7,7 +7,7 @@ Sali doesn't have separate chats — there is one ongoing conversation that ever
 from __future__ import annotations
 
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from sali.core.ids import new_id
 
@@ -24,3 +24,11 @@ def persistent_session_id() -> UUID:
     session = new_id()
     _SESSION_FILE.write_text(str(session))
     return session
+
+
+def background_session_id() -> UUID:
+    """A DISTINCT conversation for Sali's OWN autonomous turns — attention-driven investigations and
+    scheduled jobs (§14/§15). Kept separate from Almir's terminal conversation so a background port/socket
+    investigation can never write into — and hijack the referents of — the active user task. Derived
+    deterministically from the user session so it's stable across restarts but never collides with it."""
+    return uuid5(persistent_session_id(), "sali-background")

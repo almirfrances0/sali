@@ -88,9 +88,14 @@ class WorldStateBuilder:
         async with self._pool.acquire() as conn:
             ws.active_task = await conn.fetchval(
                 "SELECT objective FROM task WHERE status IN ('open','running') ORDER BY updated_at DESC LIMIT 1")
+            # "Recently changed" means FILE/window activity — NOT system events. Excluding port/service/
+            # disk observations here stops a "new listening socket …" note being mislabeled as a recent
+            # change and injected P1 every turn, which is what once seeded a stray `ss` referent (§14).
             ws.recent_files = [
                 str((r["payload"] or {}).get("summary", "")) for r in await conn.fetch(
-                    "SELECT payload FROM event WHERE event_type='desktop.observed' ORDER BY created_at DESC LIMIT 5")
+                    "SELECT payload FROM event WHERE event_type='desktop.observed' "
+                    "AND coalesce(payload->>'kind','') NOT IN ('port_opened','service_failed','disk_pressure') "
+                    "ORDER BY created_at DESC LIMIT 5")
                 if (r["payload"] or {}).get("summary")]
             cmd_rows = await conn.fetch(
                 "SELECT plan->'args'->>'command' AS command, success, error FROM tool_execution "

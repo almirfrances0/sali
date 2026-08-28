@@ -20,7 +20,7 @@ from sali import __version__
 from sali.config.settings import Settings, load_settings
 from sali.context.engine import IDENTITY
 from sali.obs.log import configure_logging
-from sali.runtime.session import persistent_session_id
+from sali.runtime.session import background_session_id, persistent_session_id
 
 app = typer.Typer(add_completion=False, help="Sali — a local-first personal AI agent.")
 console = Console()
@@ -1331,7 +1331,10 @@ async def _daemon(settings: Settings) -> None:
     pool = await kernel.pool()
     # Scheduled turns run unattended → AutoDeny so a destructive step is skipped, not left hanging.
     loop = await kernel.agent_loop(confirmer=AutoDenyConfirmer())
-    session = persistent_session_id()
+    # §14/§15: the daemon's autonomous turns (attention-driven investigations, scheduled jobs) run in a
+    # SEPARATE conversation from Almir's terminal session — so a background port/socket investigation
+    # never writes `ss` into the user's history and can't hijack the referent of a later "run it".
+    session = background_session_id()
 
     class _LoopRunner:
         async def run(self, prompt: str) -> Any:

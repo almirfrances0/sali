@@ -40,9 +40,10 @@ from sali.perception.service import build_perception
 from sali.provider.base import ChatMessage, ChatResult, ModelProvider, ToolCall
 from sali.retrieval.router import classify
 from sali.retrieval.service import RetrievalService
-from sali.runtime import continuation
+from sali.runtime import continuation, pending
 from sali.runtime.health import HealthService
 from sali.runtime.journal import RunJournal
+from sali.runtime.referential import extract_proposed_command, is_delegation
 from sali.runtime.self_state import SelfStateStore
 from sali.runtime.state import ResumeAction, RunState, resume_action
 from sali.runtime.world_state import WorldStateBuilder
@@ -734,6 +735,34 @@ class AgentLoop:
                 tool_sigs: dict[str, int] = {}  # signatures of tool calls seen this turn (loop guard)
                 failed_sigs: dict[str, tuple[int, str]] = {}  # sig -> (failures, last redacted error)
                 repeats_at_last_nudge = 0
+                ran_commands: set[str] = set()  # execute_command commands run this turn (capture guard)
+
+                # §10 action continuity: Almir delegating execution ("run it" / "do it" / …) resolves to
+                # the captured pending proposal and runs EXACTLY that — deterministically, through the same
+                # policy/execute/verify pipeline — instead of letting the model reconstruct the command
+                # (which is how "run it" once selected an unrelated `ss`). The model then narrates + verifies.
+                if is_delegation(user_input):
+                    pending_action = await pending.latest_pending(conn, session_id)
+                    if pending_action is not None:
+                        yield LoopEvent("status", "running what you asked")
+                        yield LoopEvent("tool", pending_action.tool_name, {
+                            "phase": "start", "name": pending_action.tool_name,
+                            "args": redact_obj(pending_action.arguments)})
+                        call = ToolCall(pending_action.tool_name, pending_action.arguments)
+                        tool_msg, ok, summary = await self._handle_tool(
+                            conn, journal, call, exec_id=pending_action.exec_id)
+                        tool_calls += 1
+                        if pending_action.command:
+                            ran_commands.add(pending_action.command)
+                        yield LoopEvent("tool", pending_action.tool_name, {
+                            "phase": "done", "name": pending_action.tool_name, "ok": ok, "summary": summary})
+                        await journal.event("delegated_execution",
+                                            {"tool": pending_action.tool_name, "ok": ok})
+                        messages.append(ChatMessage(role="user", content=(
+                            f"(You proposed `{pending_action.command or pending_action.description}` and I ran "
+                            "exactly that on your say-so — its real result is above. Continue the task: verify "
+                            "it worked, and if this was a fix, retry whatever originally failed.)")))
+                        messages.append(tool_msg)
 
                 while iteration < max_iter and tokens_used < budget:
                     await journal.set_state(RunState.REASON_PLAN, iteration=iteration)
@@ -835,6 +864,8 @@ class AgentLoop:
                             continue
                         tool_sigs[sig] = tool_sigs.get(sig, 0) + 1  # count executed calls only
                         tool_msg, ok, summary = await self._handle_tool(conn, journal, call)
+                        if call.name == "execute_command" and isinstance(call.arguments.get("command"), str):
+                            ran_commands.add(call.arguments["command"])  # don't re-capture what we just ran
                         # A clean, persistent progress line: what was done + a short result.
                         yield LoopEvent("tool", call.name, {"phase": "done", "name": call.name,
                                                             "ok": ok, "summary": summary})
@@ -878,6 +909,17 @@ class AgentLoop:
                         else:
                             yield ev
                     final_text = acc.strip() or _EMPTY_FALLBACK
+
+                # §10: if this turn PROPOSED a runnable command but didn't run it, capture it as a durable
+                # pending action so a later "run it"/"do it" resolves to exactly this — never a reconstruction.
+                with contextlib.suppress(Exception):  # capture is a nicety, never break a completed turn
+                    proposal = extract_proposed_command(final_text)
+                    if proposal is not None and proposal["command"] not in ran_commands:
+                        exec_tool = self.registry.get("execute_command")
+                        risk = int(exec_tool.assess({"command": proposal["command"]})) if exec_tool else 0
+                        await pending.capture(
+                            conn, journal.run_id, "execute_command", {"command": proposal["command"]},
+                            description=proposal["description"], risk_level=risk)
 
                 await journal.set_state(RunState.LEARN)
                 async with self.pool.acquire() as learn_conn:
@@ -936,7 +978,7 @@ class AgentLoop:
                 raise
 
     async def _handle_tool(
-        self, conn: Any, journal: RunJournal, call: ToolCall
+        self, conn: Any, journal: RunJournal, call: ToolCall, *, exec_id: UUID | None = None
     ) -> tuple[ChatMessage, bool, str]:
         """Run one tool; return (message-for-the-model, succeeded?, short summary) — the flag +
         summary let the UI print a clean ✓/✗ progress line of what was actually done."""
@@ -970,15 +1012,25 @@ class AgentLoop:
                                  {"tool": tool.name, "reason": "user declined"})
                 return _tool_message(tool.name, {"denied": "user declined"}), False, "you declined"
 
-        # Write-ahead: the 'executing' row is committed BEFORE the side effect (fix M15).
-        exec_id = new_id()
-        await conn.execute(
-            "INSERT INTO tool_execution "
-            "  (id, run_id, run_kind, tool_name, status, danger_level, approved_by, plan) "
-            "VALUES ($1,$2,'agent_run',$3,'executing',$4,$5,$6)",
-            exec_id, journal.run_id, tool.name, int(decision.risk),
-            f"policy:{decision.action.value}", {"args": redact_obj(call.arguments)},
-        )
+        # Write-ahead: the 'executing' row is committed BEFORE the side effect (fix M15). A delegated
+        # pending action passes its pre-recorded 'planned' row's id, so it transitions planned →
+        # executing → verified_* on the SAME row (§6 honesty) instead of leaving an orphan.
+        plan_json = {"args": redact_obj(call.arguments)}
+        if exec_id is None:
+            exec_id = new_id()
+            await conn.execute(
+                "INSERT INTO tool_execution "
+                "  (id, run_id, run_kind, tool_name, status, danger_level, approved_by, plan) "
+                "VALUES ($1,$2,'agent_run',$3,'executing',$4,$5,$6)",
+                exec_id, journal.run_id, tool.name, int(decision.risk),
+                f"policy:{decision.action.value}", plan_json,
+            )
+        else:
+            await conn.execute(
+                "UPDATE tool_execution SET status='executing', danger_level=$2, approved_by=$3, "
+                "  plan=$4, started_at=now() WHERE id=$1",
+                exec_id, int(decision.risk), f"policy:{decision.action.value}", plan_json,
+            )
         await journal.set_state(RunState.EXECUTE_TOOL)
         started = self.clock.now()
         ctx = ToolContext(settings=self.settings, clock=self.clock, pool=self.pool,
