@@ -81,7 +81,10 @@ class ProactiveLoop:
     async def run(self, stop: asyncio.Event, wake: asyncio.Event | None = None) -> None:
         while not stop.is_set():
             try:
-                await self.tick()
+                # Record proactively (audit trail + timeline), but do NOT pop desktop notifications:
+                # Almir finds the popups noisy on a dev box where ports churn constantly. Sali still
+                # knows what it noticed and can raise it in conversation; it just won't interrupt.
+                await self.tick(deliver=False)
             except Exception as exc:  # noqa: BLE001 - never let a bad cycle kill the faculty
                 log.warning("proactive tick failed: %s", exc)
             await wait_or_wake(stop, wake, self._interval)  # push when subscribed, else heartbeat
