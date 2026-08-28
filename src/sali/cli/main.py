@@ -1508,31 +1508,6 @@ WantedBy=multi-user.target
 
 
 @app.command()
-def serve(
-    socket: str = typer.Option("", help="Unix socket (default ~/.local/share/sali/sali.sock)."),
-    host: str = typer.Option("", help="Bind a TCP host instead (e.g. 127.0.0.1) for the app."),
-    port: int = typer.Option(8790, help="TCP port, used with --host."),
-) -> None:
-    """Run Sali's local WebSocket API — streams turns to the app / a realtime UI."""
-    import uvicorn
-
-    from sali.api import create_app
-    from sali.kernel import Kernel
-
-    settings = load_settings()
-    configure_logging(settings.log_level)
-    application = create_app(Kernel.create(settings))
-    if host:
-        console.print(f"[green]Sali API →[/] ws://{host}:{port}/ws")
-        uvicorn.run(application, host=host, port=port, log_level="warning")
-    else:
-        sock = socket or str(Path.home() / ".local" / "share" / "sali" / "sali.sock")
-        Path(sock).parent.mkdir(parents=True, exist_ok=True)
-        console.print(f"[green]Sali API →[/] unix:{sock} (path /ws)")
-        uvicorn.run(application, uds=sock, log_level="warning")
-
-
-@app.command()
 def chat(think: bool = typer.Option(False, "--think", help="Show the model's reasoning.")) -> None:
     """Direct model chat — a preview with no memory or tools (use `sali agent` for the full loop)."""
     settings = load_settings()

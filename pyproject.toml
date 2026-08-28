@@ -21,9 +21,6 @@ dependencies = [
     "httpx>=0.28",
     "ollama>=0.5",
     "jsonschema>=4.20",
-    "fastapi>=0.115",
-    "uvicorn[standard]>=0.30",
-    "websockets>=13",
     "cryptography>=44",  # encrypted secret vault (sali3 §27-29)
 ]
 
@@ -81,7 +78,7 @@ exclude = "src/sali/perception/_atspi_probe\\.py"
 # Third-party without type info, and the OPTIONAL §44 extras (pypdf/icalendar/playwright/keyring):
 # treated as untyped so type-checking passes whether or not the extra is installed.
 module = [
-    "asyncpg.*", "ollama.*", "jsonschema.*", "uvicorn.*", "websockets.*",
+    "asyncpg.*", "ollama.*", "jsonschema.*",
     "pypdf.*", "icalendar.*", "playwright.*", "keyring.*", "cryptography.*", "watchdog.*",
 ]
 ignore_missing_imports = true
@@ -103,7 +100,6 @@ name = "Layered architecture (inward dependencies only)"
 type = "layers"
 layers = [
     "sali.cli",
-    "sali.api",
     "sali.runtime",
     "sali.context",
     "sali.retrieval",
