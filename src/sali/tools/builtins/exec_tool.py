@@ -22,9 +22,10 @@ from typing import Any
 
 from sali.core.enums import Capability, RiskLevel
 from sali.tools import jail, privilege
-from sali.tools.base import Tool, ToolResult
+from sali.tools.base import Tool, ToolResult, VerifyResult
 from sali.tools.context import ToolContext
 from sali.tools.exec import CommandTimeout, run_argv
+from sali.tools.probe import exit_ok, verify_command
 from sali.tools.registry import ToolRegistry
 
 _MAX = 64 * 1024
@@ -97,6 +98,25 @@ class ExecuteCommand(Tool):
 
     def assess(self, args: dict[str, Any]) -> RiskLevel:
         return RiskLevel.R4 if _is_destructive(args.get("command")) else RiskLevel.R1
+
+    async def verify(
+        self, args: dict[str, Any], result: ToolResult, ctx: ToolContext
+    ) -> VerifyResult:
+        """Independently re-observe the command's effect (§8/§23): after an install, confirm the
+        package is present; after `systemctl start`, that the service is active; after binding a port,
+        that something is listening — never trusting the exit code alone. Falls back to the exit code
+        when no probe applies (a plain read) or the effect can't be observed, and never blocks."""
+        output = result.output or {}
+        if args.get("sandbox") or output.get("background"):
+            # sandbox effects never touch the real system; a backgrounded server's port isn't knowable
+            # from the command text alone — trust the launch/exit signal run() already checked.
+            state = "sandboxed" if args.get("sandbox") else "launched"
+            return VerifyResult(result.ok, result.display or state)
+        probe = await verify_command(_as_text(args.get("command")))
+        if probe is not None:
+            return probe  # verified against reality
+        rc = int(output.get("returncode", 0 if result.ok else 1))
+        return exit_ok(rc)
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         command = args.get("command")

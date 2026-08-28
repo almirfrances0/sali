@@ -40,10 +40,11 @@ from sali.perception.service import build_perception
 from sali.provider.base import ChatMessage, ChatResult, ModelProvider, ToolCall
 from sali.retrieval.router import classify
 from sali.retrieval.service import RetrievalService
+from sali.runtime import continuation
 from sali.runtime.health import HealthService
 from sali.runtime.journal import RunJournal
 from sali.runtime.self_state import SelfStateStore
-from sali.runtime.state import RunState, resume_action
+from sali.runtime.state import ResumeAction, RunState, resume_action
 from sali.runtime.world_state import WorldStateBuilder
 from sali.scheduler.store import ScheduleStore
 from sali.security.confirm import Confirmer
@@ -56,6 +57,7 @@ from sali.tools.context import ToolContext
 from sali.tools.registry import ToolRegistry
 from sali.tools.remote import build_remote_runner
 from sali.twin import awareness as twin_awareness
+from sali.verify.engine import verify_effect
 
 # Tools whose arguments carry a raw shell command — the binary they run is what the tool-authority
 # floor is keyed on.
@@ -113,14 +115,6 @@ _KEEP_RECENT = 6
 # many-step job continues on its own instead of dead-ending on the context limit.
 _CTX_HEADROOM = 0.78  # use more of the window before folding (the fold still prevents overflow)
 _CTX_MARGIN = 8       # per-message token overhead added to the estimate
-_FOLD_INSTRUCTION = (
-    "You are Sali, in the middle of a task. Fold everything you've done so far on THIS task into "
-    "a tight progress note you can pick up from: what Almir asked for, what you've tried, what the "
-    "tools returned, what you've concluded, and exactly what's still left to do. Be explicit about "
-    "steps you've ALREADY completed so you don't repeat them. First person, concrete, compact — it "
-    "replaces the detailed history so you can keep going. Just the note."
-)
-
 # Follow-through: models sometimes *narrate* an action ("I'll run these in parallel") and then
 # stop without calling anything, leaving Almir to re-prompt. When a reply defers a machine
 # action but emits no tool call, we nudge Sali to actually do it — bounded, so it can't loop.
@@ -560,6 +554,14 @@ class AgentLoop:
             + lines
         )
 
+    async def _current_task_safe(self) -> Any:
+        """The task Sali is working on, or None — best-effort (a pool-less loop or DB hiccup never
+        breaks a fold/compaction; the continuation packet just omits the deterministic task header)."""
+        try:
+            return await self._tasks.current()
+        except Exception:  # noqa: BLE001 - tasks are a nicety, never break compaction
+            return None
+
     async def _self_note(self) -> str | None:
         """A compact SELF-STATE section (§2/§11), grounded in the graph so it can't drift: the canonical
         fact that THIS host is Sali's own machine/home/body (not just where it runs), the model it thinks
@@ -980,6 +982,7 @@ class AgentLoop:
         await journal.set_state(RunState.EXECUTE_TOOL)
         started = self.clock.now()
         ctx = ToolContext(settings=self.settings, clock=self.clock, pool=self.pool,
+                          run_id=journal.run_id,
                           memory=self._memory_sink, recall=self._recall, graph=self._graph,
                           tasks=self._tasks,
                           schedules=self._schedules, documents=self._documents, remote=self._remote,
@@ -1091,46 +1094,97 @@ class AgentLoop:
         return decision
 
     async def recover(self) -> list[dict[str, str]]:
-        """Resolve runs left 'running' by a crash. Phase 1 surfaces them (never silently
-        retries); the correct resume action is computed and journaled for each."""
+        """Resolve runs left 'running' by a crash and, where safe, actually CONTINUE them (§9):
+          • REPLAY_SAFE (no side effect was in flight) → re-drive the turn.
+          • VERIFY_THEN_CONTINUE (a non-idempotent effect was in flight) → independently verify whether
+            it landed (probe reality), record that truth on the tool row, then re-drive so Sali carries
+            on from a KNOWN state instead of blindly repeating or aborting.
+          • ABORT_SURFACE (unknowable) → surface, never guess.
+        The old run is always superseded (aborted) and the resume is a fresh, journaled turn. Gated by
+        settings.runtime.resume_interrupted and capped by resume_max_runs; stale-guarded to 2 minutes so
+        a live run in another process is never touched."""
         resolved: list[dict[str, str]] = []
+        to_redrive: list[tuple[Any, str, dict[str, str]]] = []
         async with self.pool.acquire() as conn:
-            # Only STALE runs — a live run in another process (the daemon, a second `sali agent`, a
-            # WebSocket turn) bumps updated_at on every FSM transition, so a fresh timestamp means it's
-            # still in flight. Without this, one process starting up would abort another's active run.
             runs = await conn.fetch(
-                "SELECT run_id, state FROM agent_runs "
+                "SELECT run_id, session_id, user_input, state FROM agent_runs "
                 "WHERE status='running' AND updated_at < now() - interval '2 minutes'")
             for row in runs:
                 state = RunState(row["state"])
                 idempotent: bool | None = None
+                interrupted = None
                 if state is RunState.EXECUTE_TOOL:
-                    exec_row = await conn.fetchrow(
-                        "SELECT tool_name FROM tool_execution "
+                    interrupted = await conn.fetchrow(
+                        "SELECT id, tool_name, plan FROM tool_execution "
                         "WHERE run_id=$1 AND status='executing' ORDER BY started_at DESC LIMIT 1",
                         row["run_id"],
                     )
-                    if exec_row is not None:
-                        tool = self.registry.get(exec_row["tool_name"])
+                    if interrupted is not None:
+                        tool = self.registry.get(interrupted["tool_name"])
                         idempotent = tool.idempotent if tool is not None else None
                 action = resume_action(state, idempotent)
+                # §19: for a non-idempotent effect, re-observe reality to learn whether it landed.
+                verified: VerifyResult | None = None
+                if action is ResumeAction.VERIFY_THEN_CONTINUE and interrupted is not None:
+                    verified = await self._verify_interrupted(conn, interrupted)
+                payload: dict[str, Any] = {"action": action.value, "was_state": state.value}
+                if verified is not None:
+                    payload["verified"] = verified.success
                 await conn.execute(
                     "INSERT INTO run_events (run_id, seq, kind, payload) VALUES "
                     "($1, (SELECT coalesce(max(seq),0)+1 FROM run_events WHERE run_id=$1), "
                     "'resumed', $2)",
-                    row["run_id"], {"action": action.value, "was_state": state.value},
+                    row["run_id"], payload,
                 )
-                # Phase 1 always surfaces (never silently retries); the computed resume action
-                # is journaled above for a future phase to act on.
                 await conn.execute(
-                    "UPDATE agent_runs SET status='aborted', state=$1, updated_at=now() "
-                    "WHERE run_id=$2",
+                    "UPDATE agent_runs SET status='aborted', state=$1, updated_at=now() WHERE run_id=$2",
                     RunState.ABORTED.value, row["run_id"],
                 )
-                resolved.append(
-                    {"run_id": str(row["run_id"]), "was_state": state.value, "action": action.value}
+                out: dict[str, str] = {
+                    "run_id": str(row["run_id"]), "was_state": state.value, "action": action.value
+                }
+                if verified is not None:
+                    out["verified"] = str(verified.success)
+                resolved.append(out)
+                redrivable = action is ResumeAction.REPLAY_SAFE or (
+                    action is ResumeAction.VERIFY_THEN_CONTINUE and verified is not None
                 )
+                if redrivable and row["user_input"] and row["session_id"]:
+                    to_redrive.append((row["session_id"], row["user_input"], out))
+
+        # Re-drive OUTSIDE the recovery connection (each turn takes its own), bounded + best-effort.
+        if self.settings.runtime.resume_interrupted:
+            for session_id, user_input, out in to_redrive[: self.settings.runtime.resume_max_runs]:
+                try:
+                    result = await self.run(user_input, session_id=session_id)
+                    out["resumed_run"] = str(result.run_id)
+                except Exception as exc:  # noqa: BLE001 - a failed resume must not crash startup recovery
+                    self.log.warning("recover re-drive failed: %s", exc)
         return resolved
+
+    async def _verify_interrupted(self, conn: Any, exec_row: Any) -> VerifyResult | None:
+        """Independently re-observe whether an interrupted non-idempotent tool's effect landed (§9/§19),
+        and record that truth on the durable tool_execution row. Currently probes execute_command via the
+        shell-effect probes; returns None (→ surface, don't re-drive) for effects we can't check."""
+        if exec_row["tool_name"] != "execute_command":
+            return None
+        args = (exec_row["plan"] or {}).get("args") or {}
+        command = args.get("command")
+        if isinstance(command, list):
+            command = " ".join(str(c) for c in command)
+        if not isinstance(command, str) or not command.strip():
+            return None
+        verdict = await verify_effect(command)
+        if verdict is None:
+            return None
+        await conn.execute(
+            "UPDATE tool_execution SET status=$1, verification=$2, success=$3, finished_at=now() "
+            "WHERE id=$4",
+            "verified_success" if verdict.success else "verified_failure",
+            {"success": verdict.success, "detail": verdict.detail, "recovered": True},
+            verdict.success, exec_row["id"],
+        )
+        return verdict
 
 
     async def _ensure_conversation(self, conn: Any, session_id: UUID) -> None:
@@ -1160,7 +1214,7 @@ class AgentLoop:
     async def _load_history(self, conn: Any, session_id: UUID) -> list[tuple[str, str]]:
         """Prior turns: the running summary (if any) plus the recent verbatim messages."""
         conv = await conn.fetchrow(
-            "SELECT summary, summary_through_seq FROM conversation WHERE id=$1", session_id
+            "SELECT summary, summary_through_seq, summary_packet FROM conversation WHERE id=$1", session_id
         )
         summary = conv["summary"] if conv else None
         through = conv["summary_through_seq"] if conv else 0
@@ -1170,8 +1224,11 @@ class AgentLoop:
             session_id, through,
         )
         history: list[tuple[str, str]] = [(r["role"], r["content"]) for r in reversed(rows)]
-        if summary:
-            history.insert(0, ("earlier", summary))
+        # Prefer the structured packet (its task state is deterministic, §11-12); fall back to prose.
+        packet = conv["summary_packet"] if conv else None
+        earlier = (continuation.render_packet(packet) if packet else "") or summary
+        if earlier:
+            history.insert(0, ("earlier", earlier))
         return history
 
     def _context_window(self) -> int:
@@ -1196,15 +1253,20 @@ class AgentLoop:
         body = messages[2:]
         transcript = "\n".join(f"{m.role}: {(m.content or '')[:2000]}" for m in body)
         note = await self.provider.chat(
-            [ChatMessage(role="system", content=_FOLD_INSTRUCTION),
+            [ChatMessage(role="system", content=continuation.PACKET_INSTRUCTION),
              ChatMessage(role="user", content=transcript)],
             options=_SUMMARIZE,
         )
+        # The active task + current step survive the fold DETERMINISTICALLY (§11-12) — folded into the
+        # carry-forward note from the task store, never left to whatever the model happened to narrate.
+        header = continuation.render_task_header(await self._current_task_safe())
+        carry = note.content.strip()
+        body_note = f"{header}\n{carry}" if header else carry
         folded = [
             system, first_user,
             ChatMessage(
                 role="user",
-                content=f"(Where you are in this task so far — continue from here:\n{note.content.strip()})",
+                content=f"(Where you are in this task so far — continue from here:\n{body_note})",
             ),
         ]
         # Keep the single most recent concrete result verbatim (as plain context, so there are no
@@ -1265,19 +1327,17 @@ class AgentLoop:
         )
         transcript = "\n".join(f"{m['role']}: {m['content']}" for m in older)
         prompt = [
-            ChatMessage(role="system", content=(
-                "You are Sali. Fold this earlier stretch of conversation into a tight running "
-                "memory you'll carry forward — the facts about Almir, decisions made, tasks in "
-                "progress, and where things stand. First person, compact, merge with the prior "
-                "summary. Just the memory, nothing else."
-            )),
+            ChatMessage(role="system", content=continuation.PACKET_INSTRUCTION),
             ChatMessage(role="user", content=f"Prior summary:\n{row['summary'] or '(none)'}\n\n"
                                              f"Earlier turns:\n{transcript}"),
         ]
         result = await self.provider.chat(prompt, options=_SUMMARIZE)
+        summary_text = result.content.strip()
+        # §11-12: store the prose AND a machine-readable packet whose task state is deterministic.
+        packet = continuation.build_packet(await self._current_task_safe(), summary_text)
         await conn.execute(
-            "UPDATE conversation SET summary=$1, summary_through_seq=$2 WHERE id=$3",
-            result.content.strip(), cutoff, session_id,
+            "UPDATE conversation SET summary=$1, summary_through_seq=$2, summary_packet=$3 WHERE id=$4",
+            summary_text, cutoff, packet, session_id,
         )
         await self._emit(conn, "conversation.compacted", session_id,
                          {"through_seq": cutoff}, subject_type="conversation")

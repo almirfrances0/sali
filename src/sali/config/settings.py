@@ -53,6 +53,8 @@ class RuntimeSettings(BaseModel):
     # folded and continued when it fills — see the loop), so these are just runaway backstops.
     max_iterations: int = 40
     token_budget_per_run: int = 400_000
+    resume_interrupted: bool = True  # on startup recovery, actually RE-DRIVE safe/verified runs (§9)
+    resume_max_runs: int = 3  # cap how many stale runs one recovery pass will re-drive (a backstop)
 
 
 class SshSettings(BaseModel):

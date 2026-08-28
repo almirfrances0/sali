@@ -61,11 +61,13 @@ class TaskSink(Protocol):
     """How a tool records and advances a persistent multi-step task (§24). Concrete impl (TaskStore)
     is injected by the runtime; tasks survive restarts because they live in the datastore."""
 
-    async def create(self, objective: str, steps: list[str]) -> Any: ...
+    async def create(self, objective: str, steps: list[Any]) -> Any: ...
     async def current(self) -> Any: ...  # the task Sali is working on now, or None
     async def advance(
-        self, task_id: Any, step_seq: int, status: str, *, note: str | None = None
+        self, task_id: Any, step_seq: int, status: str, *, note: str | None = None,
+        error: str | None = None, verified_by: Any = None,
     ) -> Any: ...
+    async def checkpoint(self, task_id: Any, step_seq: int, data: dict[str, Any]) -> None: ...  # resume mid-step
     async def finish(self, task_id: Any, *, status: str = "done", result: str | None = None) -> None: ...
 
 
@@ -155,6 +157,7 @@ class ToolContext:
     clock: Clock
     pool: Any = None
     session_id: UUID | None = None
+    run_id: UUID | None = None  # the current agent_run — lets a tool link to its own run's executions (§8)
     memory: MemorySink | None = None  # injected by the loop; None in tests / pool-less probes
     recall: RecallSink | None = None  # injected by the loop; lets a tool actively query memory (§34)
     graph: GraphSink | None = None  # injected by the loop; lets a tool assert a relationship

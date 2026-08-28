@@ -42,6 +42,98 @@ async def test_task_lifecycle_persists_and_autocompletes(live_pool: Any) -> None
     assert not await store.open_tasks()  # no longer resurfaced
 
 
+async def test_failed_step_records_attempts_and_failure_class(live_pool: Any) -> None:
+    store = TaskStore(live_pool)
+    task = await store.create("Deploy", ["build", "start service"])
+    # a failed step: the model's note carries the error; the store classifies + counts it (§8/§9)
+    t = await store.advance(task.id, 2, "failed", note="bind: permission denied on port 80")
+    assert t is not None
+    s2 = next(s for s in t.steps if s.seq == 2)
+    assert s2.status == "failed" and s2.attempts == 1
+    assert s2.failure_class == "permission" and "permission denied" in (s2.last_error or "")
+    assert t.status == "running"  # a failed step is retryable, not a whole-task failure
+
+    # retry + fail again: attempts increments, and an explicit error reclassifies (transient this time)
+    t = await store.advance(task.id, 2, "failed", error="connection timed out")
+    assert t is not None
+    s2 = next(s for s in t.steps if s.seq == 2)
+    assert s2.attempts == 2 and s2.failure_class == "transient"
+
+    # succeeding clears the failing path forward; attempts history is preserved on the row
+    t = await store.advance(task.id, 2, "done")
+    assert t is not None
+    s2 = next(s for s in t.steps if s.seq == 2)
+    assert s2.status == "done" and s2.attempts == 2  # attempt count is not reset
+
+
+async def test_done_step_links_verified_execution(live_pool: Any) -> None:
+    from uuid import uuid4
+
+    store = TaskStore(live_pool)
+    task = await store.create("small", ["only step"])
+    exec_id = uuid4()
+    t = await store.advance(task.id, 1, "done", verified_by=exec_id)
+    assert t is not None
+    s1 = t.steps[0]
+    assert s1.verified is True and s1.verified_by == exec_id  # "performed" now provably "verified" (§8)
+
+
+async def test_advance_task_tool_auto_links_last_verified_execution(live_pool: Any) -> None:
+    from uuid import uuid4
+
+    store = TaskStore(live_pool)
+    task = await store.create("deploy", ["configure", "start"])
+    run_id = uuid4()
+    exec_id = uuid4()
+    # a prior tool in THIS run verified an effect (e.g. execute_command started the service)
+    async with live_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO tool_execution "
+            "  (id, run_id, tool_name, status, danger_level, plan, success, finished_at) "
+            "VALUES ($1,$2,'execute_command','verified_success',1,$3,true, now())",
+            exec_id, run_id, {"args": {}})
+
+    ctx = ToolContext(settings=Settings(), clock=SystemClock(), pool=live_pool, run_id=run_id, tasks=store)
+    res = await AdvanceTask().run({"step": 1, "status": "done"}, ctx)
+    assert res.ok
+    got = await store.get(task.id)
+    assert got is not None
+    s1 = next(s for s in got.steps if s.seq == 1)
+    assert s1.verified is True and s1.verified_by == exec_id  # tool auto-linked the verifying execution
+
+
+async def test_next_step_respects_dependencies(live_pool: Any) -> None:
+    store = TaskStore(live_pool)
+    task = await store.create("pipeline", [
+        "step one",
+        {"description": "step two", "depends_on": [1]},
+        {"description": "step three", "depends_on": [1, 2]},
+    ])
+    assert task.next_step is not None and task.next_step.seq == 1  # only step 1 is ready
+    assert [s.seq for s in task.blocked_steps] == [2, 3]
+
+    t = await store.advance(task.id, 1, "done")
+    assert t is not None and t.next_step is not None and t.next_step.seq == 2  # 2 ready, 3 still blocked
+    assert [s.seq for s in t.blocked_steps] == [3]
+
+    t = await store.advance(task.id, 2, "done")
+    assert t is not None and t.next_step is not None and t.next_step.seq == 3  # deps satisfied → 3 ready
+    assert t.blocked_steps == []
+
+
+async def test_step_checkpoint_resumes_mid_step(live_pool: Any) -> None:
+    store = TaskStore(live_pool)
+    task = await store.create("bulk job", ["download 100 files"])
+    await store.checkpoint(task.id, 1, {"downloaded": 42, "of": 100})
+    # a fresh read (simulated restart) sees the in-step progress and marks the step running
+    resumed = await store.get(task.id)
+    assert resumed is not None
+    s1 = resumed.steps[0]
+    assert s1.status == "running" and s1.checkpoint == {"downloaded": 42, "of": 100}
+    line = resumed.one_line()
+    assert "resuming mid-step" in line and "downloaded=42" in line  # jsonb key order isn't preserved
+
+
 async def test_finish_task_closes_it(live_pool: Any) -> None:
     store = TaskStore(live_pool)
     task = await store.create("Big thing", ["a", "b"])
@@ -57,6 +149,7 @@ class _FakeTasks:
         self.created: list[tuple[str, list[str]]] = []
         self.advanced: list[tuple[int, str]] = []
         self.finished: list[str] = []
+        self.checkpoints: list[tuple[int, dict[str, Any]]] = []
         self._current: Any = None
 
     async def create(self, objective: str, steps: list[str]) -> Any:
@@ -67,9 +160,15 @@ class _FakeTasks:
     async def current(self) -> Any:
         return self._current
 
-    async def advance(self, task_id: Any, step_seq: int, status: str, *, note: str | None = None) -> Any:
+    async def advance(
+        self, task_id: Any, step_seq: int, status: str, *, note: str | None = None,
+        error: str | None = None, verified_by: Any = None,
+    ) -> Any:
         self.advanced.append((step_seq, status))
         return SimpleNamespace(id=task_id, objective="x", status="done" if status == "done" else "running")
+
+    async def checkpoint(self, task_id: Any, step_seq: int, data: dict[str, Any]) -> None:
+        self.checkpoints.append((step_seq, data))
 
     async def finish(self, task_id: Any, *, status: str = "done", result: str | None = None) -> None:
         self.finished.append(status)

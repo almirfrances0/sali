@@ -10,6 +10,7 @@ routine churn deterministically, so low-signal noise never floods the log (§41 
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
 from sali.events import attention
@@ -19,6 +20,9 @@ from sali.events.importance import _SOURCE_SUFFIXES
 from sali.obs.log import get_logger
 
 log = get_logger("sali.events.sink")
+
+_DEDUP_TTL_S = 30.0  # suppress an IDENTICAL observation re-logged within this window (§17 debounce)
+_DEDUP_CAP = 512     # bound the in-memory dedup map
 
 _CONFIG_FILES = frozenset({
     ".env", "dockerfile", "docker-compose.yml", "docker-compose.yaml", "pyproject.toml",
@@ -50,6 +54,20 @@ class DbObservationSink:
     def __init__(self, pool: Any, *, min_importance: float | None = None) -> None:
         self._pool = pool
         self._min = min_importance  # optional hard floor; attention is the real gate
+        self._recent: dict[str, float] = {}  # dedup key → last-logged monotonic time (§17 debounce)
+
+    def _suppressed(self, obs: Observation, now: float) -> bool:
+        """True when this exact observation was logged within _DEDUP_TTL_S — so identical, rapidly
+        repeating changes (a flapping port, a re-saved file) don't flood the durable log."""
+        where = str(obs.detail.get("sample") or obs.detail.get("where") or "")
+        key = f"{obs.kind.value}|{where}|{obs.summary}"
+        last = self._recent.get(key)
+        if last is not None and (now - last) < _DEDUP_TTL_S:
+            return True
+        self._recent[key] = now
+        if len(self._recent) > _DEDUP_CAP:  # prune expired keys so the map stays bounded
+            self._recent = {k: t for k, t in self._recent.items() if now - t < _DEDUP_TTL_S}
+        return False
 
     async def observe(self, obs: Observation) -> None:
         if self._min is not None and obs.importance < self._min:
@@ -58,6 +76,8 @@ class DbObservationSink:
             importance=obs.importance, signals=_signals_for(obs), count=obs.count)
         if verdict.action is AttentionAction.IGNORE:
             return  # routine churn — attention says it's not worth Sali's notice
+        if self._suppressed(obs, time.monotonic()):
+            return  # identical to one we just logged — debounce
         payload = obs.to_dict()
         payload["tier"] = verdict.tier.value
         payload["action"] = verdict.action.value

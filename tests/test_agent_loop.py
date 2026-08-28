@@ -144,6 +144,66 @@ async def test_loop_recover_surfaces_interrupted_run(live_pool: Any) -> None:
         assert status == "aborted"
 
 
+async def test_recover_redrives_replay_safe_run(live_pool: Any) -> None:
+    # A crash BEFORE any side effect (reason_plan) is REPLAY_SAFE → recovery actually re-drives the
+    # turn (not just aborts it), so the interrupted work continues on its own (§9).
+    session = new_id()
+    async with live_pool.acquire() as c:
+        run_id = await c.fetchval(
+            "INSERT INTO agent_runs (run_id, session_id, user_input, state, status, updated_at) "
+            "VALUES (gen_random_uuid(), $1, 'finish the job', 'reason_plan', 'running', "
+            "        now() - interval '5 minutes') RETURNING run_id",
+            session,
+        )
+    fake = FakeModelProvider(responses=[ChatResult("Resumed and finished it.", None, [], 3, 3, "fake")])
+    resolved = await _loop(live_pool, fake).recover()
+
+    assert len(resolved) == 1 and resolved[0]["action"] == "replay_safe"
+    assert "resumed_run" in resolved[0]  # it RE-DROVE, not merely surfaced
+    async with live_pool.acquire() as c:
+        assert await c.fetchval("SELECT status FROM agent_runs WHERE run_id=$1", run_id) == "aborted"
+        fresh = await c.fetchval(
+            "SELECT count(*) FROM agent_runs WHERE session_id=$1 AND run_id <> $2", session, run_id)
+        assert fresh == 1  # a new, resumed turn exists in the same session
+
+
+async def test_recover_verifies_then_continues_execute_command(live_pool: Any) -> None:
+    # A non-idempotent execute_command caught mid-flight: recovery independently PROBES whether its
+    # effect landed, records that truth on the tool row, and continues from the known state (§9/§19).
+    import os
+    import shutil
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    target = os.path.join(d, "made")
+    os.makedirs(target)  # the effect actually landed before the "crash"
+    try:
+        session = new_id()
+        async with live_pool.acquire() as c:
+            run_id = await c.fetchval(
+                "INSERT INTO agent_runs (run_id, session_id, user_input, state, status, updated_at) "
+                "VALUES (gen_random_uuid(), $1, 'make the dir', 'execute_tool', 'running', "
+                "        now() - interval '5 minutes') RETURNING run_id",
+                session,
+            )
+            exec_id = await c.fetchval(
+                "INSERT INTO tool_execution (run_id, tool_name, status, danger_level, plan) "
+                "VALUES ($1, 'execute_command', 'executing', 1, $2) RETURNING id",
+                run_id, {"args": {"command": f"mkdir -p {target}"}},
+            )
+        fake = FakeModelProvider(responses=[ChatResult("Confirmed it's there; moving on.", None, [], 3, 3, "fake")])
+        resolved = await _loop(live_pool, fake).recover()
+
+        assert resolved[0]["action"] == "verify_then_continue"
+        assert resolved[0]["verified"] == "True"  # the effect was independently confirmed present
+        assert "resumed_run" in resolved[0]  # verified → continued
+        async with live_pool.acquire() as c:
+            row = await c.fetchrow("SELECT status, success FROM tool_execution WHERE id=$1", exec_id)
+            assert row["status"] == "verified_success" and row["success"] is True  # reality recorded
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 async def test_recover_never_touches_a_live_in_flight_run(live_pool: Any) -> None:
     # A run that JUST transitioned (fresh updated_at) belongs to a live process — a second `sali`
     # starting up (or a new WebSocket connection) must not abort it out from under that process.
@@ -575,3 +635,30 @@ async def test_conversation_compacts_when_long(db_conn: Any) -> None:
     history = await loop._load_history(db_conn, session)
     assert history[0][0] == "earlier"  # the running summary leads the history
     assert len(history) <= 9  # summary + at most 8 recent
+
+
+async def test_compaction_packet_carries_active_task_deterministically(live_pool: Any) -> None:
+    # §11-12: after compaction, the ACTIVE task + step survive as a structured packet — not as prose.
+    from sali.tasks.store import TaskStore
+
+    store = TaskStore(live_pool)
+    task = await store.create("Deploy the site", ["build", "start", "verify"])
+    await store.advance(task.id, 1, "done")  # step 1 done → next is step 2
+
+    session = new_id()
+    async with live_pool.acquire() as c:
+        await c.execute("INSERT INTO conversation (id) VALUES ($1)", session)
+        for i in range(30):
+            await c.execute(
+                "INSERT INTO message (conversation_id, seq, role, content) VALUES ($1,$2,$3,$4)",
+                session, i + 1, "user" if i % 2 == 0 else "assistant", f"turn {i}",
+            )
+        loop = _loop(live_pool, FakeModelProvider())
+        await loop._maybe_compact(c, session)
+        row = await c.fetchrow("SELECT summary_packet FROM conversation WHERE id=$1", session)
+        assert row["summary_packet"] is not None
+        assert row["summary_packet"]["task"]["objective"] == "Deploy the site"
+        assert row["summary_packet"]["task"]["next"]["seq"] == 2  # deterministic current step
+        history = await loop._load_history(c, session)
+    assert history[0][0] == "earlier"
+    assert "TASK: Deploy the site" in history[0][1] and "NEXT: step 2" in history[0][1]

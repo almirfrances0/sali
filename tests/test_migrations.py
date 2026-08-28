@@ -24,6 +24,22 @@ async def test_source_priority_ordering(db_conn: Any) -> None:
     assert obs > inf  # engineering rule 6
 
 
+async def test_source_priority_python_sql_lockstep(db_conn: Any) -> None:
+    # Evidence priority is duplicated (Python _SOURCE_PRIORITY ⇄ SQL source_priority()); guard the drift.
+    from sali.core.enums import MemorySource, source_priority
+
+    for s in MemorySource:
+        sql = await db_conn.fetchval("SELECT source_priority($1::memory_source)", s.value)
+        assert sql == source_priority(s), f"{s.value}: SQL {sql} != Python {source_priority(s)}"
+
+
+async def test_migrations_are_idempotent(db_conn: Any) -> None:
+    # The session fixture already applied every migration; a second pass must be a no-op (forward-only).
+    from sali.db.migrations.runner import apply_migrations
+
+    assert await apply_migrations(db_conn) == []
+
+
 async def test_event_blocks_update(db_conn: Any) -> None:
     await db_conn.execute("INSERT INTO event (event_type) VALUES ('t.update')")
     seq = await db_conn.fetchval("SELECT max(seq) FROM event")

@@ -8,7 +8,9 @@ finishes on its own when every step is done, or Sali closes it with finish_task.
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
+from uuid import UUID
 
 from sali.core.enums import Capability, RiskLevel
 from sali.tools.base import Tool, ToolResult
@@ -67,6 +69,8 @@ class AdvanceTask(Tool):
             "step": {"type": "integer", "description": "The step number (1-based)."},
             "status": {"type": "string", "enum": _STEP_STATES},
             "note": {"type": "string", "description": "Optional: what happened on this step."},
+            "checkpoint": {"type": "object", "description": "Optional: save in-step progress (any keys) "
+                           "so you resume MID-step, not from scratch, after a restart."},
         },
         "required": ["step", "status"],
     }
@@ -85,7 +89,23 @@ class AdvanceTask(Tool):
         if status not in _STEP_STATES:
             return ToolResult(ok=False, display="bad status", error=f"status must be one of {_STEP_STATES}")
         note = str(args.get("note", "")).strip() or None
-        updated = await ctx.tasks.advance(task.id, step, status, note=note)
+        # §5: persist in-step progress so a long step resumes mid-way after a restart, not from scratch.
+        checkpoint = args.get("checkpoint")
+        if isinstance(checkpoint, dict) and checkpoint:
+            with contextlib.suppress(Exception):
+                await ctx.tasks.checkpoint(task.id, step, checkpoint)
+        # §8: when a step is DONE, link the tool_execution that VERIFIED an effect this run — so the
+        # step is provably "verified", not merely "reported done". Best-effort; never blocks the mark.
+        verified_by: UUID | None = None
+        if status == "done" and ctx.pool is not None and ctx.run_id is not None:
+            with contextlib.suppress(Exception):
+                async with ctx.pool.acquire() as conn:
+                    verified_by = await conn.fetchval(
+                        "SELECT id FROM tool_execution WHERE run_id=$1 AND status='verified_success' "
+                        "ORDER BY finished_at DESC LIMIT 1",
+                        ctx.run_id,
+                    )
+        updated = await ctx.tasks.advance(task.id, step, status, note=note, verified_by=verified_by)
         return ToolResult(
             ok=True,
             output={"objective": updated.objective, "task_status": updated.status,
