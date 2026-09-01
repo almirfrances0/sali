@@ -22,14 +22,18 @@ class RunJournal:
         self._seq = 0
 
     @classmethod
-    async def start(cls, conn: Any, session_id: UUID, user_input: str) -> RunJournal:
-        run_id = new_id()
+    async def start(
+        cls, conn: Any, session_id: UUID, user_input: str, *, run_id: UUID | None = None,
+    ) -> RunJournal:
+        """Start a new run journal. If ``run_id`` is provided (from the execution coordinator),
+        it is used as the canonical run ID — ensuring one run_id per turn across the entire system."""
+        rid = run_id or new_id()
         await conn.execute(
             "INSERT INTO agent_runs (run_id, session_id, user_input, state, status) "
             "VALUES ($1,$2,$3,$4,'running')",
-            run_id, session_id, user_input, RunState.INPUT.value,
+            rid, session_id, user_input, RunState.INPUT.value,
         )
-        return cls(conn, run_id, session_id)
+        return cls(conn, rid, session_id)
 
     async def event(
         self,

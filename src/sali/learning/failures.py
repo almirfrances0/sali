@@ -25,6 +25,20 @@ def _binary(command: str | None) -> str:
     return parts[0] if parts else ""
 
 
+def _step_summary(tool_name: str, plan: Any) -> str:
+    """A compact summary of what a tool execution did, for both command and non-command tools."""
+    command = _command_of(plan)
+    if command:
+        return command
+    # For non-command tools, summarize the key arg
+    args = (plan.get("args") or {}) if isinstance(plan, dict) else {}
+    for key in ("path", "query", "url", "entity", "name", "to", "subject"):
+        val = args.get(key)
+        if isinstance(val, str) and val.strip():
+            return f"{tool_name}({val[:60]})"
+    return tool_name
+
+
 async def record_failures(conn: Any, *, limit: int = 50) -> int:
     """Record recent verified failures not yet captured — and, when a later step in the same run
     fixed it, the correction too (§18's diagnosis→correction). Caller owns the transaction."""
@@ -42,6 +56,7 @@ async def record_failures(conn: Any, *, limit: int = 50) -> int:
     count = 0
     for row in rows:
         command = _command_of(row["plan"])
+        step = _step_summary(row["tool_name"], row["plan"])
         # The correction: the next successful call of the same tool later in the same run.
         fix = await conn.fetchrow(
             "SELECT plan FROM tool_execution WHERE run_id=$1 AND tool_name=$2 "
@@ -49,20 +64,21 @@ async def record_failures(conn: Any, *, limit: int = 50) -> int:
             row["run_id"], row["tool_name"], row["started_at"],
         )
         fix_command = _command_of(fix["plan"]) if fix else None
+        fix_step = _step_summary(row["tool_name"], fix["plan"]) if fix else None
 
-        doing = f" running `{command}`" if command else ""
+        doing = f" running `{step}`" if step != row["tool_name"] else ""
         because = f" — {row['error'][:200]}" if row["error"] else ""
-        # Content is the failure SIGNATURE (tool + command + error) — NOT the per-turn task, which
-        # varies and would record the same recurring failure dozens of times (a bloat of near-dupes,
-        # and the (layer, content_hash) collision Almir kept seeing). The task goes in the note.
-        # A genuine correction: a later success that RE-RUNS the same program with a change — not any
-        # unrelated later command that happened to succeed (which produced spurious failure→fix noise).
-        learned_fix = bool(command and fix_command and fix_command != command
-                           and _binary(command) == _binary(fix_command))
+        # A genuine correction: for command tools, a later success that RE-RUNS the same program
+        # with a change. For non-command tools, any later success of the same tool counts.
+        if command and fix_command:
+            learned_fix = bool(fix_command != command and _binary(command) == _binary(fix_command))
+        else:
+            # Non-command tool: a later success of the same tool is a correction
+            learned_fix = bool(fix and fix_step and fix_step != step)
         if not learned_fix:
             continue  # §18 is failure→CORRECTION — a bare one-off error is noise, not a lesson
         content = (f"A past attempt failed: the {row['tool_name']} tool{doing} failed{because}. "
-                   f"What fixed it: `{fix_command}`.")
+                   f"What fixed it: `{fix_step or fix_command}`.")
         note = f"task: {row['user_input'][:120]}" if row["user_input"] else None
         # A STRUCTURED incident (§24/§25) alongside the text, so recall gives Sali the whole shape, not
         # a sentence. Everything here is FACT from the tool_execution rows; the *cause* is deliberately
@@ -71,11 +87,10 @@ async def record_failures(conn: Any, *, limit: int = 50) -> int:
             "kind": "incident",
             "objective": (row["user_input"] or "")[:200] or None,
             "tool": row["tool_name"],
-            "failed_command": command,
+            "failed_command": step,
             "error": (row["error"] or "")[:400] or None,
-            "hypothesis": f"the fix `{fix_command}` suggests the failure was addressable by re-running "
-                          f"{_binary(command)} differently",
-            "correction": fix_command,
+            "hypothesis": f"the fix `{fix_step or fix_command}` suggests the failure was addressable",
+            "correction": fix_step or fix_command,
             "verified": True,  # the correction was a verified_success later in the same run
             "outcome": "resolved",
         }

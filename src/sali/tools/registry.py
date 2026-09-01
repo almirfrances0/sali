@@ -31,8 +31,10 @@ class ToolRegistry:
 def default_registry() -> ToolRegistry:
     """Sali's built-in tools (system, filesystem, git, exec, web, remember, relate, tasks)."""
     from sali.tools.builtins import (
+        agent_tool,
         browser_tool,
         comms_tool,
+        context_tool,
         exec_tool,
         filesystem,
         git,
@@ -44,6 +46,7 @@ def default_registry() -> ToolRegistry:
         notify_tool,
         perception_tool,
         recall_tool,
+        research_tool,
         schedule_tool,
         security_tool,
         self_diagnostics_tool,
@@ -61,6 +64,7 @@ def default_registry() -> ToolRegistry:
     for module in (system, filesystem, git, exec_tool, web, memory_tool, graph_tool, task_tool,
                    schedule_tool, ingest_tool, ssh, comms_tool, browser_tool, notify_tool,
                    vision_tool, perception_tool, recall_tool, tool_advice, self_tool, timeline_tool,
-                   security_tool, history_tool, memory_audit_tool, self_diagnostics_tool):
+                   security_tool, history_tool, memory_audit_tool, self_diagnostics_tool,
+                   research_tool, context_tool, agent_tool):
         module.register_builtins(registry)
     return registry

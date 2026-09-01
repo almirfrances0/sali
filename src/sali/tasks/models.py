@@ -27,11 +27,26 @@ class TaskStep:
 class Task:
     id: UUID
     objective: str
-    status: str  # open | running | done | failed | abandoned
+    status: str  # open | running | done | failed | abandoned | superseded | waiting | blocked | paused | cancelled
     steps: list[TaskStep] = field(default_factory=list)
     result: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    is_primary: bool = False
+    superseded_by: UUID | None = None
+    workspace_root: str | None = None
+    allowed_write_roots: list[str] = field(default_factory=list)
+    workspace_mode: str = "none"  # none | explicit | inherited
+    last_heartbeat: datetime | None = None
+    interrupted_at: datetime | None = None
+    recovery_reason: str | None = None
+    max_retries: int = 3
+    retry_count: int = 0
+    # Progress tracking — distinguishes heartbeat (alive) from progress (doing work)
+    last_progress_at: datetime | None = None
+    last_progress_type: str | None = None  # step_advance | tool_success | artifact | checkpoint
+    active_tool_name: str | None = None    # tool currently executing (for watchdog context)
+    health_status: str = "healthy"         # healthy | active_tool | potentially_stuck | orphaned
 
     @property
     def next_step(self) -> TaskStep | None:
@@ -68,7 +83,10 @@ class Task:
             tail = " — waiting on dependencies"
         else:
             tail = ""
-        return f"{self.objective} [{ticks}]{tail}"
+        health = ""
+        if self.health_status and self.health_status != "healthy":
+            health = f" [{self.health_status}]"
+        return f"{self.objective} [{ticks}]{tail}{health}"
 
 
 _TICK = {"done": "✓", "failed": "✗", "running": "▷", "skipped": "–", "pending": "·",
@@ -91,6 +109,20 @@ def row_to_task(task_row: Any, step_rows: list[Any]) -> Task:
         result=task_row["result"],
         created_at=task_row["created_at"],
         updated_at=task_row["updated_at"],
+        is_primary=_col(task_row, "is_primary", False),
+        superseded_by=_col(task_row, "superseded_by"),
+        workspace_root=_col(task_row, "workspace_root"),
+        allowed_write_roots=list(_col(task_row, "allowed_write_roots", []) or []),
+        workspace_mode=_col(task_row, "workspace_mode", "none"),
+        last_heartbeat=_col(task_row, "last_heartbeat"),
+        interrupted_at=_col(task_row, "interrupted_at"),
+        recovery_reason=_col(task_row, "recovery_reason"),
+        max_retries=_col(task_row, "max_retries", 3),
+        retry_count=_col(task_row, "retry_count", 0),
+        last_progress_at=_col(task_row, "last_progress_at"),
+        last_progress_type=_col(task_row, "last_progress_type"),
+        active_tool_name=_col(task_row, "active_tool_name"),
+        health_status=_col(task_row, "health_status", "healthy"),
         steps=[
             TaskStep(
                 seq=r["seq"],

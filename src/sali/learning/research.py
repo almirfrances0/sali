@@ -88,5 +88,5 @@ async def research_pass(
             await queue.resolve(conn, item.id, outcome=answer[:200])
         learned += 1
     if learned:
-        log.info("researched", learned=learned)
+        log.debug("researched", learned=learned)
     return learned

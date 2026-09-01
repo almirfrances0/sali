@@ -50,6 +50,7 @@ async def run_argv(
     *,
     limits: bool = False,
     max_output: int = _MAX_OUTPUT,
+    cwd: str | None = None,
 ) -> tuple[int, str, str]:
     """Run ``argv`` (never a shell), return (returncode, stdout, stderr). Kills on timeout/flood."""
     proc = await asyncio.create_subprocess_exec(
@@ -59,6 +60,7 @@ async def run_argv(
         start_new_session=True,  # own process group → killable as a unit
         env=minimal_env() if env is None else env,
         preexec_fn=_apply_limits if limits else None,
+        cwd=cwd,
     )
     out_buf, err_buf = bytearray(), bytearray()
     flooded = False

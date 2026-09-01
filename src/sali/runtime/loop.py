@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import difflib
+import hashlib
 import json
 import re
 from collections.abc import AsyncIterator
@@ -40,7 +41,7 @@ from sali.perception.service import build_perception
 from sali.provider.base import ChatMessage, ChatResult, ModelProvider, ToolCall
 from sali.retrieval.router import classify
 from sali.retrieval.service import RetrievalService
-from sali.runtime import continuation, pending
+from sali.runtime import context_budget, continuation, pending
 from sali.runtime.health import HealthService
 from sali.runtime.journal import RunJournal
 from sali.runtime.referential import extract_proposed_command, is_delegation
@@ -51,6 +52,8 @@ from sali.scheduler.store import ScheduleStore
 from sali.security.confirm import Confirmer
 from sali.security.policy import Action, PolicyDecision, PolicyEngine
 from sali.security.redact import redact_obj
+from sali.tasks.authority import TaskAuthority
+from sali.tasks.logger import append_event
 from sali.tasks.store import TaskStore
 from sali.tools import dispatch
 from sali.tools.base import VerifyResult
@@ -107,26 +110,27 @@ _VOICE: dict[str, Any] = {
 _SUMMARIZE: dict[str, Any] = {"temperature": 0.3, "top_k": 40, "top_p": 0.9}
 
 # Fold older turns into a running summary once this many uncompacted messages accumulate,
-# always keeping the most recent few verbatim.
-_COMPACT_AFTER = 24
-_KEEP_RECENT = 6
+# always keeping the most recent few verbatim. Generous — let Sali keep more context alive.
+_COMPACT_AFTER = 40
+_KEEP_RECENT = 10
 
-# Intra-turn context folding: when the *working* prompt for a single task nears the model's
-# window, fold everything done so far into a compact progress note and carry on — so a long,
-# many-step job continues on its own instead of dead-ending on the context limit.
-_CTX_HEADROOM = 0.78  # use more of the window before folding (the fold still prevents overflow)
-_CTX_MARGIN = 8       # per-message token overhead added to the estimate
+# Intra-turn context folding: when the *working* prompt for a single task nears the model's window,
+# fold everything done so far into a compact progress note and carry on — so a long, many-step job
+# continues on its own instead of dead-ending on the context limit. The budget/thresholds now live in
+# runtime.context_budget (provider-derived window, output reservation, safe→emergency status ladder).
+# A context overflow is recovered a bounded number of times per turn: fold hard, then retry (§8/§29).
+_MAX_OVERFLOW_RECOVERIES = 3
 # Follow-through: models sometimes *narrate* an action ("I'll run these in parallel") and then
 # stop without calling anything, leaving Almir to re-prompt. When a reply defers a machine
 # action but emits no tool call, we nudge Sali to actually do it — bounded, so it can't loop.
 # The model occasionally emits a malformed tool call the backend can't parse (a transient 500).
 # Re-sampling at the warm voice temperature almost always yields a clean one, so retry a couple
 # of times before giving up rather than crashing the whole turn.
-_MAX_PROVIDER_RETRIES = 2
+_MAX_PROVIDER_RETRIES = 3
 
-# Enough pushes to carry a multi-step build (a folder + several files) to completion, bounded so
-# it can never spin.
-_MAX_FOLLOW_THROUGH = 4
+# Enough pushes to carry a large multi-step build (many files, tests, deploy) to completion,
+# bounded so it can never spin. With 65K ctx, Sali can hold more steps in mind at once.
+_MAX_FOLLOW_THROUGH = 8
 _FOLLOW_THROUGH_NUDGE = (
     "(You haven't finished, and you have no background process — nothing runs on its own. Do ALL "
     "the remaining steps NOW, in this reply: make every tool call needed to finish the whole task "
@@ -154,11 +158,11 @@ _EMPTY_FALLBACK = (
 )
 # The SAME (tool, args) call failing identically this many times → stop dispatching it and hand the
 # failure back as a factual result, so a wrong call (e.g. a hallucinated path) can't be retried forever.
-_MAX_TOOL_FAILURES = 2
+_MAX_TOOL_FAILURES = 3
 # How often the background consolidation pass (§17-19: mine procedures, record failures, distill an
 # episode) may run. Throttled so a busy session doesn't distill every turn; it runs OFF-THREAD after
 # the turn is already done, so it never adds latency to Almir's reply.
-_CONSOLIDATE_EVERY_S = 600.0
+_CONSOLIDATE_EVERY_S = 300.0
 
 # A tool call sometimes leaks out as *text* instead of a parsed call (the model emits the JSON
 # itself). We must never leave Almir staring at raw JSON, so we detect it and ask for a clean redo.
@@ -404,6 +408,129 @@ class _VisionSink:
         return str(await self._provider.describe_image(prompt, image))
 
 
+class _ResearchSink:
+    """Just-in-time web research bound to the current task (Prompt 5 §14-20). Searches the web, distills
+    a bounded extractive summary, and persists it as durable, task-linked EVIDENCE (never temporary
+    context, never automatic permanent truth). Records evidence-aware learning candidates, and promotes
+    only VERIFIED ones into durable memory. Injected into ToolContext so the tools layer stays clean."""
+
+    def __init__(self, *, store: Any, tasks: TaskStore, run_id: UUID | None, pool: Any) -> None:
+        self._store = store
+        self._tasks = tasks
+        self._run_id = run_id
+        self._pool = pool
+
+    async def _current_task_id(self) -> UUID | None:
+        with contextlib.suppress(Exception):
+            t = await self._tasks.current()
+            return t.id if t is not None else None
+        return None
+
+    async def research(self, query: str, *, step_seq: int | None = None) -> dict[str, Any]:
+        from sali.tools.builtins.web import WebSearch
+        from sali.tools.context import local_context
+
+        task_id = await self._current_task_id()
+        with contextlib.suppress(Exception):
+            if self._store._publisher is not None:
+                await self._store._publisher.emit(
+                    event_type="research.started", task_id=task_id, run_id=self._run_id,
+                    subject_type="task", subject_id=task_id, origin="research",
+                    data={"query": query[:200]})
+        results: list[dict[str, Any]] = []
+        with contextlib.suppress(Exception):
+            res = await WebSearch().run({"query": query}, local_context())
+            results = list(res.output.get("results", [])) if res.ok else []
+        if not results:
+            # research is durable even when it FAILS — the task keeps its progress, never restarts (§21)
+            await self._store.record_research(
+                task_id=task_id, run_id=self._run_id, step_seq=step_seq, query=query, source=None,
+                summary="(no results — research blocked or offline)", confidence=0.0,
+                content_hash=None, status="failed")
+            return {"ok": False, "reason": "no_results", "query": query}
+        top = results[:3]
+        summary = " | ".join((r.get("snippet") or "").strip() for r in top if r.get("snippet"))[:800]
+        source = top[0].get("url")
+        h = hashlib.sha256((summary or query).encode("utf-8")).hexdigest()[:16]
+        rid = await self._store.record_research(
+            task_id=task_id, run_id=self._run_id, step_seq=step_seq, query=query, source=source,
+            summary=summary or "(sources found, no snippet)", confidence=0.6, content_hash=h)
+        return {"ok": True, "research_id": str(rid), "summary": summary, "source": source,
+                "sources": [r.get("url") for r in top]}
+
+    async def record_lesson(
+        self, lesson: str, *, source: str | None = None, research_id: str | None = None,
+    ) -> dict[str, Any]:
+        task_id = await self._current_task_id()
+        rid = None
+        with contextlib.suppress(Exception):
+            rid = UUID(research_id) if research_id else None
+        cid = await self._store.record_candidate(
+            task_id=task_id, run_id=self._run_id, lesson=lesson, source=source, research_id=rid)
+        if rid is not None:
+            with contextlib.suppress(Exception):
+                await self._store.mark_used(rid, task_id, self._run_id)
+        return {"ok": True, "candidate_id": str(cid), "verification_state": "unverified"}
+
+    async def promote_verified(self) -> int:
+        """Promote every VERIFIED, not-yet-promoted candidate into durable memory (§19). A candidate is
+        verified only by real completion evidence (the reviewer PASS), so a failed experiment is never
+        promoted (§20). Idempotent — the promoted flag prevents double-writes."""
+        from sali.core.enums import MemoryLayer, MemorySource
+        from sali.memory.writer import remember as mem_remember
+
+        promoted = 0
+        for c in await self._store.promotable_candidates():
+            with contextlib.suppress(Exception):
+                async with self._pool.acquire() as conn:
+                    await mem_remember(
+                        conn, layer=MemoryLayer.SEMANTIC, content=c["lesson"],
+                        source=MemorySource.EXTERNAL_SOURCE, needs_grounding=True, importance=0.5,
+                        note=f"verified learning candidate: {c.get('source') or ''}",
+                        structured={"kind": "learned_lesson", "candidate_id": str(c["id"])})
+                await self._store.mark_promoted(c["id"], task_id=c.get("task_id"))
+                promoted += 1
+        return promoted
+
+
+class _DelegateSink:
+    """SUBAGENT DISABLED (Prompt 12 §7 + user directive). Sali is ONE executive agent. Delegation would
+    spawn a second reasoning stream that could issue a concurrent model call — and this machine cannot
+    load `sali:latest` twice. So `delegate()` NEVER spawns a sub-run: it refuses and returns None. The
+    class is kept only so existing wiring/ToolContext stays intact; it starts nothing, holds nothing, and
+    consumes no GPU. All work runs in the single foreground reasoning stream, serialized by the GPU lease."""
+
+    def __init__(self, *, loop: Any, tasks: TaskStore, run_id: UUID | None, store: Any) -> None:
+        self._loop = loop
+        self._tasks = tasks
+        self._run_id = run_id
+        self._store = store
+
+    async def delegate(self, objective: str, *, workspace: str | None = None) -> dict[str, Any]:
+        # Never spawn a subagent — a second model call could load sali:latest twice and crash the host.
+        return {"ok": False, "reason": "delegation is disabled — Sali is a single executive agent and "
+                "handles the objective in the one foreground reasoning stream"}
+
+
+class _ClarifySink:
+    """Let Sali pause the primary task and ask the user a clarifying question (§44). Durable — the task
+    becomes 'waiting_for_user' and resumes on the user's next message; never a failure, nothing lost."""
+
+    def __init__(self, *, store: Any, tasks: TaskStore, run_id: UUID | None) -> None:
+        self._store = store
+        self._tasks = tasks
+        self._run_id = run_id
+
+    async def ask(self, question: str) -> dict[str, Any]:
+        task = None
+        with contextlib.suppress(Exception):
+            task = await self._tasks.current()
+        if task is None:
+            return {"ok": False, "reason": "no active task to pause"}
+        qid = await self._store.ask(task.id, question, run_id=self._run_id)
+        return {"ok": True, "question_id": str(qid), "status": "waiting_for_user"}
+
+
 @dataclass(slots=True)
 class AgentResult:
     run_id: UUID
@@ -447,10 +574,25 @@ class AgentLoop:
         self.learning = learning  # LearningService | None — drives §17-19 consolidation off-thread
         self.clock = clock or SystemClock()
         self.log = get_logger("sali.loop")
+        self._publisher: Any = None  # EventPublisher — set by runtime after construction
+        self._reviewer: Any = None  # TaskReviewer — the completion gate; set by runtime (Prompt 4)
         self._memory_sink = _MemorySink(retrieval.memory)  # lets the remember tool save durably
         self._graph = GraphService(pool)  # lets the relate tool write conversational edges
         self._recall = _RecallSink(retrieval.memory, self._graph)  # lets memory tools actively query (§34)
         self._tasks = TaskStore(pool)  # persistent multi-step tasks (§24), resumed across restarts
+        from sali.skills.store import SkillStore
+        from sali.tasks.ledger import DecisionStore, PhaseStore
+        from sali.tasks.research import ResearchStore
+        self._skills = SkillStore(pool)  # per-task skill snapshots (Prompt 5); publisher set by runtime
+        self._skills_root = settings.permissions.skills_root
+        self._research_store = ResearchStore(pool)  # task-bound research + learning candidates (Prompt 5)
+        self._decisions = DecisionStore(pool)  # decision ledger (Prompt 6 §30); publisher set by runtime
+        self._phases = PhaseStore(pool)        # task phases (Prompt 6 §31); publisher set by runtime
+        self._repeat_warned: set[Any] = set()  # (tool,error) already flagged as a repeated failure (§45)
+        from sali.tasks.coordination import DelegationStore, QuestionStore
+        self._delegations = DelegationStore(pool)  # the one optional subagent (Cognitive OS §16)
+        self._questions = QuestionStore(pool)      # user-clarification questions (§44)
+        self._task_authority = TaskAuthority(self._tasks)  # deterministic active-task enforcement
         self._schedules = ScheduleStore(pool, self.clock)  # recurring work (§44)
         self._documents = IngestService(pool, provider)  # document ingestion → memory (§44)
         self._remote = build_remote_runner(settings.ssh, SecretStore())  # ssh; vault-backed passwords
@@ -472,10 +614,12 @@ class AgentLoop:
         with contextlib.suppress(Exception):
             await self._browser.aclose()
 
-    async def run(self, user_input: str, session_id: UUID | None = None) -> AgentResult:
+    async def run(
+        self, user_input: str, session_id: UUID | None = None, *, as_subagent: bool = False,
+    ) -> AgentResult:
         """Run one turn to completion (non-streaming) by consuming the event stream."""
         final: LoopEvent | None = None
-        async for event in self.astream(user_input, session_id):
+        async for event in self.astream(user_input, session_id, as_subagent=as_subagent):
             if event.kind == "final":
                 final = event
         if final is None:  # pragma: no cover - astream always yields final or raises
@@ -540,20 +684,134 @@ class AgentLoop:
         return note, (through if phrases else None), (obs_through if obs else None)
 
     async def _open_tasks_note(self) -> str | None:
-        """A compact view of any task still in progress (§24), so Sali resumes it — this is read
-        from the datastore every turn, which is exactly what makes a task survive a restart.
-        Best-effort: the task engine is a nicety, never a reason to break a turn."""
+        """A compact view of the authoritative active task (§24). Only the primary task is shown
+        with full authority — old/non-authoritative tasks are NOT dumped into context where they
+        could be interpreted as simultaneous instructions. Best-effort: the task engine is a nicety,
+        never a reason to break a turn."""
         try:
+            active = await self._task_authority.current_active()
+            if active is not None:
+                # Check if this task was interrupted (recovery scenario)
+                if active.interrupted_at:
+                    from sali.tasks.recovery import build_recovery_context_block, recover_task
+                    recovery = await recover_task(self.pool, active.id)
+                    return await self._with_knowledge_block(active, await self._with_review_block(
+                        active, build_recovery_context_block(recovery)))
+                return await self._with_knowledge_block(active, await self._with_review_block(active, (
+                    "CURRENT PRIMARY TASK (authoritative — this is what you are working on):\n"
+                    f"- {active.one_line()}"
+                )))
+            # No authoritative task — check if there are any resumable tasks (informational only).
             tasks = await self._tasks.open_tasks(limit=3)
         except Exception:  # noqa: BLE001 - tasks are a nicety, never break a turn
             return None
         if not tasks:
             return None
+        # Show resumable tasks as informational, clearly marked as NOT authoritative.
         lines = "\n".join(f"- {t.one_line()}" for t in tasks)
         return (
-            "Task(s) you have in progress — pick up where you left off, advancing steps as you go:\n"
+            "You have paused/superseded tasks that could be resumed (none are currently active):\n"
             + lines
         )
+
+    async def _skills_note(self, task: Any, journal: RunJournal) -> str | None:
+        """Bounded skill guidance for the active task (Prompt 5 §7/§12). On first sight of a task, select
+        the relevant skills from its objective and persist their snapshots; thereafter render from the
+        DURABLE snapshot (so guidance survives compaction/restart) and flag any live file that changed.
+        Best-effort — skills are a nicety and must never break a turn."""
+        if self._skills is None:
+            return None
+        stored = await self._skills.for_task(task.id)
+        if not stored:
+            stored = await self._skills.select_and_persist(
+                task.id, objective=task.objective, skills_root=self._skills_root)
+        else:
+            with contextlib.suppress(Exception):
+                changed = await self._skills.detect_changes(task.id, self._skills_root)
+                if changed:
+                    await journal.event("skill_changed", {"skills": changed})
+        return self._skills.render(stored) or None
+
+    async def _with_workspace_block(self, task: Any, note: str) -> str:
+        """Prepend the deterministic CURRENT TASK WORKSPACE block for the active task (Prompt 5 §5),
+        re-derived from durable state every turn so the authoritative workspace survives compaction and
+        restart. No-op when the task has no workspace."""
+        root = getattr(task, "workspace_root", None)
+        if not root:
+            return note
+        block = continuation.render_workspace_block(root)
+        return f"{block}\n\n{note}" if note else block
+
+    async def _task_capsule_note(self, task: Any, *, emergency: bool = False) -> str:
+        """The Task State Capsule (Prompt 6) — Sali's working memory, REGENERATED from durable state each
+        turn: workspace, phase, steps, active decisions, negative knowledge, reviewer requirements,
+        research, and the anchored NEXT ACTION. Replaces the scattered per-turn blocks with one coherent,
+        deterministic structure that survives compaction/restart. `emergency` renders the minimal capsule."""
+        from sali.runtime.capsule import build_capsule, render_capsule
+        cap = await build_capsule(
+            self.pool, task, reviewer=self._reviewer, research=self._research_store,
+            skills=self._skills, decisions=self._decisions, phases=self._phases)
+        # A deterministically-detected repeated failed action (§45) — warn ONCE per (tool, error) so the
+        # observer sees it, and the capsule already nudges Sali to research/alternative/ask, not loop.
+        for r in cap.repeated[:3]:
+            key = (r.get("tool_name"), (r.get("error") or "")[:80])
+            if key not in self._repeat_warned:
+                self._repeat_warned.add(key)
+                await self._emit_runtime(
+                    "task.repeated_failure_detected",
+                    {"tool": r.get("tool_name"), "count": r["n"], "error": (r.get("error") or "")[:160]},
+                    task_id=task.id)
+        return render_capsule(cap, emergency=emergency)
+
+    async def _with_research_block(self, task: Any, note: str) -> str:
+        """Append the task's recent web-research findings (Prompt 5 §13), bounded, re-read from durable
+        state each turn so they survive compaction/restart. Evidence, not proof of completion."""
+        if self._research_store is None:
+            return note
+        findings: list[dict[str, Any]] = []
+        with contextlib.suppress(Exception):
+            findings = await self._research_store.list_research(task.id, limit=4)
+        block = self._research_store.render(findings) if findings else ""
+        return f"{note}\n\n{block}" if (note and block) else (block or note)
+
+    async def _with_knowledge_block(self, task: Any, note: str) -> str:
+        """Append the learned knowledge most relevant to this task (Prompt 7 §33) — bounded, re-derived
+        from durable state each turn, and LOWEST priority: the current task always wins, so this block
+        is the first to go under context pressure. Evidence-ranked guidance; contradicted knowledge is
+        excluded, and it never overrides safety, policy, or the reviewer."""
+        blocks: list[str] = [note] if note else []
+        objective = getattr(task, "objective", "") or ""
+        scope_ref = getattr(task, "workspace_root", None)
+        with contextlib.suppress(Exception):
+            from sali.learning.retrieval import relevant_knowledge, render_hints
+            items = await relevant_knowledge(
+                self.pool, objective=objective, scope_ref=scope_ref, publisher=self._publisher, limit=4)
+            if items and (hints := render_hints(items)):
+                blocks.append(hints)
+        with contextlib.suppress(Exception):
+            # lifetime memory (§32): the past experiences relevant to this task — lowest priority
+            from sali.learning.experience import ExperienceStore
+            store = ExperienceStore(self.pool, self._publisher)
+            exps = await store.relevant_experiences(objective=objective, scope_ref=scope_ref, limit=3)
+            if exps and (block := store.render(exps)):
+                blocks.append(block)
+        return "\n\n".join(blocks) if blocks else note
+
+    async def _with_review_block(self, task: Any, note: str) -> str:
+        """Append the latest reviewer verdict to the primary-task note when it needs rework or is
+        blocked (Prompt 4 §12/§18). Read from PostgreSQL every turn, so the required fixes survive
+        compaction, interruption, and restart without depending on the model remembering them. No
+        reviewer wired (bare loop) → the note is unchanged."""
+        if self._reviewer is None:
+            return note
+        latest = None
+        with contextlib.suppress(Exception):
+            # the latest SETTLED verdict — a 'running' row from a crash mid-review is skipped
+            latest = await self._reviewer.latest_terminal_review(task.id)
+        if latest is None or latest.status.value not in ("needs_rework", "blocked", "failed"):
+            return note
+        block = continuation.render_review_block(latest.to_public())
+        return f"{note}\n\n{block}" if block else note
 
     async def _current_task_safe(self) -> Any:
         """The task Sali is working on, or None — best-effort (a pool-less loop or DB hiccup never
@@ -645,21 +903,64 @@ class AgentLoop:
         return ""
 
     async def astream(
-        self, user_input: str, session_id: UUID | None = None
+        self, user_input: str, session_id: UUID | None = None,
+        *, run_id: UUID | None = None, as_subagent: bool = False,
     ) -> AsyncIterator[LoopEvent]:
         """Drive one turn, streaming status/token/thinking/tool events as they happen. This is
-        the real core; ``run`` is a thin consumer. Everything is journaled exactly as before."""
+        the real core; ``run`` is a thin consumer. Everything is journaled exactly as before.
+
+        If ``run_id`` is provided (from the execution coordinator), it is used as the canonical
+        run ID for this turn — avoiding duplicate IDs when the coordinator and journal would each
+        create one independently.
+
+        ``as_subagent`` (Cognitive OS §16): a bounded delegated run that does NOT manage tasks — task
+        authority is skipped and the task tools refuse, so a subagent can never touch the primary task.
+        """
         session_id = session_id or new_id()
         async with self.pool.acquire() as conn:  # journal + tool + persistence connection
             await self._ensure_conversation(conn, session_id)
             history = await self._load_history(conn, session_id)
             await self._append_message(conn, session_id, "user", user_input)
-            journal = await RunJournal.start(conn, session_id, user_input)
+            journal = await RunJournal.start(conn, session_id, user_input, run_id=run_id)
             # Announce the run id at the START (not only at 'final') so a live UI can correlate the
             # tool rows / journal / presence of a turn while it is still in flight (web parity).
             yield LoopEvent("run", "", {"run_id": str(journal.run_id), "session_id": str(session_id)})
             with contextlib.suppress(Exception):  # self-model update must never break a turn
                 await self._self_state.note_turn(user_input)
+
+            # --- TASK AUTHORITY: deterministic active-task enforcement ---
+            # The user's newest request has higher authority than old memory or previous tasks.
+            # This runs OUTSIDE the LLM — the system decides, not the model. A SUBAGENT skips this
+            # entirely (§16): it manages no tasks, so it can never mutate the primary.
+            if as_subagent:
+                from sali.tasks.authority import TaskAction, TaskTransition
+                task_transition = TaskTransition(
+                    action=TaskAction.NONE, previous_task=None, new_task=None,
+                    reason="bounded subagent — no task management")
+            else:
+                task_transition = await self._task_authority.handle_new_turn(
+                    user_input, session_id=session_id)
+            await journal.event("task_authority", {
+                "action": task_transition.action,
+                "reason": task_transition.reason,
+                "previous_task": str(task_transition.previous_task.id) if task_transition.previous_task else None,
+                "new_task": str(task_transition.new_task.id) if task_transition.new_task else None,
+            })
+            # Update sali_state with the authoritative active task.
+            active = task_transition.active_task
+            with contextlib.suppress(Exception):
+                async with self.pool.acquire() as state_conn:
+                    await state_conn.execute(
+                        "UPDATE sali_state SET active_task_id=$1, previous_task_id=$2, updated_at=now() WHERE id",
+                        active.id if active else None,
+                        task_transition.previous_task.id if task_transition.previous_task else None)
+            # Log task authority transitions to sali-works (filesystem backup).
+            if active is not None:
+                with contextlib.suppress(Exception):
+                    append_event(active.id, "task_authority",
+                                 {"action": task_transition.action,
+                                  "reason": task_transition.reason})
+
             try:
                 yield LoopEvent("status", "remembering")
                 await journal.set_state(RunState.RETRIEVE)
@@ -694,7 +995,21 @@ class AgentLoop:
                 # happened while Almir was away, so Sali can bring them up in its own words.
                 machine_changes, ack_changes_through, ack_obs_through = await self._machine_changes(
                     conn, journal)
-                tasks_note = await self._open_tasks_note()  # §24: resume any task in progress
+                tasks_note = task_transition.context_block() or await self._open_tasks_note()
+                # Prompt 6: for the active task, the deterministic Task State Capsule IS the working
+                # memory — regenerated from durable state every turn (workspace, phase, steps, active
+                # decisions, negative knowledge, reviewer requirements, research, NEXT ACTION). It
+                # replaces the scattered per-turn blocks (§7/§11/§12) and survives compaction/restart
+                # since it never depends on the model remembering a previous context window.
+                skills_note: str | None = None
+                if task_transition.active_task is not None:
+                    with contextlib.suppress(Exception):
+                        capsule = await self._task_capsule_note(task_transition.active_task)
+                        if capsule:
+                            tasks_note = capsule
+                    # Bounded skill guidance for this task (§7/§12/§33), from the durable snapshot.
+                    with contextlib.suppress(Exception):
+                        skills_note = await self._skills_note(task_transition.active_task, journal)
                 world_note = ""
                 with contextlib.suppress(Exception):  # world-state is best-effort, never breaks a turn
                     # probe live gpu/ram/disk only when the query is about the system/live state (§7)
@@ -714,7 +1029,7 @@ class AgentLoop:
                     live_note=LIVE_NOTE if plan.needs_live else None, history=history,
                     machine_changes=machine_changes, tasks_note=tasks_note,
                     world_note=world_note or None, self_note=self_note, health_note=health_note,
-                    system_query=plan.system_query,
+                    skills_note=skills_note, system_query=plan.system_query,
                 )
                 messages = list(assembled.messages)
                 await journal.event(
@@ -722,6 +1037,18 @@ class AgentLoop:
                     {"included": assembled.included, "dropped": assembled.dropped,
                      "est_tokens": assembled.est_tokens, "conflicts": len(assembled.conflicts)},
                 )
+                # Prompt 6 observability (§46/§47): the assembled working set + its layer sizes, against
+                # the operational budget. Operational metadata only — never any prompt/tool content.
+                _assembled_budget = self._budget(messages)
+                await self._emit_runtime(
+                    "context.assembled",
+                    {"context_limit": _assembled_budget.limit, "estimated_tokens": _assembled_budget.used,
+                     "usable_tokens": _assembled_budget.usable, "output_reserve": _assembled_budget.reserved_output,
+                     "status": _assembled_budget.status.value, "layers": assembled.included,
+                     "dropped": assembled.dropped},
+                    run_id=journal.run_id,
+                    task_id=(task_transition.active_task.id if task_transition.active_task else None),
+                    session_id=session_id)
 
                 max_iter = self.settings.runtime.max_iterations
                 budget = self.settings.runtime.token_budget_per_run
@@ -736,6 +1063,16 @@ class AgentLoop:
                 failed_sigs: dict[str, tuple[int, str]] = {}  # sig -> (failures, last redacted error)
                 repeats_at_last_nudge = 0
                 ran_commands: set[str] = set()  # execute_command commands run this turn (capture guard)
+                # --- Long-running context continuity (Prompt 3) ---
+                # The LLM context is disposable; the task state is durable. These track how the working
+                # prompt is folded so a task can run through MANY context windows without losing a thing.
+                compaction_count = 0          # proactive + emergency folds this run
+                overflow_recoveries = 0       # bounded provider-overflow recoveries this run (§8/§29)
+                approaching_emitted = False   # emit "approaching limit" once per run, not every cycle
+                emergency_used = False        # last-ditch capsule-only continuation used this run (§42)
+                primary_task_id = (
+                    task_transition.active_task.id if task_transition.active_task is not None else None
+                )
 
                 # §10 action continuity: Almir delegating execution ("run it" / "do it" / …) resolves to
                 # the captured pending proposal and runs EXACTLY that — deterministically, through the same
@@ -765,13 +1102,42 @@ class AgentLoop:
                         messages.append(tool_msg)
 
                 while iteration < max_iter and tokens_used < budget:
+                    # --- TASK AUTHORITY GUARD ---
+                    # Before each reasoning cycle, verify the task is still authoritative.
+                    # If the task was cancelled/superseded (e.g., by a concurrent turn), stop immediately.
+                    if task_transition.active_task is not None:
+                        still_active = await self._task_authority.current_active()
+                        if still_active is None or still_active.id != task_transition.active_task.id:
+                            await journal.event("task_authority_guard", {
+                                "reason": "active task changed during execution",
+                                "expected": str(task_transition.active_task.id),
+                                "actual": str(still_active.id) if still_active else None,
+                            })
+                            yield LoopEvent("status", "task changed — stopping")
+                            final_text = (
+                                f"Stopped: the task '{task_transition.active_task.objective}' "
+                                "is no longer active."
+                            )
+                            break
+                        # Write heartbeat to prove the task is alive (for orphan detection).
+                        with contextlib.suppress(Exception):
+                            await self._tasks.heartbeat(task_transition.active_task.id)
                     await journal.set_state(RunState.REASON_PLAN, iteration=iteration)
-                    # Nearing the window on a long task? Fold what's done and keep going — the
-                    # task never dead-ends on the context limit; it compacts and continues.
-                    if self._over_context(messages):
+                    # Nearing the window on a long task? Fold what's done and keep going — the task
+                    # never dead-ends on the context limit; it compacts and continues (§7). The decision
+                    # is deterministic (provider window − reserved output), taken BEFORE the model call.
+                    pressure = self._budget(messages)
+                    if pressure.is_approaching and not approaching_emitted:
+                        approaching_emitted = True
+                        await self._emit_runtime(
+                            "runtime.context_approaching_limit", pressure.as_dict(),
+                            run_id=journal.run_id, task_id=primary_task_id, session_id=session_id)
+                    if len(messages) > 3 and pressure.should_compact:
+                        compaction_count += 1
                         yield LoopEvent("status", "compacting to keep going")
-                        messages = await self._fold_messages(messages)
-                        await journal.event("context_folded", {"kept": len(messages)})
+                        messages = await self._compact_and_continue(
+                            messages, journal, count=compaction_count, before=pressure,
+                            task_id=primary_task_id, session_id=session_id, reason="proactive")
                     yield LoopEvent("status", "thinking")
                     started = self.clock.now()
                     res: ChatResult | None = None
@@ -797,6 +1163,54 @@ class AgentLoop:
                             if res is None:
                                 raise ProviderError("model stream ended without a result")
                         except ProviderError as exc:
+                            # EMERGENCY: the provider rejected the request as too large for the context
+                            # window (§8). Durable task state is already persisted (executions, steps,
+                            # checkpoints, artifacts) — so we compact HARD and retry the same logical
+                            # turn, never dropping the task. Bounded (§29): after a few recoveries we
+                            # stop re-sending an oversized context and surface, task still resumable.
+                            if context_budget.is_context_overflow(exc):
+                                if overflow_recoveries >= _MAX_OVERFLOW_RECOVERIES:
+                                    # §42 EMERGENCY CONTINUATION: one last-ditch rebuild with ONLY the
+                                    # minimal capsule (objective, workspace, NEXT ACTION, constraints,
+                                    # reviewer failures, last execution) so Sali can still continue under
+                                    # severe context pressure — never fail a resumable task outright.
+                                    if not emergency_used and task_transition.active_task is not None:
+                                        emergency_used = True
+                                        with contextlib.suppress(Exception):
+                                            cap_note = await self._task_capsule_note(
+                                                task_transition.active_task, emergency=True)
+                                            messages = [messages[0], ChatMessage(
+                                                role="user",
+                                                content=f"(EMERGENCY CONTINUATION — minimal context.\n{cap_note})")]
+                                        await self._emit_runtime(
+                                            "context.emergency_mode", {"reason": "overflow_unrecovered"},
+                                            run_id=journal.run_id, task_id=primary_task_id,
+                                            session_id=session_id)
+                                        yield LoopEvent("status", "emergency continuation")
+                                        continue
+                                    await self._emit_runtime(
+                                        "runtime.context_compaction_failed",
+                                        {"reason": "overflow_unrecovered",
+                                         "recoveries": overflow_recoveries, "error": str(exc)[:200]},
+                                        run_id=journal.run_id, task_id=primary_task_id,
+                                        session_id=session_id)
+                                    raise
+                                overflow_recoveries += 1
+                                compaction_count += 1
+                                yield LoopEvent("status", "context filled — compacting and continuing")
+                                messages = await self._compact_and_continue(
+                                    messages, journal, count=compaction_count,
+                                    before=self._budget(messages), task_id=primary_task_id,
+                                    session_id=session_id, reason="provider_overflow")
+                                await self._emit_runtime(
+                                    "runtime.context_overflow_recovered",
+                                    {"recovery": overflow_recoveries, "kept": len(messages)},
+                                    run_id=journal.run_id, task_id=primary_task_id,
+                                    session_id=session_id)
+                                await journal.event(
+                                    "context_overflow_recovered",
+                                    {"recovery": overflow_recoveries, "kept": len(messages)})
+                                continue  # retry this cycle with the folded context
                             attempt += 1
                             if attempt > _MAX_PROVIDER_RETRIES:
                                 raise
@@ -863,9 +1277,102 @@ class AgentLoop:
                             messages.append(_circuit_broken_message(call.name, broken[0], broken[1]))
                             continue
                         tool_sigs[sig] = tool_sigs.get(sig, 0) + 1  # count executed calls only
-                        tool_msg, ok, summary = await self._handle_tool(conn, journal, call)
+                        # Record execution for durability (before running the tool).
+                        # Use the ACTUAL current step, not a hardcoded 0 — so recovery
+                        # can trace which step each tool call belongs to.
+                        exec_record_id = None
+                        active_step_seq: int | None = None
+                        tool_for_exec = self.registry.get(call.name)
+                        if task_transition.active_task is not None:
+                            with contextlib.suppress(Exception):
+                                active_step_seq = await self._tasks.current_step(
+                                    task_transition.active_task.id)
+                            with contextlib.suppress(Exception):
+                                exec_record_id = await self._tasks.record_execution(
+                                    task_transition.active_task.id, active_step_seq or 0, call.name,
+                                    tool_args=call.arguments,
+                                    idempotent=tool_for_exec.idempotent if tool_for_exec else None,
+                                    attempt=tool_sigs[sig])
+                        # Start a heartbeat task during tool execution so long-running tools
+                        # (npm install, docker build, etc.) don't trigger orphan detection.
+                        _tool_hb_task: asyncio.Task[None] | None = None
+                        if task_transition.active_task is not None:
+                            active_task_id = task_transition.active_task.id  # non-None for the closure
+                            # Record which tool is executing (for watchdog context)
+                            with contextlib.suppress(Exception):
+                                await self._tasks.set_active_tool(active_task_id, call.name)
+                            # Emit tool started event via canonical publisher
+                            if self._publisher is not None:
+                                with contextlib.suppress(Exception):
+                                    from sali.events.publisher import SaliEvent
+                                    await self._publisher.publish(SaliEvent(
+                                        event_type="task.tool.started",
+                                        task_id=active_task_id,
+                                        run_id=journal.run_id,
+                                        origin="tool",
+                                        data={"tool": call.name, "run_id": str(journal.run_id)},
+                                    ))
+                            async def _heartbeat_during_tool(_tid: UUID = active_task_id) -> None:
+                                while True:
+                                    try:
+                                        await asyncio.sleep(30)
+                                        with contextlib.suppress(Exception):
+                                            await self._tasks.heartbeat(_tid)
+                                    except asyncio.CancelledError:
+                                        break
+                            _tool_hb_task = asyncio.create_task(_heartbeat_during_tool())
+                        try:
+                            tool_msg, ok, summary = await self._handle_tool(
+                                conn, journal, call, as_subagent=as_subagent)
+                        finally:
+                            # Stop heartbeat task — always cleaned up, even on failure/cancellation
+                            if _tool_hb_task is not None:
+                                _tool_hb_task.cancel()
+                                with contextlib.suppress(asyncio.CancelledError):
+                                    await _tool_hb_task
+                            # Clear active tool name
+                            if task_transition.active_task is not None:
+                                with contextlib.suppress(Exception):
+                                    await self._tasks.set_active_tool(
+                                        task_transition.active_task.id, None)
+                        # Update execution record with result.
+                        if exec_record_id is not None:
+                            with contextlib.suppress(Exception):
+                                await self._tasks.complete_execution(
+                                    exec_record_id,
+                                    status="completed" if ok else "failed",
+                                    result_summary=summary[:200] if summary else None,
+                                    error=summary[:200] if not ok else None)
+                        # Record meaningful progress on tool success (not heartbeat, not prose)
+                        if ok and task_transition.active_task is not None:
+                            with contextlib.suppress(Exception):
+                                await self._tasks.record_progress(
+                                    task_transition.active_task.id, "tool_success",
+                                    tool_name=call.name)
+                        # Emit tool completed/failed event via canonical publisher
+                        if task_transition.active_task is not None and self._publisher is not None:
+                            with contextlib.suppress(Exception):
+                                from sali.events.publisher import SaliEvent
+                                event_type = "task.tool.completed" if ok else "task.tool.failed"
+                                await self._publisher.publish(SaliEvent(
+                                    event_type=event_type,
+                                    task_id=task_transition.active_task.id,
+                                    run_id=journal.run_id,
+                                    origin="tool",
+                                    data={"tool": call.name, "ok": ok,
+                                          "summary": (summary or "")[:200],
+                                          "run_id": str(journal.run_id)},
+                                ))
                         if call.name == "execute_command" and isinstance(call.arguments.get("command"), str):
                             ran_commands.add(call.arguments["command"])  # don't re-capture what we just ran
+                        # Log task-linked tool execution to sali-works (filesystem backup).
+                        if task_transition.active_task is not None:
+                            with contextlib.suppress(Exception):
+                                append_event(
+                                    task_transition.active_task.id, "tool_executed",
+                                    {"tool": call.name, "ok": ok,
+                                     "summary": (summary or "")[:200],
+                                     "step_seq": active_step_seq})
                         # A clean, persistent progress line: what was done + a short result.
                         yield LoopEvent("tool", call.name, {"phase": "done", "name": call.name,
                                                             "ok": ok, "summary": summary})
@@ -978,7 +1485,8 @@ class AgentLoop:
                 raise
 
     async def _handle_tool(
-        self, conn: Any, journal: RunJournal, call: ToolCall, *, exec_id: UUID | None = None
+        self, conn: Any, journal: RunJournal, call: ToolCall, *, exec_id: UUID | None = None,
+        as_subagent: bool = False,
     ) -> tuple[ChatMessage, bool, str]:
         """Run one tool; return (message-for-the-model, succeeded?, short summary) — the flag +
         summary let the UI print a clean ✓/✗ progress line of what was actually done."""
@@ -1033,10 +1541,33 @@ class AgentLoop:
             )
         await journal.set_state(RunState.EXECUTE_TOOL)
         started = self.clock.now()
+        # Resolve workspace from the active task (if any).
+        workspace = None
+        try:
+            active_task = await self._task_authority.current_active()
+            if active_task and active_task.workspace_root:
+                from sali.tasks.workspace import TaskWorkspace
+                workspace = TaskWorkspace.from_dict({
+                    "workspace_root": active_task.workspace_root,
+                    "allowed_write_roots": active_task.allowed_write_roots or [active_task.workspace_root],
+                })
+        except Exception:  # noqa: BLE001 - workspace is best-effort
+            pass
+
         ctx = ToolContext(settings=self.settings, clock=self.clock, pool=self.pool,
                           run_id=journal.run_id,
                           memory=self._memory_sink, recall=self._recall, graph=self._graph,
-                          tasks=self._tasks,
+                          tasks=self._tasks, task_authority=self._task_authority,
+                          reviewer=self._reviewer,
+                          research=_ResearchSink(store=self._research_store, tasks=self._tasks,
+                                                 run_id=journal.run_id, pool=self.pool),
+                          decisions=self._decisions, phases=self._phases,
+                          delegate=_DelegateSink(loop=self, tasks=self._tasks, run_id=journal.run_id,
+                                                 store=self._delegations),
+                          clarify=_ClarifySink(store=self._questions, tasks=self._tasks,
+                                               run_id=journal.run_id),
+                          is_subagent=as_subagent,
+                          workspace=workspace,
                           schedules=self._schedules, documents=self._documents, remote=self._remote,
                           comms=self._comms, browser=self._browser, vision=self._vision,
                           perception=self._perception, catalog=self._catalog,
@@ -1174,6 +1705,16 @@ class AgentLoop:
                     if interrupted is not None:
                         tool = self.registry.get(interrupted["tool_name"])
                         idempotent = tool.idempotent if tool is not None else None
+                # Atomically CLAIM this stale run before ANY recovery work: only the process whose
+                # conditional UPDATE affects a row proceeds. A concurrently-starting process (a restart, or
+                # terminal + API server booting together) loses the race (0 rows) and skips it — so a
+                # still-live or interrupted run is never aborted+re-driven twice (Final audit §34).
+                claimed = await conn.fetchval(
+                    "UPDATE agent_runs SET status='aborted', state=$1, updated_at=now() "
+                    "WHERE run_id=$2 AND status='running' RETURNING run_id",
+                    RunState.ABORTED.value, row["run_id"])
+                if claimed is None:
+                    continue
                 action = resume_action(state, idempotent)
                 # §19: for a non-idempotent effect, re-observe reality to learn whether it landed.
                 verified: VerifyResult | None = None
@@ -1188,10 +1729,7 @@ class AgentLoop:
                     "'resumed', $2)",
                     row["run_id"], payload,
                 )
-                await conn.execute(
-                    "UPDATE agent_runs SET status='aborted', state=$1, updated_at=now() WHERE run_id=$2",
-                    RunState.ABORTED.value, row["run_id"],
-                )
+                # (the run was already atomically aborted by the CLAIM above)
                 out: dict[str, str] = {
                     "run_id": str(row["run_id"]), "was_state": state.value, "action": action.value
                 }
@@ -1205,14 +1743,74 @@ class AgentLoop:
                     to_redrive.append((row["session_id"], row["user_input"], out))
 
         # Re-drive OUTSIDE the recovery connection (each turn takes its own), bounded + best-effort.
+        # A re-drive is a CONTINUATION of the same logical work as a fresh, journaled run (new run_id,
+        # same session) — the task_id it carries is unchanged; a context reset never forks the task.
         if self.settings.runtime.resume_interrupted:
             for session_id, user_input, out in to_redrive[: self.settings.runtime.resume_max_runs]:
+                await self._emit_runtime(
+                    "runtime.continuation_started",
+                    {"was_run": out.get("run_id"), "was_state": out.get("was_state"),
+                     "continuation": True},
+                    session_id=session_id)
                 try:
                     result = await self.run(user_input, session_id=session_id)
                     out["resumed_run"] = str(result.run_id)
+                    await self._emit_runtime(
+                        "runtime.continuation_completed",
+                        {"was_run": out.get("run_id"), "resumed_run": str(result.run_id)},
+                        run_id=result.run_id, session_id=session_id)
                 except Exception as exc:  # noqa: BLE001 - a failed resume must not crash startup recovery
                     self.log.warning("recover re-drive failed: %s", exc)
         return resolved
+
+    async def recover_tasks(self) -> list[dict[str, Any]]:
+        """Detect and recover orphaned tasks after a crash or restart.
+
+        Finds tasks with stale heartbeats (>2 min), marks them interrupted,
+        and builds recovery context so they can be resumed.
+        """
+        from sali.tasks.recovery import detect_orphaned_tasks, mark_task_interrupted, recover_task
+
+        orphaned = await detect_orphaned_tasks(self.pool)
+        if not orphaned:
+            return []
+
+        await self._emit_runtime("runtime.recovery_started", {"orphaned": len(orphaned)})
+        recovered = []
+        for info in orphaned:
+            task_id = UUID(info["task_id"])
+            if not info["can_resume"]:
+                # Exhausted retries — mark as failed
+                await self._tasks.finish(task_id, status="failed",
+                                         result=f"exhausted {info['max_retries']} retries")
+                self.log.warning("task_exhausted_retries", task_id=info["task_id"])
+                continue
+
+            # Mark as interrupted (preserves primary status)
+            await mark_task_interrupted(self.pool, task_id, reason="process_restart")
+            with contextlib.suppress(Exception):
+                append_event(task_id, "task_interrupted", {"reason": "process_restart"})
+
+            # Build recovery context
+            recovery = await recover_task(self.pool, task_id)
+            recovered.append(recovery)
+            with contextlib.suppress(Exception):
+                append_event(task_id, "task_recovered",
+                             {"retry_count": recovery.get("retry_count"),
+                              "completed_steps": recovery.get("completed_steps")})
+            # Deterministic, DB-driven continuation context is now ready for this task (§13) — the next
+            # live turn resumes it from durable state via _open_tasks_note, never by asking the model
+            # "what were we doing?". Announce it so clients see the recovery land.
+            await self._emit_runtime(
+                "runtime.recovery_completed",
+                {"completed_steps": recovery.get("completed_steps"),
+                 "total_steps": recovery.get("total_steps"),
+                 "retry_count": recovery.get("retry_count")},
+                task_id=task_id)
+            self.log.debug("task_recovered", task_id=info["task_id"],
+                          objective=info["objective"], retry=recovery.get("retry_count"))
+
+        return recovered
 
     async def _verify_interrupted(self, conn: Any, exec_row: Any) -> VerifyResult | None:
         """Independently re-observe whether an interrupted non-idempotent tool's effect landed (§9/§19),
@@ -1272,7 +1870,7 @@ class AgentLoop:
         through = conv["summary_through_seq"] if conv else 0
         rows = await conn.fetch(
             "SELECT role, content FROM message WHERE conversation_id=$1 AND seq > $2 "
-            "ORDER BY seq DESC LIMIT 8",
+            "ORDER BY seq DESC LIMIT 10",
             session_id, through,
         )
         history: list[tuple[str, str]] = [(r["role"], r["content"]) for r in reversed(rows)]
@@ -1284,36 +1882,106 @@ class AgentLoop:
         return history
 
     def _context_window(self) -> int:
-        return min(self.settings.model.ctx_default, self.settings.model.ctx_max)
+        """The model's effective context window — from the provider when it reports one, else the
+        configured ctx_default (§28). Never assumed unbounded."""
+        return context_budget.resolve_limit(self.provider, self.settings)
+
+    def _budget(self, messages: list[ChatMessage]) -> context_budget.ContextBudget:
+        """A deterministic snapshot of how full the working prompt is (§7) — drives fold + events."""
+        return context_budget.budget_for(self.provider, self.settings, messages)
 
     def _over_context(self, messages: list[ChatMessage]) -> bool:
-        """True when the working prompt is close enough to the model's window that we should fold
-        it before the next call. Conservative (over-estimates) so we fold early, never overflow."""
+        """True when the working prompt is close enough to the model's window that we should fold it
+        before the next call. Conservative (over-estimates) so we fold early, never overflow (§7)."""
         if len(messages) <= 3:
             return False  # system + first turn + one more — nothing worth folding yet
-        limit = int(self._context_window() * _CTX_HEADROOM)
-        est = sum(
-            int(self.provider.count_tokens(m.content or "") * 1.3) + _CTX_MARGIN for m in messages
-        )
-        return est > limit
+        return self._budget(messages).should_compact
+
+    async def _compact_and_continue(
+        self, messages: list[ChatMessage], journal: RunJournal, *,
+        count: int, before: context_budget.ContextBudget,
+        task_id: UUID | None, session_id: UUID | None, reason: str,
+    ) -> list[ChatMessage]:
+        """One safe compaction cycle: announce it, protect durable state, fold, and report the result.
+
+        The invariant that makes 'compact and continue without losing a thing' true: everything that
+        matters is ALREADY durable (task steps, executions, checkpoints, artifacts, progress) before we
+        get here, and the deterministic task header in the fold is re-read from the store — so the fold
+        can only lose disposable conversational context, never task state (§9). A compaction is recorded
+        as task PROGRESS so the watchdog reads a slow fold as work, not as a stuck/orphaned task (§21)."""
+        await self._emit_runtime(
+            "runtime.context_compaction_started",
+            {"count": count, "reason": reason, **before.as_dict()},
+            run_id=journal.run_id, task_id=task_id, session_id=session_id)
+        if task_id is not None:
+            # Keep the watchdog correct across a slow fold: heartbeat (alive) + progress (working).
+            with contextlib.suppress(Exception):
+                await self._tasks.heartbeat(task_id)
+            with contextlib.suppress(Exception):
+                await self._tasks.record_progress(task_id, "compaction")
+            # A reproducible context checkpoint/manifest BEFORE folding (§21/§23/§25): source IDs +
+            # token estimate, never the raw context — enough to reconstruct the working set on restart.
+            with contextlib.suppress(Exception):
+                await self._write_context_checkpoint(task_id, journal.run_id, reason, before.used)
+        folded = await self._fold_messages(messages)
+        after = self._budget(folded)
+        await journal.event(
+            "context_folded", {"kept": len(folded), "count": count, "reason": reason,
+                               "before": before.used, "after": after.used})
+        await self._emit_runtime(
+            "runtime.context_compaction_completed",
+            {"count": count, "reason": reason, "kept": len(folded),
+             "used_before": before.used, "used_after": after.used, "limit": after.limit},
+            run_id=journal.run_id, task_id=task_id, session_id=session_id)
+        return folded
+
+    async def _write_context_checkpoint(
+        self, task_id: UUID, run_id: UUID | None, reason: str, token_estimate: int,
+    ) -> None:
+        """Persist a reproducible context manifest (§23/§25): the durable source IDs the capsule drew on
+        + a token estimate + the capsule version — NOT the raw context. Enough to reconstruct the working
+        set after a restart. Best-effort; never breaks a compaction."""
+        from sali.runtime.capsule import CONTEXT_VERSION, build_capsule
+
+        task = await self._tasks.get(task_id)
+        if task is None:
+            return
+        cap = await build_capsule(
+            self.pool, task, reviewer=self._reviewer, research=self._research_store,
+            skills=self._skills, decisions=self._decisions, phases=self._phases)
+        cid: UUID | None = None
+        async with self.pool.acquire() as conn:
+            cid = await conn.fetchval(
+                "INSERT INTO context_checkpoint "
+                "  (task_id, run_id, step_seq, workspace, context_version, source_ids, token_estimate, reason) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
+                task_id, run_id, cap.next_step["seq"] if cap.next_step else None,
+                cap.workspace_root, CONTEXT_VERSION, cap.source_ids(), token_estimate, reason)
+        await self._emit_runtime(
+            "context.checkpoint_created",
+            {"checkpoint_id": str(cid) if cid else None, "context_version": CONTEXT_VERSION,
+             "token_estimate": token_estimate, "reason": reason},
+            run_id=run_id, task_id=task_id)
 
     async def _fold_messages(self, messages: list[ChatMessage]) -> list[ChatMessage]:
-        """Fold the middle of the working prompt (everything after the system + first user turn)
-        into one model-written progress note, so Sali continues the task with a small context.
-        Model-driven, not scripted: the note is whatever Sali says it needs to carry forward."""
+        """Fold the middle of the working prompt (everything after the system + first user turn) into a
+        compact carry-forward, so Sali continues with a small context. Prompt 6: when a task is active
+        the carry-forward is the DETERMINISTIC Task State Capsule regenerated from durable storage — so
+        operational state is lossless across the fold (no LLM summary, cheaper, reproducible §9/§10/§49).
+        Only pure conversation (no task) falls back to a model-written progress note."""
         system, first_user = messages[0], messages[1]
         body = messages[2:]
-        transcript = "\n".join(f"{m.role}: {(m.content or '')[:2000]}" for m in body)
-        note = await self.provider.chat(
-            [ChatMessage(role="system", content=continuation.PACKET_INSTRUCTION),
-             ChatMessage(role="user", content=transcript)],
-            options=_SUMMARIZE,
-        )
-        # The active task + current step survive the fold DETERMINISTICALLY (§11-12) — folded into the
-        # carry-forward note from the task store, never left to whatever the model happened to narrate.
-        header = continuation.render_task_header(await self._current_task_safe())
-        carry = note.content.strip()
-        body_note = f"{header}\n{carry}" if header else carry
+        task = await self._current_task_safe()
+        if task is not None:
+            body_note = await self._task_capsule_note(task)  # lossless operational state, from Postgres
+        else:
+            transcript = "\n".join(f"{m.role}: {(m.content or '')[:2000]}" for m in body)
+            note = await self.provider.chat(
+                [ChatMessage(role="system", content=continuation.PACKET_INSTRUCTION),
+                 ChatMessage(role="user", content=transcript)],
+                options=_SUMMARIZE,
+            )
+            body_note = note.content.strip()
         folded = [
             system, first_user,
             ChatMessage(
@@ -1350,10 +2018,7 @@ class AgentLoop:
         """Run one consolidation pass, swallowing any error — background learning must never crash
         the session, and a distillation hiccup just means we try again next window."""
         try:
-            result = await self.learning.consolidate()
-            self.log.info("consolidated", procedures=len(result.procedures),
-                          episodes=result.episodes_created, failures=result.failures_recorded,
-                          pruned=result.stm_pruned)
+            await self.learning.consolidate()
         except Exception as exc:  # noqa: BLE001 - never let background learning surface as a crash
             self.log.warning("consolidate_failed", error=str(exc))
 
@@ -1394,6 +2059,22 @@ class AgentLoop:
         await self._emit(conn, "conversation.compacted", session_id,
                          {"through_seq": cutoff}, subject_type="conversation")
 
+    async def _emit_runtime(
+        self, event_type: str, data: dict[str, Any], *,
+        run_id: UUID | None = None, task_id: UUID | None = None, session_id: UUID | None = None,
+    ) -> None:
+        """Emit a canonical runtime.* event (context compaction / continuation / recovery) so every
+        client — terminal and iPhone — can observe 'Sali is compacting…' then 'Sali continued' (§22).
+        Carries task/run/session identity; only operational counts, never prompt content or reasoning.
+        Best-effort: observability must never break a turn or a recovery."""
+        if self._publisher is None:
+            return
+        from sali.events.publisher import SaliEvent
+        with contextlib.suppress(Exception):
+            await self._publisher.publish(SaliEvent(
+                event_type=event_type, run_id=run_id, task_id=task_id, session_id=session_id,
+                origin="runtime", data=data))
+
     async def _emit(
         self,
         conn: Any,
@@ -1403,18 +2084,31 @@ class AgentLoop:
         *,
         subject_type: str = "agent_run",
     ) -> None:
-        """Emit a durable action event into the append-only `event` log (spec §25) — distinct
-        from the per-run `run_events` crash-resume journal."""
-        await conn.execute(
-            "INSERT INTO event (event_type, subject_type, subject_id, payload) VALUES ($1,$2,$3,$4)",
-            event_type, subject_type, subject_id, payload,
-        )
+        """Emit a durable action event via the canonical publisher."""
+        if self._publisher is not None:
+            from sali.events.publisher import SaliEvent
+            with contextlib.suppress(Exception):
+                await self._publisher.publish(SaliEvent(
+                    event_type=event_type,
+                    subject_type=subject_type,
+                    subject_id=subject_id,
+                    origin="agent",
+                    data=payload,
+                ))
+        else:
+            # Fallback: direct SQL (backward compatibility)
+            await conn.execute(
+                "INSERT INTO event (event_type, subject_type, subject_id, payload) "
+                "VALUES ($1,$2,$3,$4)",
+                event_type, subject_type, subject_id, payload,
+            )
 
 
 # No single tool result may swallow the whole context window, but Sali is powerful and should SEE
-# most of a file/command/ssh output — 12 KB was cutting real reads. Give it a generous slice; the
-# fold guard still prevents overflow, and the full result always lives in the durable record.
-_TOOL_OUTPUT_CAP = 24_000
+# most of a file/command/ssh output — with 65K context, give it a very generous slice so it can
+# reason over full file contents and command outputs. The fold guard still prevents overflow,
+# and the full result always lives in the durable record.
+_TOOL_OUTPUT_CAP = 48_000
 
 
 def _tool_message(tool_name: str, payload: dict[str, Any]) -> ChatMessage:

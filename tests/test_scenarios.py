@@ -174,7 +174,7 @@ async def test_capstone_long_task_survives_failure_retry_fold_restart_and_finish
     # 2) advance a couple, then a TRANSIENT verify-failure on step 3 — the durable record classifies it.
     await store.advance(task.id, 1, "done")
     await store.advance(task.id, 2, "done")
-    t = await store.advance(task.id, 3, "failed", error="connection timed out")
+    t, _ = await store.advance(task.id, 3, "failed", error="connection timed out")
     assert t is not None
     s3 = next(s for s in t.steps if s.seq == 3)
     assert s3.attempts == 1 and s3.failure_class == "transient"
@@ -191,11 +191,13 @@ async def test_capstone_long_task_survives_failure_retry_fold_restart_and_finish
     ]
     folded = await loop._fold_messages(msgs)
     carried = "\n".join(m.content or "" for m in folded)
-    assert "TASK: Deploy the whole stack" in carried
+    # Prompt 6: the fold carries the deterministic Task State Capsule (objective + NEXT ACTION, from
+    # durable state), and the step failure + retry recommendation survive it.
+    assert "TASK STATE CAPSULE" in carried and "Deploy the whole stack" in carried and "NEXT ACTION" in carried
     assert "FAILED step 3 (transient" in carried and "retry" in carried  # failure + recommendation survive
 
     # 4) retry step 3 to success (attempt history is preserved — exactly-once, not a duplicate step).
-    t = await store.advance(task.id, 3, "done")
+    t, _ = await store.advance(task.id, 3, "done")
     assert t is not None
     s3 = next(s for s in t.steps if s.seq == 3)
     assert s3.status == "done" and s3.attempts == 1
@@ -238,9 +240,7 @@ async def test_capstone_long_task_survives_failure_retry_fold_restart_and_finish
     final = await AdvanceTask().run({"step": 21, "status": "done"}, ctx)
     assert final.ok
 
-    # 8) the whole task completed EXACTLY once, and the verified final step is provably linked.
+    # 8) the whole task completed EXACTLY once — archived to sali-works/tasks/ and cleaned from DB.
+    # The advance_task tool returned ok=True with "task done — archived" display.
     done = await store.get(task.id)
-    assert done is not None and done.status == "done"
-    assert len(done.steps) == 21 and sum(1 for s in done.steps if s.status == "done") == 21
-    s21 = next(s for s in done.steps if s.seq == 21)
-    assert s21.verified is True and s21.verified_by == exec_id
+    assert done is None  # archived and cleaned

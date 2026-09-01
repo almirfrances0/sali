@@ -24,7 +24,7 @@ from sali.tools.context import ToolContext
 from sali.tools.registry import ToolRegistry
 
 _UA = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
-_MAX_TEXT = 32_000  # capture most of a page (the loop caps what the model sees); was a tight 8000
+_MAX_TEXT = 64_000  # generous — with 65K context, Sali can reason over most of a page
 _TIMEOUT = 20.0
 
 _SCRIPT = re.compile(r"<(script|style|noscript|template)[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)

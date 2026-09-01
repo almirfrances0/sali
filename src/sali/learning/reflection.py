@@ -46,7 +46,7 @@ async def reflect_on_recent(conn: Any, provider: ModelProvider, *, min_tools: in
     tools = sorted({binary_of(str(r["command"])) or r["tool_name"] for r in rows})
     errors = [str(r["error"]) for r in rows if r["success"] is False and r["error"]][:5]
     outcome = "success" if not errors else "partial — some steps failed"
-    ran = ", ".join(f"{t['tool_name']}{'' if t['success'] else ' (failed)'}" for t in rows)
+    ran = ", ".join(f"{t['tool_name']}{' (failed)' if t['success'] is False else ''}" for t in rows)
 
     lesson = ""
     try:
@@ -54,7 +54,14 @@ async def reflect_on_recent(conn: Any, provider: ModelProvider, *, min_tools: in
             [ChatMessage(role="system", content=_REFLECT_SYSTEM),
              ChatMessage(role="user", content=f"Goal: {run['user_input']}\nWhat you did: {ran}")],
             options=_REFLECT_OPTS)
-        lesson = (res.content or "").strip().splitlines()[0].strip() if res.content.strip() else ""
+        raw = (res.content or "").strip()
+        if raw:
+            # Take the first substantive line, stripping common preamble patterns
+            for line in raw.splitlines():
+                clean = line.strip().strip(" .'\"")
+                if clean and clean.lower() not in ("none", "here's the lesson:", "lesson:"):
+                    lesson = clean
+                    break
     except Exception:  # noqa: BLE001 - reflection is best-effort; a model hiccup just skips it
         lesson = ""
     if lesson.lower().strip(" .'\"") == "none":

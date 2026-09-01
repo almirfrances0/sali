@@ -21,10 +21,13 @@ from sali.verify.engine import verify_effect
 def test_path_probes_reobserve_reality() -> None:
     with tempfile.TemporaryDirectory() as d:
         f = os.path.join(d, "made.txt")
-        assert path_exists(f) is not None and path_exists(f).success is False  # not there yet
+        r1 = path_exists(f)
+        assert r1 is not None and r1.success is False  # not there yet
         Path(f).write_text("x")
-        assert path_exists(f).success is True
-        assert path_absent(f).success is False
+        r2 = path_exists(f)
+        assert r2 is not None and r2.success is True
+        r3 = path_absent(f)
+        assert r3 is not None and r3.success is False
     # a relative path or a glob → no opinion (None), never a fabricated verdict
     assert path_exists("relative/path") is None
     assert path_exists("/tmp/*.log") is None

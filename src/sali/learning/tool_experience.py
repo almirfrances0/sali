@@ -56,22 +56,29 @@ def _failure_modes(errors: list[str]) -> list[str]:
 async def learn_tool_experiences(
     conn: Any, *, threshold: int = 3, limit: int = 5000
 ) -> list[ToolExperience]:
-    """Mine per-binary reliability/latency/failure-modes from tool_execution into ``tool:<binary>``
-    memories that cleared the evidence bar. Caller owns the transaction."""
+    """Mine per-tool reliability/latency/failure-modes from tool_execution into ``tool:<name>``
+    memories that cleared the evidence bar. Covers ALL tools, not just execute_command.
+    For execute_command, tracks per-binary; for other tools, tracks per tool_name.
+    Caller owns the transaction."""
     rows = await conn.fetch(
-        "SELECT plan->'args'->>'command' AS command, success, duration_ms, error "
-        "FROM tool_execution "
-        "WHERE tool_name='execute_command' AND plan->'args'->>'command' IS NOT NULL "
-        "ORDER BY started_at DESC LIMIT $1",
+        "SELECT tool_name, plan->'args'->>'command' AS command, success, duration_ms, error "
+        "FROM tool_execution ORDER BY started_at DESC LIMIT $1",
         limit,
     )
 
     agg: dict[str, dict[str, Any]] = {}
     for r in rows:
-        binary = binary_of(str(r["command"]))
-        if not binary:
-            continue
-        a = agg.setdefault(binary, {"runs": 0, "ok": 0, "fail": 0, "durations": [], "errors": []})
+        # For execute_command, track per-binary; for others, track per tool_name
+        if r["tool_name"] == "execute_command":
+            cmd = r["command"]
+            if not cmd or not str(cmd).strip():
+                continue  # skip commandless executions (planned, aborted, etc.)
+            key = binary_of(str(cmd))
+            if not key:
+                continue
+        else:
+            key = r["tool_name"]
+        a = agg.setdefault(key, {"runs": 0, "ok": 0, "fail": 0, "durations": [], "errors": []})
         a["runs"] += 1
         if r["success"] is True:
             a["ok"] += 1

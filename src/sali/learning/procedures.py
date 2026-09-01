@@ -15,7 +15,7 @@ from uuid import UUID
 
 from sali.core.enums import MemoryLayer, MemorySource
 from sali.core.toolvocab import binary_of
-from sali.learning.mining import normalize_command, sequences_by_run, signature
+from sali.learning.mining import normalize_tool_step, sequences_by_run, signature
 from sali.learning.model import LearnedProcedure
 from sali.memory import writer as memory_writer
 from sali.provider.base import ChatMessage, ModelProvider
@@ -60,12 +60,15 @@ async def _failure_modes(conn: Any, tools: list[str]) -> list[str]:
 async def learn_procedures(
     conn: Any, provider: ModelProvider, *, threshold: int = 2, limit: int = 500
 ) -> list[LearnedProcedure]:
-    """Mine successful commands into procedures that cleared the evidence bar. Caller owns the txn."""
+    """Mine successful tool executions into procedures that cleared the evidence bar.
+
+    Covers ALL tools (not just execute_command), so repeated patterns like
+    "read file → modify file → run tests" become learned procedures.
+    Caller owns the txn.
+    """
     rows = await conn.fetch(
-        "SELECT run_id, plan->'args'->>'command' AS command FROM tool_execution "
-        "WHERE tool_name='execute_command' AND success IS TRUE "
-        "  AND plan->'args'->>'command' IS NOT NULL "
-        "ORDER BY run_id, started_at LIMIT $1",
+        "SELECT run_id, tool_name, plan->'args' AS tool_args FROM tool_execution "
+        "WHERE success IS TRUE ORDER BY run_id, started_at LIMIT $1",
         limit,
     )
     learned: list[LearnedProcedure] = []
@@ -118,8 +121,8 @@ async def record_procedure_outcomes(conn: Any, *, days: int = 7, limit: int = 10
     if not procs:
         return 0
     rows = await conn.fetch(
-        "SELECT run_id, plan->'args'->>'command' AS command, success FROM tool_execution "
-        "WHERE tool_name='execute_command' AND plan->'args'->>'command' IS NOT NULL "
+        "SELECT run_id, tool_name, plan->'args' AS tool_args, success FROM tool_execution "
+        "WHERE success IS NOT NULL "
         "  AND started_at > now() - make_interval(days => $1) ORDER BY run_id, started_at LIMIT $2",
         days, limit)
 
@@ -128,7 +131,7 @@ async def record_procedure_outcomes(conn: Any, *, days: int = 7, limit: int = 10
         state = per_run.setdefault(r["run_id"], {"steps": [], "failed": False})
         if r["success"] is False:
             state["failed"] = True
-        norm = normalize_command(str(r["command"]))
+        norm = normalize_tool_step(r["tool_name"], r["tool_args"])
         if norm and (not state["steps"] or state["steps"][-1] != norm):
             state["steps"].append(norm)
 

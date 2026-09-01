@@ -33,8 +33,10 @@ def test_extract_the_laravel_command() -> None:
 
 
 def test_extract_inline_and_bare_and_none() -> None:
-    assert extract_proposed_command("Run `npm install` to pull deps.")["command"] == "npm install"
-    assert extract_proposed_command("systemctl restart nginx")["command"] == "systemctl restart nginx"
+    npm = extract_proposed_command("Run `npm install` to pull deps.")
+    assert npm is not None and npm["command"] == "npm install"
+    sysd = extract_proposed_command("systemctl restart nginx")
+    assert sysd is not None and sysd["command"] == "systemctl restart nginx"
     # pure prose with no runnable command → nothing (never guess a command out of thin air)
     assert extract_proposed_command("I think the DOM extension is missing; let me look into it.") is None
     assert extract_proposed_command("that looks fine to me") is None

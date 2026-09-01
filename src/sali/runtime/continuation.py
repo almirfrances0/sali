@@ -38,6 +38,23 @@ PACKET_INSTRUCTION = (
 _TICK = {"done": "✓", "failed": "✗", "running": "▷", "skipped": "–", "pending": "·"}
 _SECTION_RE = re.compile(r"^\s*([A-Z][A-Z ]{2,20}):\s*(.*)$")
 
+# Evidence grade for a step, so a resumed Sali NEVER upgrades "probably done" into "done" (§25). Read
+# deterministically from the durable step: a step is only 'verified' when a tool_execution actually
+# verified its effect (task_step.verified), 'attempted' when marked done without that evidence.
+_EVIDENCE = ("verified", "attempted", "failed", "pending", "unknown")
+
+
+def _step_evidence(status: str | None, verified: bool | None) -> str:
+    if status == "done":
+        return "verified" if verified else "attempted"
+    if status == "failed":
+        return "failed"
+    if status in ("pending", "waiting", "blocked", "running"):
+        return "pending"
+    if status == "skipped":
+        return "verified"  # deliberately skipped — a settled, non-pending outcome
+    return "unknown"
+
 
 def parse_sections(text: str) -> dict[str, str]:
     """Parse the labeled summarizer output into packet fields. Tolerant of missing/extra/wrapped lines."""
@@ -62,7 +79,16 @@ def task_fields(task: Any) -> dict[str, Any]:
     Failures reuse the durable task_step columns (last_error / failure_class / attempts) from Phase 0."""
     if task is None:
         return {}
-    steps = [{"seq": s.seq, "description": s.description, "status": s.status} for s in task.steps]
+    steps = [
+        {"seq": s.seq, "description": s.description, "status": s.status,
+         "evidence": _step_evidence(s.status, getattr(s, "verified", None))}
+        for s in task.steps
+    ]
+    # A verification tally over the steps (§25/§26) — deterministic, so the eventual reviewer gate can
+    # tell what is actually proven done vs merely attempted, and Sali can't hallucinate completion.
+    verification: dict[str, int] = dict.fromkeys(_EVIDENCE, 0)
+    for s in steps:
+        verification[str(s["evidence"])] += 1
     nxt = getattr(task, "next_step", None)
     failures = [
         {
@@ -78,6 +104,7 @@ def task_fields(task: Any) -> dict[str, Any]:
         "steps": steps,
         "next": {"seq": nxt.seq, "description": nxt.description} if nxt else None,
         "step_failures": failures,
+        "verification": verification,
     }
 
 
@@ -85,6 +112,15 @@ def _render_task_fields(tf: dict[str, Any]) -> str:
     if not tf.get("objective"):
         return ""
     lines = [f"TASK: {tf['objective']} [{_ticks(tf.get('steps', []))}] (status: {tf.get('status', '?')})"]
+    v = tf.get("verification")
+    if isinstance(v, dict) and any(v.values()):
+        # Ground the continuation in evidence, not optimism (§25): only 'verified' is proven done.
+        lines.append(
+            "VERIFIED: {verified} proven · {attempted} done-unverified · {failed} failed · "
+            "{pending} pending".format(
+                verified=v.get("verified", 0), attempted=v.get("attempted", 0),
+                failed=v.get("failed", 0), pending=v.get("pending", 0) + v.get("unknown", 0))
+        )
     if tf.get("next"):
         lines.append(f"NEXT: step {tf['next']['seq']} — {tf['next']['description']}")
     for f in tf.get("step_failures", []):
@@ -105,6 +141,54 @@ def render_task_header(task: Any) -> str:
 def build_packet(task: Any, summary_text: str) -> dict[str, Any]:
     """Combine deterministic task state with the model's parsed sections into one machine-readable packet."""
     return {"task": task_fields(task), "notes": parse_sections(summary_text)}
+
+
+def render_workspace_block(workspace_root: str | None) -> str:
+    """The deterministic CURRENT TASK WORKSPACE block (Prompt 5 §5). Re-derived from durable task state
+    every turn so the authoritative workspace survives compaction/interruption/restart without the model
+    having to remember it. Empty when the task has no workspace."""
+    if not workspace_root:
+        return ""
+    return (
+        "CURRENT TASK WORKSPACE\n"
+        f"Authoritative workspace: {workspace_root}\n"
+        "Rules: do all task work INSIDE this workspace (relative paths resolve here). Do NOT create a "
+        "replacement project elsewhere or restart the project in another directory. Existing files in "
+        "this workspace are part of the current task state — continue from them. Only write outside the "
+        "workspace when Almir explicitly targets a specific external file."
+    )
+
+
+def render_review_block(review: Any) -> str:
+    """Render a failing reviewer verdict into a deterministic rework block (Prompt 4 §12). Built from the
+    durable task_review record — never from a surviving model response — so the required fixes persist
+    across compaction, interruption, and restart. Empty when the review passed (nothing to inject)."""
+    if not isinstance(review, dict):
+        return ""
+    status = review.get("status")
+    if status not in ("needs_rework", "blocked", "failed"):
+        return ""
+    lines = [
+        f"TASK REVIEW (attempt {review.get('attempt', '?')}): {str(status).upper()} — "
+        f"{review.get('summary', '')}",
+    ]
+    failures = review.get("failures") or []
+    if failures:
+        lines.append("FAILED REQUIREMENTS:")
+        for f in failures[:12]:
+            lines.append(f"  ✗ {f.get('requirement', '?')} — {f.get('evidence', '')}")
+    recs = review.get("recommendations") or []
+    if recs:
+        lines.append("REQUIRED REWORK:")
+        for r in recs[:12]:
+            action = r.get("action", "")
+            lines.append(f"  → {r.get('requirement', '?')}: {action}")
+    lines.append(
+        "INSTRUCTION: Fix ONLY the failed/blocked requirements above, then run the review again. Do not "
+        "restart the task or repeat verified work. Inspect the real filesystem/state and trust the "
+        "evidence over any assumption."
+    )
+    return "\n".join(lines)
 
 
 def render_packet(packet: Any) -> str:

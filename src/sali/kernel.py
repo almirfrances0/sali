@@ -2,6 +2,14 @@
 
 ``Kernel`` wires the concretes (settings, logger, provider, and a lazily-created DB pool)
 so the rest of the system depends on interfaces, not construction.
+
+The kernel owns ONE AgentRuntime per process, which in turn owns ONE AgentLoop and ONE
+execution coordinator. All foreground execution (terminal, API, iOS) goes through the
+runtime's submit_foreground(). Background execution (scheduler, daemon) goes through
+submit_background().
+
+This eliminates the pattern where each caller created its own AgentLoop via
+kernel.agent_loop(), which caused multiple concurrent agent loops.
 """
 
 from __future__ import annotations
@@ -20,7 +28,8 @@ class Kernel:
         self.provider = provider
         self.log = get_logger("sali")
         self._pool: Any = None
-        self._recovered = False  # crash-recovery runs ONCE per process, not per loop/WS connection
+        self._runtime: Any = None  # AgentRuntime — lazy-created
+        self._recovered = False
 
     @classmethod
     def create(cls, settings: Settings | None = None) -> Kernel:
@@ -31,20 +40,32 @@ class Kernel:
     async def pool(self) -> Any:
         if self._pool is None:
             from sali.db.pool import create_pool
-
             self._pool = await create_pool(self.settings)
         return self._pool
 
-    async def agent_loop(self, *, confirmer: Any) -> Any:
-        """Build the fully-wired agent loop. The single place the object graph is assembled."""
+    async def runtime(
+        self, *, confirmer: Any = None, ws_broadcaster: Any = None,
+    ) -> Any:
+        """Get or create the single AgentRuntime for this process.
+
+        The runtime owns ONE AgentLoop and ONE execution coordinator.
+        All foreground execution goes through runtime.submit_foreground().
+        """
+        if self._runtime is not None:
+            return self._runtime
+
         from sali.context.engine import ContextEngine
         from sali.learning.service import LearningService
         from sali.retrieval.service import RetrievalService
         from sali.runtime.loop import AgentLoop
+        from sali.runtime.runtime import AgentRuntime
+        from sali.runtime.session import persistent_session_id
+        from sali.security.confirm import AutoAllowConfirmer
         from sali.security.policy import PolicyEngine
         from sali.tools.registry import default_registry
 
         pool = await self.pool()
+        effective_confirmer = confirmer or AutoAllowConfirmer()
         loop = AgentLoop(
             pool=pool,
             provider=self.provider,
@@ -52,24 +73,42 @@ class Kernel:
             context=ContextEngine(self.provider, ctx_tokens=self.settings.model.ctx_default),
             registry=default_registry(),
             policy=PolicyEngine(),
-            confirmer=confirmer,
+            confirmer=effective_confirmer,
             settings=self.settings,
-            learning=LearningService(pool, self.provider),  # so memory actually ACCRUES (§17-19)
+            learning=LearningService(pool, self.provider),
         )
-        # Clean up any run a prior process left 'running' (hard crash / kill): mark it aborted so it
-        # doesn't linger. Runs ONCE per process (not per WebSocket connection) and only over STALE
-        # runs, so it can never touch a turn in flight — here or in another live process.
+        session_id = persistent_session_id()
+        runtime = AgentRuntime(loop, session_id, pool, ws_broadcaster=ws_broadcaster)
+
+        # Crash recovery — runs once per process
         if not self._recovered:
             self._recovered = True
             try:
-                recovered = await loop.recover()
+                recovered = await runtime.recover()
                 if recovered:
                     self.log.info("recovered_orphan_runs", count=len(recovered))
-            except Exception as exc:  # noqa: BLE001 - startup recovery is best-effort
+            except Exception as exc:  # noqa: BLE001
                 self.log.warning("startup_recover_failed", error=str(exc))
-        return loop
+
+        self._runtime = runtime
+        # Start runtime services (watchdog, etc.)
+        await runtime.start()
+        self.log.info("runtime_initialized", session_id=str(session_id)[:8])
+        return runtime
+
+    async def agent_loop(self, *, confirmer: Any) -> Any:
+        """DEPRECATED: Use runtime() instead.
+
+        Returns the AgentLoop from the shared runtime for backward compatibility.
+        New code should use kernel.runtime() and submit through the coordinator.
+        """
+        runtime = await self.runtime(confirmer=confirmer)
+        return runtime.loop
 
     async def close(self) -> None:
+        if self._runtime is not None:
+            await self._runtime.aclose()
+            self._runtime = None
         if self._pool is not None:
             await self._pool.close()
             self._pool = None

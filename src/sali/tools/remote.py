@@ -48,6 +48,15 @@ class SecretResolver(Protocol):
     def set(self, ref: str, value: str) -> None: ...
 
 
+def _reject_option_smuggling(*operands: str) -> None:
+    """Refuse any ssh/scp operand (host, local path) that begins with '-'. Combined with the '--'
+    end-of-options marker in the argv, this blocks model/prompt-injection-supplied values like
+    '-oProxyCommand=…' from being parsed as options and executing a local command (Final audit §28)."""
+    for v in operands:
+        if v.startswith("-"):
+            raise ValueError(f"refusing ssh/scp operand that looks like an option: {v[:40]!r}")
+
+
 def _ssh_opts(connect_timeout: int) -> list[str]:
     return ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
             "-o", f"ConnectTimeout={connect_timeout}"]
@@ -92,25 +101,29 @@ class SshRunner:
 
     async def run(self, host: str, command: str, *, timeout: float | None = None,
                   password: str | None = None) -> RemoteResult:
+        _reject_option_smuggling(host)  # a host starting with '-' would be parsed as an ssh option
         pw = self._resolve(host, password)
+        # '--' ends option parsing: without it, host='-oProxyCommand=…' executes a LOCAL command on connect
+        # (Final audit §28). The remote command sits after host and is never treated as an option.
         if pw is not None:
-            argv = ["sshpass", "-e", "ssh", *_pw_opts(self._connect_timeout), host, command]
+            argv = ["sshpass", "-e", "ssh", *_pw_opts(self._connect_timeout), "--", host, command]
             res = await self._exec(host, argv, timeout, env={**_ssh_env(), "SSHPASS": pw})
         else:
-            argv = ["ssh", *_ssh_opts(self._connect_timeout), host, command]
+            argv = ["ssh", *_ssh_opts(self._connect_timeout), "--", host, command]
             res = await self._exec(host, argv, timeout, env=_ssh_env())
         self._persist(host, password, res)
         return res
 
     async def put(self, host: str, local: str, remote: str, *, timeout: float | None = None,
                   password: str | None = None) -> RemoteResult:
+        _reject_option_smuggling(host, local)  # neither host nor local may be parsed as an scp option
         pw = self._resolve(host, password)
         cap = timeout if timeout is not None else max(self._command_timeout, 300.0)  # files take longer
         if pw is not None:
-            argv = ["sshpass", "-e", "scp", *_pw_opts(self._connect_timeout), local, f"{host}:{remote}"]
+            argv = ["sshpass", "-e", "scp", *_pw_opts(self._connect_timeout), "--", local, f"{host}:{remote}"]
             res = await self._exec(host, argv, cap, env={**_ssh_env(), "SSHPASS": pw})
         else:
-            argv = ["scp", *_ssh_opts(self._connect_timeout), local, f"{host}:{remote}"]
+            argv = ["scp", *_ssh_opts(self._connect_timeout), "--", local, f"{host}:{remote}"]
             res = await self._exec(host, argv, cap, env=_ssh_env())
         self._persist(host, password, res)
         return res

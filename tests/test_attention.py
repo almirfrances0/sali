@@ -1,100 +1,109 @@
-"""Phase 1 · Increment 3 — the Attention Engine (§14/§15).
-
-Deterministic tier + action decisions: routine churn is ignored, meaningful observations are recorded,
-critical ones notify, and only a high-tier observation with an interpretation-needing signal wakes the
-model (protecting the inference budget §79). The perception sink is now attention-driven.
-"""
+"""Attention classification + recovery (Prompt 1): the deterministic router picks the right category +
+priority without the LLM, never destroys the primary task for a passing question, and recovery reads
+durable state (not chat history)."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
-from sali.events.attention import AttentionAction, AttentionTier, assess
-from sali.events.base import EventKind, Observation
+from sali.runtime.attention import (
+    AttentionCategory as C,
+)
+from sali.runtime.attention import (
+    Priority as P,
+)
+from sali.runtime.attention import (
+    attention_snapshot,
+    classify,
+    resume_context,
+)
+from sali.tasks.store import TaskStore
 
 
-def test_routine_churn_is_ignored() -> None:
-    v = assess(importance=0.3)
-    assert v.tier is AttentionTier.ROUTINE and v.action is AttentionAction.IGNORE
+# ── pure classifier (no DB) ─────────────────────────────────────────────────────────────────────
+def test_status_question_does_not_touch_the_task() -> None:
+    d = classify("what are you doing right now?", has_primary=True, current_objective="build laravel app")
+    assert d.category is C.CONVERSATION and not d.touches_primary
+    d = classify("what did you just do?", has_primary=True)
+    assert d.category is C.CONVERSATION and not d.touches_primary
 
 
-def test_meaningful_observation_is_recorded() -> None:
-    v = assess(importance=0.6)
-    assert v.tier is AttentionTier.INTERESTING and v.action is AttentionAction.RECORD
+def test_quick_action_keeps_primary_intact() -> None:
+    d = classify("zip the file project.zip and send it here", has_primary=True, current_objective="build a site")
+    assert d.category is C.QUICK_ACTION and not d.touches_primary
 
 
-def test_a_big_burst_becomes_interesting_even_at_low_score() -> None:
-    v = assess(importance=0.3, count=40)
-    assert v.tier is AttentionTier.INTERESTING
+def test_interrupt_suspends_and_is_high_priority() -> None:
+    d = classify("stop for a moment and check why nginx is down", has_primary=True, current_objective="build a site")
+    assert d.category is C.INTERRUPT_TASK and d.touches_primary
+    assert d.priority in (P.HIGH, P.URGENT)
+    d = classify("urgent: send me the current log file now", has_primary=True)
+    assert d.category is C.INTERRUPT_TASK and d.priority is P.URGENT
 
 
-def test_critical_signal_forces_notify() -> None:
-    v = assess(importance=0.2, signals=frozenset({"disk_full"}))
-    assert v.tier is AttentionTier.CRITICAL and v.action is AttentionAction.NOTIFY
+def test_explicit_replace_and_cancel() -> None:
+    d = classify("new task: build me a flask api instead", has_primary=True, current_objective="build a laravel site")
+    assert d.category is C.REPLACE_PRIMARY_TASK and d.touches_primary
+    d = classify("cancel that task", has_primary=True)
+    assert d.category is C.CANCEL_PRIMARY_TASK and d.touches_primary
 
 
-def test_important_signal_needing_interpretation_wakes_reasoning() -> None:
-    # a new listening service is important AND needs interpretation → investigate (wake the model)
-    v = assess(importance=0.4, signals=frozenset({"new_service"}))
-    assert v.tier is AttentionTier.IMPORTANT and v.action is AttentionAction.INVESTIGATE
+def test_queue_for_later() -> None:
+    d = classify("after you finish this website, remind me to deploy it", has_primary=True,
+                 current_objective="build a website")
+    assert d.category is C.QUEUE_FOR_LATER
 
 
-def test_important_by_score_alone_records_without_waking_the_model() -> None:
-    v = assess(importance=0.75)  # important, but no interpretation-needing signal
-    assert v.tier is AttentionTier.IMPORTANT and v.action is AttentionAction.RECORD
+def test_continuation_stays_on_task() -> None:
+    d = classify("also make the login page use the new theme", has_primary=True,
+                 current_objective="build the login page")
+    assert d.category is C.CONTINUE_PRIMARY and not d.touches_primary
 
 
-# ---- the sink is attention-driven (DB) -------------------------------------------------------
+def test_priority_signals() -> None:
+    assert classify("do it").priority is P.NORMAL
+    assert classify("i need this now", has_primary=True).priority in (P.HIGH, P.URGENT)
+    assert classify("whenever you have time, tidy the readme").priority is P.LOW
+    assert classify("urgent, the server is down").priority is P.URGENT
 
+
+def test_no_active_task_routing() -> None:
+    assert classify("what's my cpu usage?").category is C.QUICK_ANSWER  # a bare question → answer
+    assert classify("build me a flask api").category is C.CONTINUE_PRIMARY  # substantive → becomes the focus
+
+
+# ── recovery + resume context (durable state) ───────────────────────────────────────────────────
 pytestmark_db = pytest.mark.db
 
 
-class _Acq:
-    def __init__(self, c: Any) -> None:
-        self.c = c
-
-    async def __aenter__(self) -> Any:
-        return self.c
-
-    async def __aexit__(self, *a: Any) -> bool:
-        return False
-
-
-class _Pool:
-    def __init__(self, c: Any) -> None:
-        self.c = c
-
-    def acquire(self) -> Any:
-        return _Acq(self.c)
+@pytest.mark.db
+async def test_snapshot_reports_suspended_primary(live_pool: Any) -> None:
+    store = TaskStore(live_pool)
+    task = await store.create("Build the Laravel app", ["scaffold", "auth", "deploy"])
+    await store.activate(task.id)
+    # nothing suspended yet
+    snap = await attention_snapshot(live_pool)
+    assert snap["has_primary"] and not snap["primary_suspended"] and not snap["should_resume_primary"]
+    # suspend for an interrupt → snapshot now says resume it
+    await store.suspend(task.id, reason="check nginx")
+    snap = await attention_snapshot(live_pool)
+    assert snap["primary_suspended"] and snap["interrupt_active"] and snap["should_resume_primary"]
+    assert snap["primary_task_id"] == str(task.id)
 
 
 @pytest.mark.db
-async def test_sink_persists_with_tier_and_drops_routine(db_conn: Any) -> None:
-    from sali.events.sink import DbObservationSink
-
-    t = datetime(2026, 8, 27, 12, 0, 0, tzinfo=UTC)
-    sink = DbObservationSink(_Pool(db_conn))
-    await sink.observe(Observation(EventKind.FILE_MODIFIED, "edited main.py", 0.75, 1, t, t))
-    await sink.observe(Observation(EventKind.FILE_MODIFIED, "cache churn", 0.2, 1, t, t))  # routine
-
-    rows = await db_conn.fetch(
-        "SELECT payload FROM event WHERE event_type='desktop.observed' ORDER BY created_at")
-    assert len(rows) == 1  # only the attention-worthy one
-    assert rows[0]["payload"]["summary"] == "edited main.py"
-    assert rows[0]["payload"]["tier"] == "important" and rows[0]["payload"]["action"] == "record"
-
-
-@pytest.mark.db
-async def test_sink_tags_a_source_delete_as_important(db_conn: Any) -> None:
-    from sali.events.sink import DbObservationSink
-
-    t = datetime(2026, 8, 27, 12, 0, 0, tzinfo=UTC)
-    sink = DbObservationSink(_Pool(db_conn))
-    # a modest-importance delete of a source file is escalated by the 'source_delete' signal
-    await sink.observe(Observation(EventKind.FILE_DELETED, "deleted app.py", 0.6, 1, t, t,
-                                   detail={"sample": "/home/almir/proj/app.py"}))
-    row = await db_conn.fetchrow("SELECT payload FROM event WHERE event_type='desktop.observed'")
-    assert row["payload"]["tier"] == "important"
+async def test_resume_context_is_built_from_durable_state(live_pool: Any) -> None:
+    store = TaskStore(live_pool)
+    task = await store.create("Build the Laravel app", ["scaffold app", "add auth", "deploy"])
+    await store.activate(task.id)
+    await store.advance(task.id, 1, "done")
+    await store.suspend(task.id, reason="quick nginx check")
+    ctx = await resume_context(live_pool, task.id)
+    assert ctx is not None
+    assert "Build the Laravel app" in ctx
+    assert "COMPLETED STEPS" in ctx and "scaffold app" in ctx
+    assert "NEXT ACTION" in ctx and "add auth" in ctx  # resumes at the next step, not the start
+    assert "INTERRUPT THAT OCCURRED" in ctx and "nginx" in ctx
+    assert "do not restart" in ctx.lower()

@@ -28,7 +28,7 @@ from sali.tools.exec import CommandTimeout, run_argv
 from sali.tools.probe import exit_ok, verify_command
 from sali.tools.registry import ToolRegistry
 
-_MAX = 64 * 1024
+_MAX = 256 * 1024
 
 # Commands that destroy data/hardware/the running system → self-escalate to R4 (confirm).
 _DESTRUCTIVE = [
@@ -132,11 +132,14 @@ class ExecuteCommand(Tool):
         perms = ctx.settings.permissions
         sandbox = bool(args.get("sandbox"))
 
+        # Use workspace root as cwd when a task workspace is active.
+        cwd = str(ctx.workspace.workspace_root) if ctx.workspace else str(Path(perms.exec_cwd).expanduser())
+
         if bool(args.get("background")):
             # A long-running process (server, watcher): launch it detached in its own session so it
             # keeps running after this call returns, with output tee'd to a log Sali can read. This
             # is what stops `python3 -m http.server` from blocking and timing out forever.
-            return await _run_background(argv, cwd=str(Path(perms.exec_cwd).expanduser()))
+            return await _run_background(argv, cwd=cwd)
 
         if sandbox:
             if not (perms.jail_learning and jail.available()):
@@ -150,7 +153,7 @@ class ExecuteCommand(Tool):
             # be SIGKILLed mid-run; the loop still truncates what the model sees to _TOOL_OUTPUT_CAP.
             rc, out, err = await run_argv(
                 argv, timeout=self.timeout_s, env=privilege.sudo_env(_safe_env()),
-                max_output=1024 * 1024,
+                max_output=1024 * 1024, cwd=cwd,
             )
         except CommandTimeout as exc:
             return ToolResult(ok=False, display="timeout", error=str(exc))

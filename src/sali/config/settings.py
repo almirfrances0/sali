@@ -37,11 +37,13 @@ class ModelSettings(BaseModel):
     embed_model: str = "nomic-embed-text"
     embed_dim: int = 768
     embed_num_gpu: int = 0  # CPU-only embeddings — never contend with the model for VRAM
-    # Roomy context so long writes/tasks aren't truncated. Larger = slower (KV cache spills to
-    # CPU under 12 GB VRAM), which Almir explicitly accepts: "he can do slowly" over "has limits".
-    ctx_default: int = 16_384
-    ctx_max: int = 32_768
-    request_timeout_s: float = 300.0  # long single-shot generations must not time out mid-page
+    # Context window (num_ctx). Prompt 6: Sali operates in a SMALL working set (~24K), so the physical
+    # KV cache is sized to match — the smaller the num_ctx, the less VRAM/CPU-overflow/latency per turn
+    # on this 12 GB card, and the Task State Capsule + retrieval provide the effective long-term memory.
+    # The compaction engine folds and continues past it, so this is a comfort ceiling, not a hard wall.
+    ctx_default: int = 24_576
+    ctx_max: int = 131_072
+    request_timeout_s: float = 600.0  # long tasks and large contexts need more time
     # How long Ollama keeps the model resident after a call. Sali is a live resident, not a batch
     # job — evicting the 35B after 5 min idle means the next "hey sali" pays a ~20s cold reload.
     # Keep it warm; "-1" would pin it forever (at the cost of held VRAM).
@@ -51,10 +53,17 @@ class ModelSettings(BaseModel):
 class RuntimeSettings(BaseModel):
     # Generous ceilings, not tight limits: a long multi-step task keeps going (the context is
     # folded and continued when it fills — see the loop), so these are just runaway backstops.
-    max_iterations: int = 40
-    token_budget_per_run: int = 400_000
+    # Sali must be free to work through complex tasks without hitting artificial walls.
+    max_iterations: int = 80
+    token_budget_per_run: int = 1_000_000
     resume_interrupted: bool = True  # on startup recovery, actually RE-DRIVE safe/verified runs (§9)
-    resume_max_runs: int = 3  # cap how many stale runs one recovery pass will re-drive (a backstop)
+    resume_max_runs: int = 5  # cap how many stale runs one recovery pass will re-drive (a backstop)
+    # Prompt 6: Sali's OPERATIONAL context budget — a small, fast working set, NOT the model's real
+    # window. The model may support 32K+, but Sali deliberately works in ~24K so KV-cache/VRAM/latency
+    # stay low on this hardware; durable state (the Task State Capsule + retrieval) is the real memory.
+    # Configurable via SALI_RUNTIME__CONTEXT_LIMIT; the effective limit is min(this, provider window).
+    context_limit: int = 24_576
+    output_reserve: int = 3_072  # tokens always kept free for the model's reply (§18)
 
 
 class SshSettings(BaseModel):
@@ -124,10 +133,14 @@ class PerceptionSettings(BaseModel):
 def _default_fs_deny() -> list[str]:
     # This machine is Sali's home — it's open to it. Only credentials and the separate
     # `salix` project stay protected by default (a light guard the owner can remove).
+    # ~/.config/sali is ALWAYS denied (Final audit §28): it holds Sali's own Fernet vault key + encrypted
+    # vault + the host/owner API token — the same agent must never be able to read the key that decrypts its
+    # own secrets, or surface its own break-glass credential (defense against prompt-injected exfiltration).
     h = Path.home()
     return [
         str(h / ".ssh"), str(h / ".gnupg"), str(h / ".aws"),
         str(h / ".git-credentials"), str(h / ".netrc"), str(h / "Desktop" / "salix"),
+        str(h / ".config" / "sali"),
     ]
 
 
@@ -139,6 +152,12 @@ def _default_fs_readonly() -> list[str]:
 
 def _default_workspace() -> str:
     return str(Path.home() / "Desktop" / "sali-works")
+
+
+def _default_skills_root() -> str:
+    # Human-editable Markdown skills live at the repo root (Sali's install), so Almir can add/edit a
+    # `.md` skill without touching Python. Read-only to Sali itself (it lives under fs_readonly).
+    return str(Path(__file__).resolve().parents[3] / "skills")
 
 
 class PermissionsSettings(BaseModel):
@@ -153,6 +172,8 @@ class PermissionsSettings(BaseModel):
     fs_readonly: list[str] = Field(default_factory=_default_fs_readonly)
     # Sali's own working area (sali3 §13): full, unconfirmed CRUD lives here.
     workspace: str = Field(default_factory=_default_workspace)
+    # Where human-editable Markdown skills are discovered (Prompt 5 §6).
+    skills_root: str = Field(default_factory=_default_skills_root)
     exec_cwd: str = Field(default_factory=lambda: str(Path.home()))
     exec_allow_network: bool = True  # Sali runs freely, including networked commands (installs)
     jail_learning: bool = True  # an isolated sandbox is available for learning-time experiments

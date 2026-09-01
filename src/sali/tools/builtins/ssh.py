@@ -130,7 +130,7 @@ class SshPut(Tool):
         )
 
 
-_MAX = 64 * 1024
+_MAX = 256 * 1024
 
 
 def register_builtins(registry: ToolRegistry) -> None:

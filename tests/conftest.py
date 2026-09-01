@@ -81,8 +81,28 @@ def tctx() -> Any:
 _LOOP_TABLES = (
     "tool_audit, tool_execution, run_events, agent_runs, message, conversation, "
     "memory_evidence, memory, stm_observation, event, graph_edge, graph_node, contradiction, "
-    "task_step, task, schedule, document, tool_authority, discovered_tool, learning_queue, "
-    "machine_baseline"
+    "task_execution, task_artifact, task_step, task, schedule, document, tool_authority, "
+    "discovered_tool, learning_queue, machine_baseline, "
+    # Prompt 7 adaptive learning (learning_candidate FKs task with SET NULL, so it needs explicit truncate)
+    "learning_candidate, behavior_proposal, learning_contradiction, skill_proposal, consolidation_run, "
+    # persistent agency (activity/side_effect FK task with SET NULL; capability/workspace_cleanup standalone)
+    "activity, side_effect, capability, workspace_cleanup, "
+    # capability evolution (acquisition FKs task with SET NULL; external_entity FKs task with SET NULL)
+    "capability_acquisition, external_entity, "
+    # digital life (digital_action FKs external_entity+task; obligation/commitment mostly standalone)
+    "digital_action, obligation, commitment, "
+    # autonomous life (goal self-refs; initiative FKs goal; routine/person standalone)
+    "initiative, goal, routine, person, "
+    # natural consent (self-ref parent; FKs task with SET NULL)
+    "consent_request, "
+    # capability utilization (usage FKs capability with CASCADE)
+    "capability_usage, "
+    # conversation threads + pending questions (pending_question FKs thread with SET NULL)
+    "pending_question, conversation_thread, "
+    # intent revocation + resource stewardship (standalone tombstone + incident ledgers)
+    "revoked_intent, resource_incident, "
+    # iPhone control center: device sessions FK api_device CASCADE, enrollment_code FK api_device SET NULL
+    "device_session, enrollment_code, api_device"
 )
 
 

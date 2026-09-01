@@ -91,4 +91,9 @@ class ModelProvider(Protocol):
 
     def count_tokens(self, text: str) -> int: ...
 
+    def context_limit(self) -> int | None:
+        """The model's effective context window in tokens, or None if the backend can't report one
+        (the runtime then falls back to the configured limit — never assumes it's unbounded)."""
+        ...
+
     async def health(self) -> bool: ...

@@ -21,8 +21,16 @@ _NOISY = ("httpx", "httpcore", "ollama", "urllib3", "asyncio", "asyncpg")
 def configure_logging(level: str = "INFO") -> None:
     global _configured
     resolved = getattr(logging, level.upper(), logging.INFO)
-    logging.basicConfig(format="%(message)s", level=resolved)
-    quiet = max(resolved, logging.WARNING)  # never below WARNING, even if the app runs at INFO
+    root = logging.getLogger()
+    # Purge all handlers and reconfigure from scratch. Without this, cached handlers
+    # from an earlier basicConfig call keep emitting even after the level is raised.
+    for handler in root.handlers[:]:
+        root.removeHandler(handler)
+    handler = logging.StreamHandler()
+    handler.setLevel(resolved)
+    root.addHandler(handler)
+    root.setLevel(resolved)
+    quiet = max(resolved, logging.WARNING)
     for name in _NOISY:
         logging.getLogger(name).setLevel(quiet)
     structlog.configure(
@@ -32,15 +40,13 @@ def configure_logging(level: str = "INFO") -> None:
             structlog.processors.StackInfoRenderer(),
             structlog.dev.ConsoleRenderer(),
         ],
-        wrapper_class=structlog.make_filtering_bound_logger(
-            getattr(logging, level.upper(), logging.INFO)
-        ),
-        cache_logger_on_first_use=True,
+        wrapper_class=structlog.make_filtering_bound_logger(resolved),
+        cache_logger_on_first_use=False,
     )
     _configured = True
 
 
 def get_logger(name: str = "sali", **initial: Any) -> structlog.stdlib.BoundLogger:
     if not _configured:
-        configure_logging()
+        configure_logging("WARNING")
     return structlog.get_logger(name, **initial)  # type: ignore[no-any-return]

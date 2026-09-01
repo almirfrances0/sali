@@ -101,6 +101,7 @@ class ContextEngine:
         world_note: str | None = None,
         self_note: str | None = None,
         health_note: str | None = None,
+        skills_note: str | None = None,
         system_query: bool = False,
     ) -> AssembledContext:
         conflicts: list[str] = []
@@ -117,14 +118,26 @@ class ContextEngine:
             sections.append(Section("health", Priority.P1, health_note, self._count(health_note), score=0.97))
 
         if history:
+            # The compacted running summary / continuation packet is prepended by _load_history as an
+            # ("earlier", …) entry at index 0. Keep it ALWAYS, then the last 10 real messages — a bare
+            # history[-10:] would silently drop the summary once 10 recent messages exist, discarding the
+            # compacted operational state (Final audit §9).
+            earlier = history[:1] if (history and history[0][0] == "earlier") else []
+            rest = history[len(earlier):]
+            kept = earlier + rest[-10:]
             convo = "Conversation so far:\n" + "\n".join(
-                f"{role}: {content}" for role, content in history[-6:]
+                f"{role}: {content}" for role, content in kept
             )
             sections.append(Section("conversation", Priority.P1, convo, self._count(convo)))
         if tasks_note:
             # Tasks in progress ride high (P1) so Sali resumes what it was doing — even after a
             # restart, since the tasks are read back from the datastore each turn.
             sections.append(Section("tasks", Priority.P1, tasks_note, self._count(tasks_note)))
+        if skills_note:
+            # Bounded task-skill guidance (Prompt 5 §7/§12): loaded from the durable per-task snapshot,
+            # ranked P2 so it never crowds out the task/workspace/world state above it, and packed to the
+            # budget like everything else so it participates in compaction rather than exploding it.
+            sections.append(Section("skills", Priority.P2, skills_note, self._count(skills_note), score=0.85))
         if live_note:
             sections.append(Section("live", Priority.P1, live_note, self._count(live_note)))
         if machine_changes:

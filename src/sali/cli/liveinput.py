@@ -20,6 +20,7 @@ from typing import Any
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.history import FileHistory
 
 
 class SenseInput:
@@ -33,7 +34,13 @@ class SenseInput:
         self._min_chars = min_chars
         self._hunch = ""
         self._task: asyncio.Task[None] | None = None
-        self._session: PromptSession[str] = PromptSession()
+        # Persistent command history — up-arrow recalls previous inputs across sessions.
+        from pathlib import Path
+        history_dir = Path.home() / ".local" / "share" / "sali"
+        history_dir.mkdir(parents=True, exist_ok=True)
+        self._session: PromptSession[str] = PromptSession(
+            history=FileHistory(str(history_dir / "history")),
+        )
         self._session.default_buffer.on_text_changed += self._on_change
 
     def _on_change(self, _buffer: Any) -> None:

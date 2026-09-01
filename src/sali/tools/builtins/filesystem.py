@@ -16,7 +16,7 @@ from sali.tools.context import ToolContext
 from sali.tools.pathguard import PathViolation
 from sali.tools.registry import ToolRegistry
 
-_MAX_BYTES = 64 * 1024
+_MAX_BYTES = 256 * 1024
 _PATH_ARG = {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
 
 
@@ -29,6 +29,9 @@ def _verify_write(args: dict[str, Any], result: ToolResult, ctx: ToolContext) ->
         path = ctx.paths.check_write(args["path"])
     except PathViolation as exc:
         return VerifyResult(False, str(exc))
+    # Workspace boundary check
+    if ctx.workspace is not None and not ctx.workspace.contains(path):
+        return VerifyResult(False, f"write outside workspace: {path}")
     expected = len(str(args.get("content", "")).encode("utf-8"))
     if path.is_file() and path.stat().st_size == expected:
         return VerifyResult(True, f"file present on disk, {expected} bytes")
@@ -46,6 +49,19 @@ def _in_free_zone(raw: Any) -> bool:
         return False
     zones = [Path.home().resolve(), Path("/tmp"), Path("/var/tmp")]
     return any(target == z or z in target.parents for z in zones)
+
+
+def _check_workspace(path: Path, ctx: ToolContext) -> str | None:
+    """If a workspace is active, verify the path is inside it. Returns error string or None."""
+    if ctx.workspace is None:
+        return None
+    if not ctx.workspace.contains(path):
+        return (
+            f"write denied: {path} is outside the task workspace "
+            f"({ctx.workspace.workspace_root}). All project files must be created inside "
+            f"the declared workspace."
+        )
+    return None
 
 
 class ListDir(Tool):
@@ -172,6 +188,9 @@ class CreateFile(Tool):
             path = ctx.paths.check_write(args["path"])
         except PathViolation as exc:
             return ToolResult(ok=False, display="denied", error=str(exc))
+        ws_err = _check_workspace(path, ctx)
+        if ws_err:
+            return ToolResult(ok=False, display="outside workspace", error=ws_err)
         if path.exists():
             return ToolResult(ok=False, display="exists", error=f"{path} already exists (use modify_file)")
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -181,7 +200,15 @@ class CreateFile(Tool):
                           display=f"created {path.name}")
 
     async def verify(self, args: dict[str, Any], result: ToolResult, ctx: ToolContext) -> VerifyResult:
-        return _verify_write(args, result, ctx)
+        v = _verify_write(args, result, ctx)
+        # Record artifact only after successful deterministic verification
+        if (v.success and ctx.tasks is not None and ctx.run_id is not None
+                and hasattr(ctx.tasks, "active_task") and hasattr(ctx.tasks, "record_artifact")):
+            active = await ctx.tasks.active_task()
+            if active is not None:
+                await ctx.tasks.record_artifact(
+                    active.id, str(Path(args["path"]).resolve()), "created", tool_name="create_file")
+        return v
 
 
 class ModifyFile(Tool):
@@ -207,6 +234,9 @@ class ModifyFile(Tool):
             path = ctx.paths.check_write(args["path"])
         except PathViolation as exc:
             return ToolResult(ok=False, display="denied", error=str(exc))
+        ws_err = _check_workspace(path, ctx)
+        if ws_err:
+            return ToolResult(ok=False, display="outside workspace", error=ws_err)
         if not path.is_file():
             return ToolResult(ok=False, display="not a file", error=f"{path} is not an existing file")
         content = str(args["content"])
@@ -215,7 +245,14 @@ class ModifyFile(Tool):
                           display=f"modified {path.name}")
 
     async def verify(self, args: dict[str, Any], result: ToolResult, ctx: ToolContext) -> VerifyResult:
-        return _verify_write(args, result, ctx)
+        v = _verify_write(args, result, ctx)
+        if (v.success and ctx.tasks is not None
+                and hasattr(ctx.tasks, "active_task") and hasattr(ctx.tasks, "record_artifact")):
+            active = await ctx.tasks.active_task()
+            if active is not None:
+                await ctx.tasks.record_artifact(
+                    active.id, str(Path(args["path"]).resolve()), "modified", tool_name="modify_file")
+        return v
 
 
 class DeleteFile(Tool):

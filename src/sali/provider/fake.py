@@ -17,10 +17,16 @@ from sali.provider.base import ChatChunk, ChatMessage, ChatResult, ToolSpec
 
 
 class FakeModelProvider:
-    def __init__(self, *, dim: int = 768, responses: list[ChatResult] | None = None) -> None:
+    def __init__(
+        self, *, dim: int = 768, responses: list[ChatResult] | None = None,
+        ctx_limit: int | None = None,
+    ) -> None:
         self.dim = dim
         self._responses: list[ChatResult] = list(responses or [])
         self.calls: list[dict[str, Any]] = []
+        # A tiny window lets tests drive the budgeter/fold deterministically; None → the runtime falls
+        # back to the configured ctx_default (unchanged behaviour for existing tests).
+        self._ctx_limit = ctx_limit
 
     async def chat(
         self,
@@ -72,6 +78,9 @@ class FakeModelProvider:
 
     def count_tokens(self, text: str) -> int:
         return max(1, len(text) // 4)
+
+    def context_limit(self) -> int | None:
+        return self._ctx_limit
 
     async def health(self) -> bool:
         return True

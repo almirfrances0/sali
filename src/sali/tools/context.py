@@ -61,14 +61,39 @@ class TaskSink(Protocol):
     """How a tool records and advances a persistent multi-step task (§24). Concrete impl (TaskStore)
     is injected by the runtime; tasks survive restarts because they live in the datastore."""
 
-    async def create(self, objective: str, steps: list[Any]) -> Any: ...
+    async def create(self, objective: str, steps: list[Any], **kwargs: Any) -> Any: ...
+    async def bind_workspace(  # resolve + persist the task's authoritative workspace (Prompt 5)
+        self, task_id: Any, *, objective: str, explicit: str | None,
+        sali_works_root: str, cwd: str | None = None,
+    ) -> dict[str, Any]: ...
     async def current(self) -> Any: ...  # the task Sali is working on now, or None
     async def advance(
         self, task_id: Any, step_seq: int, status: str, *, note: str | None = None,
-        error: str | None = None, verified_by: Any = None,
+        error: str | None = None, verified_by: Any = None, run_id: Any = None,
     ) -> Any: ...
     async def checkpoint(self, task_id: Any, step_seq: int, data: dict[str, Any]) -> None: ...  # resume mid-step
-    async def finish(self, task_id: Any, *, status: str = "done", result: str | None = None) -> None: ...
+    async def finish(
+        self, task_id: Any, *, status: str = "done", result: str | None = None, run_id: Any = None,
+    ) -> str | None: ...
+    async def record_artifact(
+        self, task_id: Any, artifact_path: str, artifact_type: str,
+        *, tool_name: str | None = None,
+    ) -> None: ...
+    async def artifacts(self, task_id: Any) -> list[dict[str, Any]]: ...
+    async def current_step(self, task_id: Any) -> int | None: ...
+
+
+class ResearchSink(Protocol):
+    """How a tool does just-in-time web research bound to the current task (Prompt 5 §14). The concrete
+    impl (injected by the runtime) searches the web, persists a durable, task-linked finding, and can
+    record/promote evidence-aware learning candidates — so research is durable evidence, never temporary
+    context and never automatically permanent truth."""
+
+    async def research(self, query: str, *, step_seq: int | None = None) -> dict[str, Any]: ...
+    async def record_lesson(
+        self, lesson: str, *, source: str | None = None, research_id: str | None = None,
+    ) -> dict[str, Any]: ...
+    async def promote_verified(self) -> int: ...
 
 
 class ScheduleSink(Protocol):
@@ -162,6 +187,15 @@ class ToolContext:
     recall: RecallSink | None = None  # injected by the loop; lets a tool actively query memory (§34)
     graph: GraphSink | None = None  # injected by the loop; lets a tool assert a relationship
     tasks: TaskSink | None = None  # injected by the loop; lets a tool run a persistent task
+    task_authority: Any = None  # injected by the loop; deterministic active-task enforcement
+    reviewer: Any = None  # injected by the loop; the deterministic completion gate (TaskReviewer, §8)
+    research: Any = None  # injected by the loop; just-in-time task-bound web research (Prompt 5 §14)
+    decisions: Any = None  # injected by the loop; the durable decision ledger (Prompt 6 §30)
+    phases: Any = None  # injected by the loop; task phases (Prompt 6 §31)
+    delegate: Any = None  # injected by the loop; delegate one bounded objective to a subagent (§16)
+    clarify: Any = None  # injected by the loop; ask the user a clarifying question (§44)
+    is_subagent: bool = False  # true inside a bounded subagent run — it must not manage tasks (§16)
+    workspace: Any = None  # injected by the loop; TaskWorkspace for the active task (None = no workspace)
     schedules: ScheduleSink | None = None  # injected by the loop; lets a tool set up recurring work
     documents: IngestSink | None = None  # injected by the loop; lets a tool ingest a document
     remote: RemoteRunner | None = None  # injected by the loop; lets a tool run on a remote host

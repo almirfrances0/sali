@@ -72,10 +72,11 @@ async def queue_gaps(conn: Any, *, budget: Budget | None = None) -> int:
 
     # 1) Attention already flagged these as worth interpreting (§14 investigate).
     investigate = await conn.fetch(
-        "SELECT DISTINCT payload->>'summary' AS summary FROM event "
+        "SELECT payload->>'summary' AS summary, max(created_at) AS latest FROM event "
         "WHERE event_type='desktop.observed' AND payload->>'action'='investigate' "
         "  AND created_at > now() - make_interval(days => $1) "
-        "ORDER BY 1 LIMIT $2", budget.scan_window_days, budget.max_new_per_pass * 2)
+        "GROUP BY payload->>'summary' ORDER BY latest DESC LIMIT $2",
+        budget.scan_window_days, budget.max_new_per_pass * 2)
     for r in investigate:
         if added >= budget.max_new_per_pass:
             break
@@ -84,20 +85,23 @@ async def queue_gaps(conn: Any, *, budget: Budget | None = None) -> int:
                                      reason="attention flagged this to look into", priority=3):
             added += 1
 
-    # 2) A command that has failed repeatedly is a knowledge gap worth understanding (§58).
+    # 2) A tool that has failed repeatedly is a knowledge gap worth understanding (§58).
+    # Covers ALL tools. For execute_command, includes the specific command in the subject.
     if added < budget.max_new_per_pass:
         failing = await conn.fetch(
-            "SELECT plan->'args'->>'command' AS command, count(*) AS fails FROM tool_execution "
-            "WHERE tool_name='execute_command' AND success IS FALSE "
-            "  AND plan->'args'->>'command' IS NOT NULL "
+            "SELECT tool_name, plan->'args'->>'command' AS command, count(*) AS fails "
+            "FROM tool_execution "
+            "WHERE success IS FALSE "
             "  AND started_at > now() - make_interval(days => $1) "
-            "GROUP BY 1 HAVING count(*) >= 3 ORDER BY count(*) DESC LIMIT $2",
+            "GROUP BY tool_name, plan->'args'->>'command' "
+            "HAVING count(*) >= 3 ORDER BY count(*) DESC LIMIT $2",
             budget.scan_window_days, budget.max_new_per_pass)
         for r in failing:
             if added >= budget.max_new_per_pass:
                 break
-            subject = (r["command"] or "").strip()[:120]
-            if subject and await enqueue(conn, kind="recurring_failure", subject=subject,
-                                         reason=f"failed {r['fails']}× recently", priority=2):
+            cmd = r.get("command")
+            subject = cmd if cmd and r["tool_name"] == "execute_command" else f"{r['tool_name']} (recurring failure)"
+            if await enqueue(conn, kind="recurring_failure", subject=subject,
+                             reason=f"{r['tool_name']} failed {r['fails']}× recently", priority=2):
                 added += 1
     return added

@@ -11,20 +11,25 @@ The run SUMMARY (``agent_runs``) and everything durable are untouched.
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 
 async def gc(conn: Any, *, run_journal_retention_days: int = 90) -> int:
-    """Prune the FSM journal of old, FINISHED runs (§51). Never touches memory, graph, contradictions,
-    the event log, or the run summaries. Returns rows reclaimed. Caller owns the transaction."""
-    result = await conn.execute(
-        "DELETE FROM run_events WHERE run_id IN ("
-        "  SELECT run_id FROM agent_runs "
-        "  WHERE status IN ('completed','aborted','failed') "
-        "    AND updated_at < now() - make_interval(days => $1))",
-        run_journal_retention_days,
-    )
-    try:
-        return int(result.split()[-1])  # asyncpg returns e.g. "DELETE 42"
-    except (ValueError, IndexError, AttributeError):
-        return 0
+    """Prune high-volume, low-lasting-value operational history of old, FINISHED runs (§51, Final audit §41).
+    Never touches memory, graph, contradictions, the event log, experiences, learning candidates, or the run
+    summaries. Returns rows reclaimed. Caller owns the transaction.
+
+    Covers three per-turn/per-tool-call tables that would otherwise grow without bound on a years-long agent:
+    the FSM journal (``run_events``), the tool-call audit projection (``tool_audit``), and the executed-tool
+    detail (``tool_execution``) — all only for runs finished well past the retention window. The durable
+    task archive (sali-works/tasks/) and the append-only ``event`` spine keep the permanent record."""
+    finished = ("SELECT run_id FROM agent_runs WHERE status IN ('completed','aborted','failed') "
+                "AND updated_at < now() - make_interval(days => $1)")
+    reclaimed = 0
+    for table in ("run_events", "tool_audit", "tool_execution"):
+        result = await conn.execute(
+            f"DELETE FROM {table} WHERE run_id IN ({finished})", run_journal_retention_days)
+        with contextlib.suppress(ValueError, IndexError, AttributeError):
+            reclaimed += int(result.split()[-1])  # asyncpg returns e.g. "DELETE 42"
+    return reclaimed

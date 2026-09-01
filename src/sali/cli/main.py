@@ -8,6 +8,7 @@ persists nothing.
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -20,7 +21,7 @@ from sali import __version__
 from sali.config.settings import Settings, load_settings
 from sali.context.engine import IDENTITY
 from sali.obs.log import configure_logging
-from sali.runtime.session import background_session_id, persistent_session_id
+from sali.runtime.session import background_session_id
 
 app = typer.Typer(add_completion=False, help="Sali — a local-first personal AI agent.")
 console = Console()
@@ -555,6 +556,55 @@ def agent(
     asyncio.run(_agent(settings, message))
 
 
+@app.command()
+def serve(
+    port: int = typer.Option(8080, help="Port to listen on."),
+    host: str = typer.Option("0.0.0.0", help="Host to bind to."),
+) -> None:
+    """Start the API server for mobile clients (iOS app, etc.)."""
+    import uvicorn
+    settings = load_settings()
+    configure_logging("WARNING")
+    from sali.api.app import create_app
+    from sali.kernel import Kernel
+    kernel = Kernel.create(settings)
+    app = create_app(kernel)
+    uvicorn.run(app, host=host, port=port, log_level="warning")
+
+
+@app.command("enroll-code")
+def enroll_code(
+    role: str = typer.Option("owner", help="Device role: owner | controller | observer."),
+    label: str = typer.Option("", help="Suggested device label (e.g. 'Almir's iPhone 15 Pro')."),
+) -> None:
+    """Mint a one-time iPhone pairing code (on the host). Type it — or scan it — into a fresh Sali app.
+
+    The code is single-use and expires quickly; it never becomes a permanent credential. Only its hash is
+    stored. Run this on the machine where Sali lives, then enter the code in the app's enrollment screen."""
+    import asyncio
+
+    from sali.api.devices import DeviceStore
+    from sali.kernel import Kernel
+
+    settings = load_settings()
+    configure_logging("WARNING")
+
+    async def _mint() -> None:
+        kernel = Kernel.create(settings)
+        try:
+            pool = await kernel.pool()
+            code, expires_at = await DeviceStore(pool).mint_enrollment_code(
+                role=role, label=(label or None), created_by="host-cli")
+            console.print(f"\n  Pairing code: [bold cyan]{code}[/]")
+            console.print(f"  Role:         {role}")
+            console.print(f"  Expires:      {expires_at.isoformat()}\n")
+            console.print("  Enter this in the Sali app's enrollment screen. Single-use; expires soon.\n")
+        finally:
+            await kernel.close()
+
+    asyncio.run(_mint())
+
+
 def _fmt_tool(data: dict[str, Any]) -> str:
     args = data.get("args") or {}
     value = args.get("command") or args.get("path") or args.get("repo")
@@ -563,102 +613,334 @@ def _fmt_tool(data: dict[str, Any]) -> str:
     return str(value or "")[:70]
 
 
-async def _stream_turn(loop: Any, text: str, session: UUID) -> None:
-    """Render one turn as a flowing transcript, like the big assistants: Sali's words stream in
-    live, each ● action line lands in order beneath the words that led to it, and the final answer
-    stays on screen. It is append-only — nothing already shown is ever wiped, so you can read the
-    whole turn top to bottom."""
+async def _stream_turn(loop: Any, text: str, session: UUID,
+                       renderer: Any = None) -> None:
+    """Render one turn as a flowing transcript with the advanced renderer.
+
+    Combines Rich Live for streaming tokens with the TerminalRenderer for tools,
+    memory, and status events. Append-only — nothing already shown is wiped.
+    """
+    from sali.cli.renderer import S, TerminalRenderer
+
+    if renderer is None:
+        renderer = TerminalRenderer(console)
+
+    # Subtle separator between turns (the prompt already showed the user's input)
+    console.print()
+    renderer.start_turn()
+    turn_start = time.monotonic()
+    tool_calls = 0
+    err: Exception | None = None
+
+    # Streaming state
+    seg = ""           # current tokens, not yet committed
+    activity = "processing…"
+    thinking_text = ""
+    is_working = True  # always show spinner while Sali is working
+
     from rich.console import Group
     from rich.live import Live
+    from rich.markdown import Markdown
     from rich.spinner import Spinner
     from rich.text import Text
 
-    seg = ""  # the words Sali is currently streaming, not yet committed to the transcript
-    activity: str | None = "…"
     spinner = Spinner("dots", style="cyan")
-    err: Exception | None = None
 
-    def render() -> Group:
+    def render_frame() -> Group:
         parts: list[Any] = []
         if seg:
-            parts.append(Text.assemble(("sali › ", "bold green"), seg))
-        if activity is not None:
-            spinner.update(text=Text(f" {activity}", style="dim cyan"))
+            from sali.cli.renderer import C as RC
+            from sali.cli.renderer import S
+            parts.append(Text.assemble(
+                (f"  {S.PROMPT_SALI} ", RC.SALI_PREFIX),
+            ))
+            parts.append(Markdown(seg.rstrip()))
+        if thinking_text and not seg:
+            from sali.cli.renderer import C as RC
+            from sali.cli.renderer import S
+            preview = thinking_text[:150] + ("…" if len(thinking_text) > 150 else "")
+            parts.append(Text.assemble(
+                (f"  {S.THINKING} ", RC.THINKING),
+                (preview, f"dim {RC.THINKING}"),
+            ))
+        # Always show spinner while working — gives visual feedback that Sali is active
+        if is_working:
+            display_activity = activity or "processing…"
+            spinner.update(text=Text(f" {display_activity}", style="dim cyan"))
+            parts.append(Text("  "))
             parts.append(spinner)
         return Group(*parts)
 
-    with Live(render(), console=console, refresh_per_second=12, transient=False) as live:
-        # Let a confirmation prompt pause this spinner (so a destructive-op y/N is visible, not a hang).
+    with Live(render_frame(), console=console, refresh_per_second=15, transient=False) as live:
+        # Let confirmer pause the spinner for y/N prompts
         confirmer = getattr(loop, "confirmer", None)
         if confirmer is not None and hasattr(confirmer, "attach"):
             confirmer.attach(live)
 
         def commit() -> None:
             nonlocal seg
-            if seg.strip():  # move the current words up into the permanent transcript
-                live.console.print(Text.assemble(("sali › ", "bold green"), seg.rstrip()))
+            if seg.strip():
+                from sali.cli.renderer import C as RC
+                from sali.cli.renderer import S
+                live.console.print(Text.assemble(
+                    (f"  {S.PROMPT_SALI} ", RC.SALI_PREFIX),
+                ))
+                live.console.print(Markdown(seg.rstrip()))
             seg = ""
 
         try:
             async for event in loop.astream(text, session_id=session):
                 if event.kind == "token":
                     seg += event.text
-                    activity = None  # the words are flowing — no spinner
+                    activity = "writing…"
                 elif event.kind == "status":
                     activity = f"{event.text}…"
                 elif event.kind == "thinking":
-                    if not seg:
-                        activity = "thinking…"
+                    thinking_text += event.text
+                    activity = "thinking…"
                 elif event.kind == "tool":
                     if event.data.get("phase") == "start":
-                        commit()  # the words that led here → transcript, then the action below them
-                        activity = f"{event.data['name']} {_fmt_tool(event.data)}".strip()
+                        commit()
+                        tool_calls += 1
+                        name = event.data.get("name", "?")
+                        args = event.data.get("args")
+                        from sali.cli.renderer import _fmt_args
+                        activity = f"{name} {_fmt_args(args)}".strip()
                     else:
                         ok = event.data.get("ok", True)
                         summary = str(event.data.get("summary") or event.data.get("name", ""))
-                        mark = "[green]●[/]" if ok else "[red]●[/]"
-                        live.console.print(f"{mark} [dim]{summary}[/]")
+                        from sali.cli.renderer import C as RC
+                        from sali.cli.renderer import S
+                        mark = f"[{RC.TOOL_OK}]{S.TOOL_OK}[/]" if ok else f"[{RC.TOOL_FAIL}]{S.TOOL_FAIL}[/]"
+                        live.console.print(f"  {mark} [{RC.DIM}]{summary}[/]")
                         activity = "working…"
+                        thinking_text = ""
+                elif event.kind == "retrieval":
+                    count = len(event.data.get("memories", []))
+                    if count:
+                        commit()
+                        renderer.render_memory_recall(count, event.data.get("query"))
                 elif event.kind == "final":
                     if event.text and not seg.strip():
                         seg = event.text
-                    activity = None
-                live.update(render())
-        except Exception as exc:  # noqa: BLE001 - re-raised after the last frame is drawn
+                    activity = "done"
+                live.update(render_frame())
+        except Exception as exc:  # noqa: BLE001 - re-raised after the last frame
             err = exc
         finally:
-            activity = None
-            live.update(render())  # last frame: the final answer, no spinner (kept on screen)
+            is_working = False  # stop the spinner
+            activity = ""
+            live.update(render_frame())
+
+    duration = time.monotonic() - turn_start
+    renderer.render_turn_summary(tool_calls, duration)
+    if err is not None:
+        raise err
+
+
+async def _stream_turn_via_runtime(
+    runtime: Any, text: str, renderer: Any, origin: Any,
+) -> None:
+    """Submit a turn through the runtime coordinator with streaming terminal rendering.
+
+    This is the unified execution path: terminal submits through the coordinator
+    (same as API), but renders events in the terminal as they arrive.
+    """
+    from sali.cli.renderer import TerminalRenderer
+
+    if renderer is None:
+        renderer = TerminalRenderer(console)
+
+    console.print()
+    renderer.start_turn()
+    turn_start = time.monotonic()
+    tool_calls = 0
+    err: Exception | None = None
+
+    seg = ""
+    activity = "processing…"
+    thinking_text = ""
+    is_working = True
+
+    from rich.console import Group
+    from rich.live import Live
+    from rich.markdown import Markdown
+    from rich.spinner import Spinner
+    from rich.text import Text
+
+    spinner = Spinner("dots", style="cyan")
+
+    def render_frame() -> Group:
+        parts: list[Any] = []
+        if seg:
+            from sali.cli.renderer import C as RC
+            from sali.cli.renderer import S
+            parts.append(Text.assemble(
+                (f"  {S.PROMPT_SALI} ", RC.SALI_PREFIX),
+            ))
+            parts.append(Markdown(seg.rstrip()))
+        if thinking_text and not seg:
+            from sali.cli.renderer import C as RC
+            from sali.cli.renderer import S
+            preview = thinking_text[:150] + ("…" if len(thinking_text) > 150 else "")
+            parts.append(Text.assemble(
+                (f"  {S.THINKING} ", RC.THINKING),
+                (preview, f"dim {RC.THINKING}"),
+            ))
+        if is_working:
+            display_activity = activity or "processing…"
+            spinner.update(text=Text(f" {display_activity}", style="dim cyan"))
+            parts.append(Text("  "))
+            parts.append(spinner)
+        return Group(*parts)
+
+    # Event queue: the coordinator's event_callback puts events here,
+    # and the Live display consumes them.
+    import asyncio
+    event_queue: asyncio.Queue[Any] = asyncio.Queue()
+
+    def on_event(event: Any) -> None:
+        """Called by the coordinator for each LoopEvent."""
+        event_queue.put_nowait(event)
+
+    with Live(render_frame(), console=console, refresh_per_second=15, transient=False) as live:
+        confirmer = getattr(runtime.loop, "confirmer", None)
+        if confirmer is not None and hasattr(confirmer, "attach"):
+            confirmer.attach(live)
+
+        def commit() -> None:
+            nonlocal seg
+            if seg.strip():
+                from sali.cli.renderer import C as RC
+                from sali.cli.renderer import S
+                live.console.print(Text.assemble(
+                    (f"  {S.PROMPT_SALI} ", RC.SALI_PREFIX),
+                ))
+                live.console.print(Markdown(seg.rstrip()))
+            seg = ""
+
+        async def _consume_events() -> None:
+            """Consume events from the queue and render them."""
+            nonlocal seg, activity, thinking_text, tool_calls, is_working, err
+            while True:
+                try:
+                    event = await asyncio.wait_for(event_queue.get(), timeout=0.5)
+                except TimeoutError:
+                    if not is_working:
+                        break
+                    continue
+
+                if event is None:  # sentinel: stream done
+                    break
+
+                if event.kind == "token":
+                    seg += event.text
+                    activity = "writing…"
+                elif event.kind == "status":
+                    activity = f"{event.text}…"
+                elif event.kind == "thinking":
+                    thinking_text += event.text
+                    activity = "thinking…"
+                elif event.kind == "tool":
+                    if event.data.get("phase") == "start":
+                        commit()
+                        tool_calls += 1
+                        name = event.data.get("name", "?")
+                        args = event.data.get("args")
+                        from sali.cli.renderer import _fmt_args
+                        activity = f"{name} {_fmt_args(args)}".strip()
+                    else:
+                        ok = event.data.get("ok", True)
+                        summary = str(event.data.get("summary") or event.data.get("name", ""))
+                        from sali.cli.renderer import C as RC
+                        from sali.cli.renderer import S
+                        mark = f"[{RC.TOOL_OK}]{S.TOOL_OK}[/]" if ok else f"[{RC.TOOL_FAIL}]{S.TOOL_FAIL}[/]"
+                        live.console.print(f"  {mark} [{RC.DIM}]{summary}[/]")
+                        activity = "working…"
+                        thinking_text = ""
+                elif event.kind == "retrieval":
+                    count = len(event.data.get("memories", []))
+                    if count:
+                        commit()
+                        renderer.render_memory_recall(count, event.data.get("query"))
+                elif event.kind == "final":
+                    if event.text and not seg.strip():
+                        seg = event.text
+                    activity = "done"
+                live.update(render_frame())
+
+        try:
+            # Route through the attention authority (Prompt 2): classify → answer / interrupt+suspend
+            # → do the work → auto-resume the primary. All foreground still serialized via the lease.
+            submit_task = asyncio.create_task(
+                runtime.handle_message(text, origin=origin.value, event_callback=on_event))
+            consume_task = asyncio.create_task(_consume_events())
+
+            # Wait for both: submit completes the turn, consume renders events
+            result = await submit_task
+            # Signal the consumer that the stream is done
+            await event_queue.put(None)
+            await consume_task
+
+            if result.get("status") == "error":
+                err = Exception(result.get("error", "unknown error"))
+        except Exception as exc:  # noqa: BLE001
+            err = exc
+        finally:
+            is_working = False
+            activity = ""
+            live.update(render_frame())
+
+    duration = time.monotonic() - turn_start
+    renderer.render_turn_summary(tool_calls, duration)
     if err is not None:
         raise err
 
 
 async def _agent(settings: Settings, message: str | None) -> None:
+    from sali.cli.renderer import C, S, TerminalRenderer
+    from sali.db.bootstrap import init_database
     from sali.kernel import Kernel
+    from sali.runtime.coordinator import ExecutionOrigin
     from sali.security.confirm import TerminalConfirmer
 
+    await init_database(settings)  # idempotent: apply any outstanding migrations
     kernel = Kernel.create(settings)
-    loop = await kernel.agent_loop(confirmer=TerminalConfirmer())
-    session = persistent_session_id()  # always the same continuous conversation
+    runtime = await kernel.runtime(confirmer=TerminalConfirmer())
+    renderer = TerminalRenderer(console)
+
+    # Print header
+    renderer.print_header(__version__, settings.model.chat_model, str(runtime.session_id))
+
+    # Check for recovery
+    try:
+        recovered = await runtime.recover_tasks()
+        renderer.render_recovery_info(recovered)
+    except Exception:  # noqa: BLE001 - recovery is best-effort
+        pass
+
     try:
         if message:
-            await _stream_turn(loop, message, session)
+            await _stream_turn_via_runtime(runtime, message, renderer, ExecutionOrigin.CLI)
             return
-        reader = _live_reader(loop)
-        watching = " It watches as you type," if reader is not None else ""
-        console.print(f"[dim]talking to Sali — Ctrl-D to leave.{watching} and it remembers.[/]")
+        reader = _live_reader(runtime.loop)
         while True:
             try:
-                text = await reader.prompt("you › ") if reader is not None \
-                    else console.input("[bold cyan]you ›[/] ")
+                text = await reader.prompt(f"  {S.PROMPT_USER} ") if reader is not None \
+                    else console.input(f"[{C.USER_PROMPT}]{S.PROMPT_USER}[/] ")
             except (EOFError, KeyboardInterrupt):
                 console.print()
                 return
             if not text.strip():
                 continue
-            await _stream_turn(loop, text, session)
+            try:
+                await _stream_turn_via_runtime(runtime, text, renderer, ExecutionOrigin.CLI)
+            except KeyboardInterrupt:
+                console.print(f"\n  [{C.WARNING}]interrupted[/]")
+            except Exception as exc:
+                renderer.render_error(str(exc)[:200], context=type(exc).__name__)
     finally:
-        await loop.aclose()  # shut down Sali's browser if it was launched
+        await runtime.aclose()
         await kernel.close()
 
 
@@ -832,15 +1114,46 @@ async def _recall(settings: Settings, query: str) -> None:
 
 
 @app.command()
-def learn() -> None:
+def learn(daily: bool = False) -> None:
     """Consolidate what Sali has done into knowledge — learn repeated procedures, record failures.
 
     Learning is memory acquisition, not retraining (§17-19). A procedure is only learned once it
     has repeated evidence — never from a single observation.
+
+    With --daily, run the idempotent daily consolidation cycle (Prompt 7 §9/§26): promote learning
+    candidates that cleared the evidence bar, retire failed experiments, surface contradictions.
+    Safe to run repeatedly and from cron/systemd — one cycle per day, with bounded catch-up for
+    missed days.
     """
     settings = load_settings()
     configure_logging("WARNING")
-    asyncio.run(_learn(settings))
+    asyncio.run(_learn_daily(settings) if daily else _learn(settings))
+
+
+async def _learn_daily(settings: Settings) -> None:
+    from sali.db.pool import create_pool
+    from sali.events.publisher import EventPublisher
+    from sali.learning.daily import DailyConsolidation
+    from sali.learning.service import LearningService
+    from sali.provider.registry import build_provider
+
+    pool = await create_pool(settings)
+    provider = build_provider(settings)
+    daily = DailyConsolidation(pool, provider, EventPublisher(pool),
+                               learning_service=LearningService(pool, provider))
+    try:
+        with console.status("[cyan]running the daily learning cycle…[/]"):
+            summaries = await daily.catch_up(max_cycles=3)
+        for s in summaries:
+            if s.skipped:
+                console.print(f"[dim]{s.ran_on}: already consolidated today (idempotent).[/]")
+            else:
+                console.print(
+                    f"[green]{s.ran_on}:[/] promoted {s.promoted}, archived {s.archived}, "
+                    f"{s.candidates_active} active lesson(s), {s.contradictions_open} open "
+                    f"contradiction(s), {s.behavior_pending} behavior proposal(s) pending.")
+    finally:
+        await pool.close()
 
 
 async def _learn(settings: Settings) -> None:
@@ -912,15 +1225,16 @@ async def _scheduler(settings: Settings, interval: int) -> None:
     from sali.security.confirm import AutoDenyConfirmer
 
     kernel = Kernel.create(settings)
+    # Use the shared runtime — scheduler goes through submit_background(),
+    # which uses the same AgentLoop but does NOT acquire the foreground lease.
+    runtime = await kernel.runtime(confirmer=AutoDenyConfirmer())
     pool = await kernel.pool()
-    # Scheduled turns run with no one at the terminal, so a genuinely-destructive step is auto-declined
-    # (Sali still runs everything else freely) rather than blocking on a confirm nobody can answer.
-    loop = await kernel.agent_loop(confirmer=AutoDenyConfirmer())
-    session = persistent_session_id()
+    # Scheduled work uses the BACKGROUND session — never writes to Almir's conversation.
+    session = background_session_id()
 
     class _LoopRunner:
         async def run(self, prompt: str) -> Any:
-            return await loop.run(prompt, session_id=session)
+            return await runtime.submit_background(prompt, session_id=session)
 
     daemon = SchedulerDaemon(ScheduleStore(pool), _LoopRunner(), pool=pool, poll_s=float(interval))
     console.print(f"[dim]scheduler running (checking every {interval}s) — Ctrl-C to stop[/]")
@@ -930,6 +1244,7 @@ async def _scheduler(settings: Settings, interval: int) -> None:
     except (KeyboardInterrupt, asyncio.CancelledError):
         daemon.stop()
     finally:
+        await runtime.aclose()
         await kernel.close()
 
 
@@ -1328,17 +1643,16 @@ async def _daemon(settings: Settings) -> None:
     from sali.twin.daemon import TwinDaemon
 
     kernel = Kernel.create(settings)
+    # Use the shared runtime — daemon goes through submit_background(),
+    # which uses the same AgentLoop but does NOT acquire the foreground lease.
+    runtime = await kernel.runtime(confirmer=AutoDenyConfirmer())
     pool = await kernel.pool()
-    # Scheduled turns run unattended → AutoDeny so a destructive step is skipped, not left hanging.
-    loop = await kernel.agent_loop(confirmer=AutoDenyConfirmer())
-    # §14/§15: the daemon's autonomous turns (attention-driven investigations, scheduled jobs) run in a
-    # SEPARATE conversation from Almir's terminal session — so a background port/socket investigation
-    # never writes `ss` into the user's history and can't hijack the referent of a later "run it".
+    # §14/§15: the daemon's autonomous turns run in a SEPARATE conversation.
     session = background_session_id()
 
     class _LoopRunner:
         async def run(self, prompt: str) -> Any:
-            return await loop.run(prompt, session_id=session)
+            return await runtime.submit_background(prompt, session_id=session)
 
     scheduler = SchedulerDaemon(ScheduleStore(pool), _LoopRunner(), pool=pool, poll_s=30.0)
     twin = TwinDaemon(_twin_service(pool, settings), interval=300.0,
@@ -1407,7 +1721,7 @@ async def _daemon(settings: Settings) -> None:
         scheduler.stop()
         stop.set()
         await bus.stop()
-        await loop.aclose()
+        await runtime.aclose()
         await kernel.close()
 
 
@@ -1519,6 +1833,8 @@ def chat(think: bool = typer.Option(False, "--think", help="Show the model's rea
 
 
 async def _chat(settings: Settings, think: bool) -> None:
+    from rich.markdown import Markdown
+
     from sali.provider.base import ChatMessage
     from sali.provider.registry import build_provider
 
@@ -1537,5 +1853,5 @@ async def _chat(settings: Settings, think: bool) -> None:
         result = await provider.chat(history, think=think)
         if think and result.thinking:
             console.print(f"[dim]{result.thinking.strip()}[/]")
-        console.print(result.content.strip())
+        console.print(Markdown(result.content.strip()))
         history.append(ChatMessage(role="assistant", content=result.content))

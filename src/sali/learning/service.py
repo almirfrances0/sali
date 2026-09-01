@@ -77,8 +77,8 @@ class LearningService:
             finally:
                 await conn.execute("SELECT pg_advisory_unlock($1)", _CONSOLIDATE_LOCK)
         await embed_worker.embed_pending(self.pool, self.provider)  # make the new memories usable
-        log.info("consolidated", procedures=len(procedures), outcomes=outcomes, failures=failures,
-                 episodes=episodes, pruned=pruned, tool_experiences=len(experiences))
+        log.debug("consolidated", procedures=len(procedures), outcomes=outcomes, failures=failures,
+                  episodes=episodes, pruned=pruned, tool_experiences=len(experiences))
         return ConsolidationResult(procedures=procedures, failures_recorded=failures,
                                    episodes_created=episodes, stm_pruned=pruned,
                                    tool_experiences=len(experiences))

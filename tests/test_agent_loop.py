@@ -13,7 +13,7 @@ from sali.provider.base import ChatResult, ToolCall
 from sali.provider.fake import FakeModelProvider
 from sali.retrieval.service import RetrievalService
 from sali.runtime import pending
-from sali.runtime.loop import _EMPTY_FALLBACK, _MAX_TOOL_FAILURES, AgentLoop
+from sali.runtime.loop import _EMPTY_FALLBACK, _KEEP_RECENT, _MAX_TOOL_FAILURES, AgentLoop
 from sali.security.confirm import AutoAllowConfirmer
 from sali.security.policy import PolicyEngine
 from sali.tools.registry import default_registry
@@ -326,7 +326,8 @@ async def test_repeated_failing_tool_is_circuit_broken(live_pool: Any) -> None:
         responses=[
             ChatResult("", None, [bad], 3, 2, "fake"),   # 1st dispatch → fails
             ChatResult("", None, [bad], 3, 2, "fake"),   # 2nd dispatch → fails
-            ChatResult("", None, [bad], 3, 2, "fake"),   # 3rd → circuit-broken, NOT dispatched
+            ChatResult("", None, [bad], 3, 2, "fake"),   # 3rd dispatch → fails
+            ChatResult("", None, [bad], 3, 2, "fake"),   # 4th → circuit-broken, NOT dispatched
             ChatResult("That folder isn't there — I'll answer from what I already know.", None, [], 3, 3, "fake"),
             ChatResult("DONE", None, [], 1, 1, "fake"),   # self-judge on the tool_calls>0 final reply
         ]
@@ -620,7 +621,7 @@ async def test_conversation_compacts_when_long(db_conn: Any) -> None:
 
     session = new_id()
     await db_conn.execute("INSERT INTO conversation (id) VALUES ($1)", session)
-    for i in range(30):
+    for i in range(50):
         await db_conn.execute(
             "INSERT INTO message (conversation_id, seq, role, content) VALUES ($1,$2,$3,$4)",
             session, i + 1, "user" if i % 2 == 0 else "assistant", f"turn number {i}",
@@ -632,10 +633,10 @@ async def test_conversation_compacts_when_long(db_conn: Any) -> None:
         "SELECT summary, summary_through_seq FROM conversation WHERE id=$1", session
     )
     assert conv["summary"] is not None
-    assert conv["summary_through_seq"] == 30 - 6  # kept the last 6 verbatim
+    assert conv["summary_through_seq"] == 50 - _KEEP_RECENT  # kept the last N verbatim
     history = await loop._load_history(db_conn, session)
     assert history[0][0] == "earlier"  # the running summary leads the history
-    assert len(history) <= 9  # summary + at most 8 recent
+    assert len(history) <= 14  # summary + at most 12 recent
 
 
 async def test_compaction_packet_carries_active_task_deterministically(live_pool: Any) -> None:
@@ -649,7 +650,7 @@ async def test_compaction_packet_carries_active_task_deterministically(live_pool
     session = new_id()
     async with live_pool.acquire() as c:
         await c.execute("INSERT INTO conversation (id) VALUES ($1)", session)
-        for i in range(30):
+        for i in range(50):
             await c.execute(
                 "INSERT INTO message (conversation_id, seq, role, content) VALUES ($1,$2,$3,$4)",
                 session, i + 1, "user" if i % 2 == 0 else "assistant", f"turn {i}",
@@ -764,10 +765,10 @@ async def test_pending_action_survives_compaction(live_pool: Any) -> None:
     await _loop(live_pool, FakeModelProvider(responses=[
         ChatResult("Do:\n```\ngit --version\n```", None, [], 3, 3, "fake")])).run(
         "help me here", session_id=session)
-    # bury the proposal under a long stretch and compact past the verbatim window (_COMPACT_AFTER=24)
+    # bury the proposal under a long stretch and compact past the verbatim window
     loop = _loop(live_pool, FakeModelProvider())
     async with live_pool.acquire() as c:
-        for i in range(30):
+        for i in range(45):
             await c.execute(
                 "INSERT INTO message (conversation_id, seq, role, content) VALUES "
                 "($1, (SELECT coalesce(max(seq),0)+1 FROM message WHERE conversation_id=$1), $2, $3)",
