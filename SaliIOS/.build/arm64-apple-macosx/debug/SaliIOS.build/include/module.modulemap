@@ -1,0 +1,3 @@
+module SaliIOS {
+    header "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/include/SaliIOS-Swift.h"
+}

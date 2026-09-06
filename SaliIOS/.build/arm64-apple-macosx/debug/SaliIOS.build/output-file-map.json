@@ -1,0 +1,215 @@
+{
+  "": {
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/primary.swiftdeps"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/App/AppState.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/AppState.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/AppState.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/AppState~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/AppState.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/AppState.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/App/RootView.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/RootView.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/RootView.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/RootView~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/RootView.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/RootView.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/App/SaliApp.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SaliApp.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SaliApp.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SaliApp~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SaliApp.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SaliApp.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Core/Auth/AuthService.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/AuthService.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/AuthService.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/AuthService~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/AuthService.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/AuthService.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Core/Auth/Keychain.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/Keychain.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/Keychain.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/Keychain~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/Keychain.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/Keychain.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Core/Auth/TokenStore.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/TokenStore.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/TokenStore.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/TokenStore~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/TokenStore.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/TokenStore.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Core/Config/APIEnvironment.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/APIEnvironment.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/APIEnvironment.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/APIEnvironment~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/APIEnvironment.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/APIEnvironment.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Core/Networking/APIClient.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/APIClient.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/APIClient.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/APIClient~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/APIClient.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/APIClient.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Core/Networking/APIError.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/APIError.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/APIError.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/APIError~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/APIError.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/APIError.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Core/Realtime/SaliEvent.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SaliEvent.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SaliEvent.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SaliEvent~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SaliEvent.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SaliEvent.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Core/WebSocket/WebSocketClient.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/WebSocketClient.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/WebSocketClient.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/WebSocketClient~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/WebSocketClient.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/WebSocketClient.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/DesignSystem/Components.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/Components.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/Components.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/Components~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/Components.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/Components.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/DesignSystem/Theme.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/Theme.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/Theme.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/Theme~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/Theme.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/Theme.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Features/Activity/ActivityView.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/ActivityView.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/ActivityView.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/ActivityView~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/ActivityView.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/ActivityView.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Features/Chat/ChatView.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/ChatView.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/ChatView.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/ChatView~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/ChatView.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/ChatView.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Features/Chat/ChatViewModel.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/ChatViewModel.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/ChatViewModel.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/ChatViewModel~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/ChatViewModel.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/ChatViewModel.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Features/Chat/CodeBlockView.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/CodeBlockView.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/CodeBlockView.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/CodeBlockView~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/CodeBlockView.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/CodeBlockView.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Features/Chat/MarkdownText.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/MarkdownText.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/MarkdownText.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/MarkdownText~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/MarkdownText.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/MarkdownText.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Features/Learning/LearningView.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/LearningView.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/LearningView.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/LearningView~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/LearningView.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/LearningView.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Features/Life/LifeView.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/LifeView.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/LifeView.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/LifeView~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/LifeView.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/LifeView.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Features/Memory/MemoryView.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/MemoryView.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/MemoryView.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/MemoryView~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/MemoryView.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/MemoryView.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Features/Notifications/NotificationsView.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/NotificationsView.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/NotificationsView.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/NotificationsView~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/NotificationsView.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/NotificationsView.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Features/Notifications/PushManager.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/PushManager.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/PushManager.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/PushManager~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/PushManager.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/PushManager.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Features/Onboarding/OnboardingView.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/OnboardingView.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/OnboardingView.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/OnboardingView~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/OnboardingView.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/OnboardingView.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Features/Settings/DevicesView.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/DevicesView.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/DevicesView.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/DevicesView~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/DevicesView.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/DevicesView.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Features/Settings/SettingsView.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SettingsView.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SettingsView.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SettingsView~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SettingsView.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SettingsView.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Features/System/SystemView.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SystemView.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SystemView.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SystemView~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SystemView.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SystemView.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Features/Tasks/TaskDetailView.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/TaskDetailView.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/TaskDetailView.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/TaskDetailView~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/TaskDetailView.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/TaskDetailView.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Features/Tasks/TasksView.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/TasksView.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/TasksView.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/TasksView~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/TasksView.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/TasksView.dia"
+  },
+  "/Users/almir/Desktop/ios/SaliIOS/Models/DomainModels.swift": {
+    "dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/DomainModels.d",
+    "object": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/DomainModels.swift.o",
+    "swiftmodule": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/DomainModels~partial.swiftmodule",
+    "swift-dependencies": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/DomainModels.swiftdeps",
+    "diagnostics": "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/DomainModels.dia"
+  }
+}

@@ -1,0 +1,78 @@
+name: Sali
+options:
+  bundleIdPrefix: com.salieno
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "17.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    # Device builds sign with your Apple Development team; the Simulator ignores signing.
+    # (CLI simulator builds can still pass CODE_SIGNING_ALLOWED=NO to skip it entirely.)
+    DEVELOPMENT_TEAM: "STB6KS2388"
+    CODE_SIGN_STYLE: "Automatic"
+targets:
+  Sali:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: SaliIOS/App
+      - path: SaliIOS/Core
+      - path: SaliIOS/DesignSystem
+      - path: SaliIOS/Models
+      - path: SaliIOS/Features
+      - path: SaliIOS/Assets.xcassets
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.salieno.sali
+        PRODUCT_NAME: Sali
+        ASSETCATALOG_COMPILER_APPICON_NAME: "AppIcon"
+        # Without this, every UIKit-backed control (pickers, toggles, swipe actions, text
+        # selection) tints system BLUE in a strictly monochrome app. AccentColor.colorset
+        # carries light 0x0B0B0C / dark 0xF5F5F6 — the same adaptive ink as Theme.Colors.accent.
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: "AccentColor"
+        GENERATE_INFOPLIST_FILE: "YES"
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "5.9"
+        DEVELOPMENT_TEAM: "STB6KS2388"
+        CODE_SIGN_STYLE: "Automatic"
+        # GENERATE_INFOPLIST_FILE flips to NO because we now need dict-typed Info.plist keys
+        # (NSAppTransportSecurity for the narrow LAN ATS exception) which build settings can't
+        # express. The full plist is authored below in `info` — Xcodegen writes it at `info.path`.
+        GENERATE_INFOPLIST_FILE: "NO"
+    info:
+      # The whole Info.plist is expressed here so LAN-discovery keys (Bonjour + Local Network +
+      # ATS exception) sit next to their narrative rather than being scattered across build
+      # settings and a partial dict.
+      path: SaliIOS/App/Info.plist
+      properties:
+        # ── App-level (unchanged, moved from INFOPLIST_KEY_*) ─────────────────────────────────
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        "UISupportedInterfaceOrientations~ipad":
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # ── LAN discovery (Bonjour) ────────────────────────────────────────────────────────────
+        # The user-facing prompt when iOS asks for Local Network access. State WHY, not what,
+        # so a normal user can make an informed decision. Denial is handled gracefully by the
+        # ConnectionManager — the app still works over Cloudflare/Remote.
+        NSLocalNetworkUsageDescription: "Sali looks for your PC on this Wi-Fi so your iPhone can talk to it directly. It is faster and works even when your Internet is down. If you say no, Sali still works over the Internet."
+        # Which Bonjour service types the app is allowed to browse. Sali advertises `_sali._tcp`
+        # (see src/sali/net/mdns.py). Nothing else — a minimal declaration.
+        NSBonjourServices:
+          - "_sali._tcp"
+        # ATS exception — the narrowest possible: allows cleartext ONLY to local-network hosts
+        # (RFC 1918, link-local, `.local` names). Public Internet still requires HTTPS. The
+        # security model is bearer-token, not transport-based, so this is safe.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
