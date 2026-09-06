@@ -10,6 +10,7 @@ distinction is mechanical, never a prompt. It lets Sali say "I observed this" vs
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 
 from sali.core.enums import MemoryLayer, MemorySource, is_observation
@@ -28,6 +29,35 @@ class KnowledgeType(StrEnum):
 
 
 _LOW_CONFIDENCE = 0.5
+
+# CAN SALI SETTLE THIS BY LOOKING AT HIS OWN MACHINE?
+#
+# This lived privately in runtime/loop.py, where only the `remember` tool could reach it — so the
+# memory WRITER, which every other path goes through, had no way to ask the question. The result was
+# measurable: of 73 live memories, ZERO carried needs_grounding, while 52 of them contained plainly
+# checkable content ("this machine", "installed", "/home/...", "running"). The background grounding
+# faculty has been waking every five minutes to verify a belief, and finding an empty set every time.
+#
+# It sits here because it is an EPISTEMIC question, not a runtime one: it says what KIND of claim this
+# is, which is exactly what the rest of this module is for.
+_CHECKABLE_RE = re.compile(
+    r"(/home/|/usr/|/etc/|/var/|~/|\b(installed|running|version|uptime|listening|configured)\b|"
+    r"\bthis (machine|pc|computer|host|box|laptop|server)\b|\bon (this|the) (machine|box|host)\b|"
+    r"\b(you|i|we) (use|run|have|installed)\b|\b(gpu|cpu|ram|vram|disk|port|service|daemon|container)\b|"
+    # Naming the tool someone works with is the single most common checkable claim in this
+    # conversation, and the original pattern caught none of it: "your preferred code editor is Neovim"
+    # was stored, recalled and repeated for turns on end while `nvim` was not on the machine at all.
+    r"\b(editor|browser|terminal|shell|ide|compiler|runtime|database)\b)",
+    re.IGNORECASE,
+)
+
+
+def looks_checkable(content: str) -> bool:
+    """Could Sali confirm or falsify this by inspecting the machine he lives on?
+
+    Deliberately broad. A false positive costs one background look, which is cheap and settles the
+    matter; a false negative means a belief he could have checked stays unchecked forever."""
+    return bool(_CHECKABLE_RE.search(content or ""))
 
 _STATUS: dict[KnowledgeType, str] = {
     KnowledgeType.OBSERVATION: "I directly observed this",

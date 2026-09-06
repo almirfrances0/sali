@@ -1,0 +1,93 @@
+"""Confabulation-under-ignorance — FLAG-ONLY (§ Phase 4, epistemic humility).
+
+Sali couldn't find TanzHost's owner, so it INVENTED "Alfred Mrema" instead of saying "I couldn't find
+it." The five grounding families (verify/response_claims) cover Sali's OWN operational claims; a bare
+external-world fact — "the owner is Alfred Mrema" — matches none of them, and the state family can only
+probe the LOCAL machine, never an external owner. This detector RECORDS (never rewrites) when Sali names
+a specific proper-noun entity as the ANSWER to a lookup that RAN this turn yet did not contain that name.
+
+Precision-first, and deliberately narrow: it fires ONLY when a lookup tool actually ran this turn (so a
+plain general-knowledge answer, with no lookup, is never touched) AND the named entity is absent from
+every lookup result — the exact "I searched, found nothing, and made up a name" shape.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Any
+
+# Roles whose value is a looked-up person/organisation — the shape of an external fact Sali reports.
+# Authorship roles (author/creator) are deliberately EXCLUDED: "the author is Charles Dickens" is
+# parametric general knowledge, not a failed-lookup fabrication, and firing on it is a false positive.
+_ROLE = (r"owner|registrant|ceo|founder|co-?founder|director|president|manager|proprietor"
+         r"|holder|contact|registrar|host(?:ing\s+provider)?|company|organi[sz]ation")
+# A proper name: 1-4 capitalised words. Case-SENSITIVE on purpose (a real name is capitalised).
+_NAME = r"[A-Z][a-zA-Z'’.\-]+(?:\s+[A-Z][a-zA-Z'’.\-]+){0,3}"
+
+_FRAME_RE = re.compile(
+    rf"(?i:\b(?:{_ROLE})\b)[^.\n]{{0,45}}?(?i:\b(?:is|are|was|were|:|named|called)\s+)(?P<n>{_NAME})"
+    rf"|(?i:\b(?:i\s+found|the\s+answer\s+is|it['’]s|turns\s+out\s+(?:it['’]s|the|that)))"
+    rf"[^.\n]{{0,30}}?(?P<n2>{_NAME})")
+
+# Capitalised words that are not names (sentence-openers, honest hedges) — never treat as an entity.
+_STOP = frozenset({
+    "the", "it", "he", "she", "they", "there", "this", "that", "i", "we", "you", "a", "an",
+    "actually", "unfortunately", "sorry", "however", "based", "according", "unknown", "unclear",
+    "no", "none", "nobody", "nothing", "unable", "couldn", "can", "sadly"})
+
+# Temporal / calendar / holiday words are conversational fillers, NEVER looked-up entities: after a
+# lookup runs, "it's Monday", "turns out it's Christmas" must not read as an invented lookup answer.
+_TEMPORAL = frozenset({
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "january", "february", "march", "april", "may", "june", "july", "august",
+    "september", "october", "november", "december",
+    "today", "tomorrow", "yesterday", "tonight",
+    "christmas", "easter", "thanksgiving", "halloween", "hanukkah", "ramadan", "eid"})
+
+# An honest no-answer: if the reply denies having found anything, there is no fabricated answer to flag.
+_DENIAL = (
+    "found nothing", "no results", "nothing on", "couldn't find", "couldn’t find",
+    "can't find", "can’t find", "no such", "not found")
+
+
+def _entity_ok(name: str) -> bool:
+    """A plausible looked-up entity: >=2 capitalised words, OR one word of >=4 chars not a stop-word.
+    Temporal/holiday fillers (Monday, December, Christmas, Tonight) are never looked-up entities."""
+    parts = name.split()
+    if any(p.lower() in _STOP or p.lower() in _TEMPORAL for p in parts):
+        return False
+    return len(parts) >= 2 or (len(parts) == 1 and len(parts[0]) >= 4)
+
+
+def find_confabulations(reply: str, lookup_content: str, *, lookup_ran: bool) -> list[dict[str, Any]]:
+    """Named entities the reply presents as a looked-up answer that appear in NO lookup result this turn.
+    Empty unless a lookup ran (so general knowledge is never flagged). Returns {entity, sentence}."""
+    if not lookup_ran or not reply:
+        return []
+    # An honest denial in the REPLY (never the lookup content) is the humble no-answer path — nothing
+    # was asserted as an answer, so there is nothing to flag. Checked on `reply` so "I found the owner
+    # - it is Alfred Mrema." (whose LOOKUP content happens to read "no results found") is still caught.
+    reply_low = reply.lower()
+    if any(d in reply_low for d in _DENIAL):
+        return []
+    hay = (lookup_content or "").lower()
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for m in _FRAME_RE.finditer(reply):
+        name = (m.group("n") or m.group("n2") or "").strip(" .'’-")
+        if not name or name.lower() in seen or not _entity_ok(name):
+            continue
+        # if the whole name, or any distinctive (>=4 char) token of it, appears as a WHOLE WORD in the
+        # lookup content, it is grounded — not a confabulation. Word-boundary (not bare substring) so a
+        # fabricated "Erica" is not masked by an unrelated "America" in the lookup results.
+        toks = [t for t in re.split(r"\s+", name.lower()) if len(t) >= 4]
+        if any(re.search(rf"\b{re.escape(t)}\b", hay) for t in (name.lower(), *toks)):
+            continue
+        seen.add(name.lower())
+        _sent = next((s.strip() for s in re.split(r"(?<=[.!?\n])\s+", reply)
+                      if name in s), name)
+        out.append({"entity": name, "sentence": _sent[:240]})
+    return out
+
+
+__all__ = ["find_confabulations"]

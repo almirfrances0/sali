@@ -25,6 +25,10 @@ _STATUS_CONF: dict[str, float] = {
 _STATUS_RANK = {s: i for i, s in enumerate(
     ("unknown", "researched", "attempted", "successful", "verified", "available"))}
 
+# Consecutive failed USES that mark a capability degraded. A single failure is a blip (a bad argument, a
+# busy host); three in a row is the capability itself being broken. History is preserved either way.
+_DEGRADE_AFTER = 3
+
 
 def _confidence(status: str, succ: int, fail: int) -> float:
     base = _STATUS_CONF.get(status, 0.1)
@@ -32,6 +36,40 @@ def _confidence(status: str, succ: int, fail: int) -> float:
     if attempts:
         base += 0.1 * (succ / attempts) - 0.1 * (fail / attempts)
     return round(max(0.05, min(0.99, base)), 3)
+
+
+# ── FUZZY NAME MATCH: the anti-relearn cornerstone ─────────────────────────────────────────
+#
+# Almir's requirement (§7): "Sali should not repeatedly rediscover the same capability." The naming
+# model — one inference per completed task — produces natural short names, and two semantically
+# identical objectives can yield different words: "create python archive script" one day, "write
+# python archive script" the next. `observe()` uniques on the exact string, so both landed as
+# separate rows. Live proof from the DB before this fix: three separate rows for the same skill,
+# each with its own use_count that never accumulated on one row.
+#
+# The normaliser strips the leading verb (create / write / make / build / generate / produce / set /
+# configure / set-up) that carries no distinguishing meaning, drops stopwords ("a / the / one"),
+# lowercases, and joins the remaining tokens. Two capabilities whose normalised forms match are the
+# same skill and reuse the same row.
+
+_VERB_SYNONYMS = frozenset({
+    "create", "make", "build", "generate", "produce", "write", "set", "setup", "configure",
+    "install", "add", "compose", "assemble", "prepare",
+})
+_STOPWORDS = frozenset({"a", "an", "the", "one", "some", "any", "to", "for", "of", "with", "in", "on"})
+
+
+def _normalise_name(name: str) -> str:
+    """Two rows with the same normalised form are the SAME skill. Kept deliberately conservative -
+    a false merge (two distinct skills collapsed) is worse than a false split (the old behaviour),
+    because a merge cannot be undone from data and would attribute one skill's failures to another."""
+    tokens = [t for t in (name or "").lower().split() if t and t not in _STOPWORDS]
+    # Strip the leading verb ("create X", "write X") and its trailing preposition when the phrase
+    # is verb+prep ("set up X" - "up" carries no distinguishing meaning here). Doing the two-token
+    # peel is what makes "configure an nginx vhost" and "set up an nginx vhost" match.
+    while tokens and (tokens[0] in _VERB_SYNONYMS or tokens[0] in {"up", "out", "together"} and len(tokens) > 1):
+        tokens = tokens[1:]
+    return " ".join(tokens)
 
 
 class CapabilityStore:
@@ -58,6 +96,41 @@ class CapabilityStore:
                     "UPDATE capability SET status=$2, confidence=$3, supported_by = supported_by || $4::jsonb, "
                     "  updated_at=now() WHERE id=$1", existing["id"], new_status, conf, supported_by or {})
                 return UUID(str(existing["id"]))
+            # ANTI-RELEARN. Before inserting a new row, check whether an existing capability in the
+            # same scope IS THE SAME SKILL under a differently-worded name. The naming model varies its
+            # verb ("create/write/build") and picks slightly different phrasings for objectives that
+            # describe the same work - and observe() uniqued on the exact string, so semantically
+            # identical skills landed as separate rows and never accumulated evidence on one.
+            #
+            # If a match is found: reuse THAT row. Its use_count, its acquisition history, its
+            # verified status all continue accruing on the one capability instead of scattering across
+            # near-duplicates.
+            target = _normalise_name(name)
+            if target:
+                sibling = await conn.fetchrow(
+                    "SELECT id, name, status, times_succeeded, times_failed FROM capability "
+                    "WHERE scope=$1 AND coalesce(scope_ref,'')=coalesce($2,'') AND name <> $3",
+                    scope, scope_ref, name)
+                # Cheap: fetch and normalise per-row, one-by-one, only inside a scope. A scope
+                # typically holds fewer than a few hundred capabilities so this is bounded and fast.
+                # A future indexed lookup on a stored normalised column can replace this if it ever
+                # becomes hot.
+                candidates = await conn.fetch(
+                    "SELECT id, name, status, times_succeeded, times_failed FROM capability "
+                    "WHERE scope=$1 AND coalesce(scope_ref,'')=coalesce($2,'')",
+                    scope, scope_ref)
+                match = next((r for r in candidates if _normalise_name(r["name"]) == target), None)
+                if match is not None:
+                    new_status = self._max_status(match["status"], status)
+                    conf = _confidence(new_status, match["times_succeeded"], match["times_failed"])
+                    await conn.execute(
+                        "UPDATE capability SET status=$2, confidence=$3, "
+                        "  supported_by = supported_by || $4::jsonb, updated_at=now() WHERE id=$1",
+                        match["id"], new_status, conf, supported_by or {})
+                    await self._emit("capability.merged",
+                                     {"capability_id": str(match["id"]),
+                                      "kept_name": match["name"], "coined": name})
+                    return UUID(str(match["id"]))
             cid = uuid4()
             await conn.execute(
                 "INSERT INTO capability (id, name, status, scope, scope_ref, confidence, supported_by) "
@@ -101,15 +174,26 @@ class CapabilityStore:
         (generalization needs more evidence, §31/§49). Points at the experience + procedure that back it."""
         if record.get("evidence_state") != "verified" or not record.get("procedure"):
             return None
-        name = (record.get("objective") or "").strip()[:120]
+        # The reusable SKILL name when the experience layer could derive one, the objective only as a
+        # last resort. Naming a capability after its objective is what made every capability unmatchable.
+        name = (record.get("capability_name") or record.get("objective") or "").strip()[:120]
         if not name:
             return None
         scope_ref = record.get("scope_ref") or "local"
         supported = {"experiences": [record.get("memory_id")] if record.get("memory_id") else [],
                      "procedures": [record.get("procedure")], "research": record.get("research", [])}
-        return await self.record_attempt(
+        cap_id = await self.record_attempt(
             name=name, success=True, verified=True, scope="environment", scope_ref=scope_ref,
             supported_by=supported)
+        # Keep the human sentence too: the NAME has to be stable enough to match again, so the concrete
+        # thing that was actually accomplished lives in `purpose` where a person can read it. This is
+        # what `set_purpose` was written for and it had no caller.
+        objective = (record.get("objective") or "").strip()
+        if cap_id is not None and objective and objective[:120] != name:
+            with contextlib.suppress(Exception):
+                await self.set_purpose(name=name, purpose=objective[:400],
+                                       scope="environment", scope_ref=scope_ref)
+        return cap_id
 
     async def get(self, *, name: str, scope: str = "environment", scope_ref: str | None = None) -> dict[str, Any] | None:
         async with self._pool.acquire() as conn:
@@ -153,9 +237,33 @@ class CapabilityStore:
             await conn.execute(
                 "UPDATE capability SET last_used=now(), use_count=use_count+1, "
                 "  status = CASE WHEN $2 AND $3 AND status='verified' THEN 'available' ELSE status END, "
-                "  last_verified = CASE WHEN $3 THEN now() ELSE last_verified END, updated_at=now() "
+                "  last_verified = CASE WHEN $3 THEN now() ELSE last_verified END, "
+                "  times_failed = times_failed + CASE WHEN $2 THEN 0 ELSE 1 END, updated_at=now() "
                 "WHERE id=$1", got["id"], success, verified)
+            # A failed use is negative evidence and must MOVE the number, or a capability that has since
+            # broken stays advertised at confidence 0.9 forever. times_succeeded is deliberately NOT
+            # incremented here: record_attempt already counts the success at acquisition, and counting
+            # the same task twice would inflate the ratio the confidence is derived from.
+            row = await conn.fetchrow(
+                "SELECT status, times_succeeded, times_failed FROM capability WHERE id=$1", got["id"])
+            await conn.execute(
+                "UPDATE capability SET confidence=$2 WHERE id=$1", got["id"],
+                _confidence(row["status"], row["times_succeeded"], row["times_failed"]))
+            recent = await conn.fetch(
+                "SELECT success FROM capability_usage WHERE capability_id=$1 "
+                "ORDER BY created_at DESC LIMIT $2", got["id"], _DEGRADE_AFTER)
         await self._emit("capability.used", {"name": name, "success": success, "verified": verified})
+        # The loop that makes 'available' mean something today rather than on the day it was learned:
+        # _DEGRADE_AFTER consecutive failed uses degrade it, and a later success restores it. Without
+        # this the failure evidence above is inert — written, then never read by anything.
+        if (not success and len(recent) >= _DEGRADE_AFTER
+                and not any(r["success"] for r in recent)
+                and got["status"] not in ("degraded", "deprecated")):
+            await self.degrade(
+                name=name, scope=scope, scope_ref=scope_ref,
+                reason=f"failed {_DEGRADE_AFTER} uses in a row; last: {(result or '')[:80]}")
+        elif success and got["status"] in ("degraded", "deprecated"):
+            await self.restore(name=name, scope=scope, scope_ref=scope_ref, verified=verified)
         return True
 
     async def usage_history(self, *, name: str, scope: str = "environment",

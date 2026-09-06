@@ -76,6 +76,24 @@ class MessageInbox:
         await self._emit("message.dequeued", msg)
         return msg
 
+    async def claim_next_queued(self) -> InboxMessage | None:
+        """Claim the oldest QUEUE_FOR_LATER message (the after-you-finish queue) — same exactly-once
+        contract as claim_next, but scoped to deferred messages so it can never steal a message the
+        live routing path is about to handle inline (audit: these rows were persisted, classified,
+        and then never acted on by anything)."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "UPDATE incoming_message SET status='processing', claimed_at=now() "
+                "WHERE id = (SELECT id FROM incoming_message WHERE status='pending' "
+                "  AND classification='queue_for_later' "
+                "  ORDER BY priority_rank(priority) DESC, created_at ASC "
+                "  FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *")
+        if row is None:
+            return None
+        msg = _row(row)
+        await self._emit("message.dequeued", msg)
+        return msg
+
     async def complete(
         self, message_id: UUID, *, run_id: UUID | None = None, classification: str | None = None
     ) -> None:

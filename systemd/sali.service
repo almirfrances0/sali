@@ -1,0 +1,47 @@
+# THE Sali. One machine, one of these, ever.
+#
+# This unit starts the single living organism: one Kernel, one AgentRuntime, one AgentLoop, one
+# cognitive coordinator, one inference path. His faculties (scheduler, twin, perception, syswatch,
+# proactive, investigate, learning) and his windows (REST + WebSocket, on 127.0.0.1:8080, for the
+# iPhone app and `sali agent`) all live inside THIS process and share THAT one runtime.
+#
+# Starting a second Sali is not prevented by this file — it is prevented by the runtime itself
+# (`sali.core.mind` takes a machine-wide flock, `sali.db.mind_lock` takes a PostgreSQL advisory
+# lock), so a stray `sali daemon`, a hand-run copy or a half-finished restart fails safely instead
+# of becoming a second mind. systemd exclusivity is a convenience here, not the guarantee.
+#
+#   sudo cp systemd/sali.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now sali
+#   sali status                 # who is THE Sali, and what the GPU is really holding
+#   sali agent                  # a window onto him — loads no second model
+#
+# There is deliberately no second unit for the API: an "API Sali" alongside this one would be a
+# second mind. `sali serve` exists only for the case where this unit is NOT running.
+[Unit]
+Description=Sali — the one living mind on this machine
+Documentation=file:/home/almir/Desktop/sali/docs/ONE-MIND.md
+After=network-online.target postgresql.service ollama.service sali-power-envelope.service
+Wants=network-online.target
+# Never load the model before the power envelope is applied. A 35B MoE prefill runs every CPU core
+# and the GPU flat out at once; uncapped (255W CPU + 140W GPU) that collapsed the rail and powered
+# this machine off mid-turn on 2026-09-01. The runtime ALSO checks the caps itself and refuses to
+# start without them (sali.runtime.envelope) — this ordering just means it rarely has to.
+Requires=sali-power-envelope.service
+
+[Service]
+Type=simple
+User=almir
+WorkingDirectory=/home/almir/Desktop/sali
+Environment=DISPLAY=:0
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+ExecStart=/home/almir/Desktop/sali/.venv/bin/sali daemon
+Restart=on-failure
+RestartSec=5
+# A restart must find the machine free. Both mind locks are released by the kernel and by
+# PostgreSQL the moment the process dies — including SIGKILL — so no cleanup is needed here and
+# no stale lock can ever block the next start.
+KillMode=mixed
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

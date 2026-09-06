@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from sali.core.enums import ExecAuthority
 from sali.core.toolvocab import CAPABILITY_VOCAB
+from sali.provider.presets import DETERMINISTIC
 from sali.provider.base import ChatMessage, ModelProvider
 from sali.twin.authority import classify_authority
 
@@ -23,7 +24,8 @@ _SYSTEM = (
     "- system_critical: can irreversibly destroy data, disks, or the system (mkfs, fdisk, dd, shred)\n"
     "Reply with ONLY that one word."
 )
-_OPTS = {"temperature": 0.0, "top_k": 1}
+# Brain-audit Turn 6: _OPTS deleted. Twin extractor uses preset=DETERMINISTIC by
+# design (structured JSON extractor needs stable output).
 
 
 def _parse_tier(answer: str) -> ExecAuthority | None:
@@ -42,7 +44,7 @@ async def _ask_model(provider: ModelProvider, name: str, synopsis: str) -> ExecA
     try:
         res = await provider.chat(
             [ChatMessage(role="system", content=_SYSTEM), ChatMessage(role="user", content=user)],
-            options=_OPTS)
+            preset=DETERMINISTIC)
     except Exception:  # noqa: BLE001 - interpretation is best-effort; fall back deterministically
         return None
     return _parse_tier(res.content or "")

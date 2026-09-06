@@ -14,6 +14,16 @@ from pydantic import BaseModel, Field
 
 # ── Conversation ──────────────────────────────────────────────────────────────
 
+class MessageAttachment(BaseModel):
+    """A file Sali sent, carried on a conversation message so it renders as a downloadable card and
+    survives a reload (durable delivery — a live-only card vanished on refresh)."""
+    artifact_id: str
+    filename: str
+    size: int | None = None
+    download_url: str
+    kind: str | None = None
+
+
 class ConversationMessage(BaseModel):
     id: UUID
     session_id: UUID
@@ -22,6 +32,7 @@ class ConversationMessage(BaseModel):
     content: str
     model: str | None = None
     created_at: datetime | None = None
+    attachment: MessageAttachment | None = None
 
 
 class ConversationState(BaseModel):
@@ -66,6 +77,14 @@ class TaskStepResponse(BaseModel):
     failure_class: str | None = None
     verified: bool = False
     checkpoint: dict[str, Any] | None = None
+    # seq of this step's parent, or None for a top-level step. Lets the app render real sub-steps
+    # instead of a flat list (migration 0045).
+    parent_seq: int | None = None
+    # Step-discipline (migration 0055): the step as a contract. definition_of_done is what "done"
+    # concretely means for this step (the engine verifies it); scope_excludes is what this step must
+    # NOT touch. The app shows these so the user can see the plan's real shape and the completion bar.
+    definition_of_done: str | None = None
+    scope_excludes: str | None = None
 
 
 class TaskResponse(BaseModel):
@@ -83,7 +102,24 @@ class TaskResponse(BaseModel):
     interrupted_at: datetime | None = None
     retry_count: int = 0
     max_retries: int = 3
+    # WHAT SALI IS DOING RIGHT NOW. Almir: "in the app tasks are not realtime i can't see what sali
+    # doing or where he's now". All of it was already recorded — `task_execution` has the tool, its
+    # outcome and a one-line result; a running `agent_runs` row means a turn is in flight — and none of
+    # it was served, so a task on iteration 13 looked exactly like a dead one: "1 step done", silence.
+    working: bool = False
+    current_step: int | None = None
+    last_tool: str | None = None
+    last_tool_status: str | None = None
+    last_detail: str | None = None
+    last_activity_at: datetime | None = None
     superseded_by: UUID | None = None
+    # Turn 7: backend-authoritative step counts. iOS renders these verbatim so the
+    # progress bar can never disagree with the auto-complete decision (both sourced
+    # from _compute_tally in tasks/store.py). Optional for API-compat during rollout.
+    done_steps: int | None = None
+    total_steps: int | None = None
+    verified_steps: int | None = None
+    skipped_steps: int | None = None
 
 
 class TaskListResponse(BaseModel):
@@ -130,10 +166,18 @@ class HealthResponse(BaseModel):
 
 class SendMessageRequest(BaseModel):
     content: str
+    image_ref: str | None = None    # absolute path returned by POST /api/v1/files (bounded to the
+                                    # conversation workspace); Sali describes it into the turn.
+    image_b64: str | None = None    # optional inline fallback for a tiny image (JSON body stays < 1 MB)
 
 
 class SendMessageResponse(BaseModel):
-    run_id: UUID
+    # None by design. The turn is dispatched to the runtime AFTER this 202 returns, so the real run id
+    # does not exist yet; the route used to invent one with new_id(), which clients then compared against
+    # the runtime's actual run_id (published on agent.run / agent.token) and never matched — silently
+    # defeating reconnect recovery. The run id now reaches clients only from the event stream, where it
+    # is true.
+    run_id: UUID | None = None
     status: str = "accepted"
 
 
@@ -173,6 +217,15 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+class LoginRequest(BaseModel):
+    """Password login (POST /auth/login). The password is the durable credential the app re-authenticates
+    with; `name` identifies the phone so repeated logins reuse one owner device row."""
+    password: str
+    name: str = "iPhone"
+    model: str | None = None
+    platform: str = "ios"
+
+
 class DeviceResponse(BaseModel):
     id: UUID
     name: str
@@ -190,3 +243,14 @@ class DeviceResponse(BaseModel):
 class PushTokenRequest(BaseModel):
     token: str
     environment: str = "production"  # sandbox | production
+
+
+class ScheduleCreateRequest(BaseModel):
+    name: str
+    when: str      # interval ('30m') or 5-field cron ('0 9 * * *')
+    prompt: str
+
+
+class RememberRequest(BaseModel):
+    content: str
+    layer: str = "semantic"   # semantic | preference | episodic | identity

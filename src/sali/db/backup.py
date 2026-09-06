@@ -16,7 +16,7 @@ import contextlib
 import os
 import shutil
 import subprocess
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +46,13 @@ def run_backup(settings: Any, dest: Path | None = None, *, keep: int = 7,
     (a backup that half-ran should be loud, not silent)."""
     dest = dest or default_dir()
     dest.mkdir(mode=0o700, parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")  # noqa: DTZ005 - local time is the right label here
+    # UTC, like every other instant in this system. The old comment argued local time was "the right
+    # label here", and on a host whose zone matches its owner that is arguable — but this host is set
+    # to America/New_York while Almir works in Africa/Dar_es_Salaam, so a backup labelled 13:00
+    # happened at 20:00 his time. Local time also repeats an hour every DST fall-back, which is a
+    # genuine collision for a filename that identifies a restore point. Same format, so the existing
+    # glob and the lexicographic-is-chronological rotation are unaffected.
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%SZ")
 
     # Dump to a temp sibling first, then atomically rename — so a failed/timed-out pg_dump never
     # leaves a truncated file under the real backup name (a restore must never find a corrupt dump).

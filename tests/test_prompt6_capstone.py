@@ -139,5 +139,6 @@ async def test_capstone_long_task_24k_budget(live_pool: Any) -> None:
 
     # ── invariants across the whole run ─────────────────────────────────────────────────────────────
     async with live_pool.acquire() as c:
-        n_tasks_with_id = await c.fetchval("SELECT count(*) FROM task WHERE id=$1", original_id)
-    assert n_tasks_with_id == 0  # archived, and there was only ever ONE task_id
+        row = await c.fetchrow("SELECT status, archived_at FROM task WHERE id=$1", original_id)
+    # Turn 1: the row STAYS after archive - there was only ever one task_id, and it is queryable.
+    assert row is not None and row["archived_at"] is not None

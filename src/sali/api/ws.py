@@ -20,6 +20,7 @@ Protocol:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import time
@@ -116,20 +117,39 @@ class ConnectionManager:
         return len(self._connections)
 
     async def broadcast(self, message: dict[str, Any]) -> None:
-        """Send a message to all connected clients, tracking the highest seq each has seen."""
+        """Send a message to all connected clients concurrently, tracking the highest seq each has seen.
+
+        Sends fan out with asyncio.gather + a per-client timeout so ONE slow reader (a phone on flaky
+        cellular whose TCP buffer is full) cannot back-pressure siblings on Wi-Fi nor stall the
+        runtime's astream loop that awaits this broadcast. Previous sequential-await path caused
+        every agent.token to serialize behind the slowest socket.
+        """
         payload = json.dumps(message, default=str)
         seq = message.get("sequence")
-        disconnected: list[UUID] = []
-        for client_id, ws in self._connections.items():
-            try:
-                await ws.send_text(payload)
-                self._last_activity[client_id] = time.time()
-                if isinstance(seq, int) and seq > self._last_event_seq.get(client_id, 0):
-                    self._last_event_seq[client_id] = seq
-            except Exception:  # noqa: BLE001
-                disconnected.append(client_id)
-        for cid in disconnected:
-            self.disconnect(cid)
+        snapshot = list(self._connections.items())
+        if not snapshot:
+            return
+        results = await asyncio.gather(
+            *(self._send_one_with_timeout(cid, ws, payload, seq) for cid, ws in snapshot),
+            return_exceptions=True,
+        )
+        for (cid, _), outcome in zip(snapshot, results, strict=False):
+            if outcome is False or isinstance(outcome, BaseException):
+                self.disconnect(cid)
+
+    async def _send_one_with_timeout(
+        self, client_id: UUID, ws: Any, payload: str, seq: Any, timeout: float = 5.0,
+    ) -> bool:
+        """Send to one client with a bounded wait. Returns True on success, False on failure/timeout.
+        A slow socket that would otherwise back-pressure the caller loses its slot after `timeout`."""
+        try:
+            await asyncio.wait_for(ws.send_text(payload), timeout=timeout)
+        except (TimeoutError, Exception):  # noqa: BLE001
+            return False
+        self._last_activity[client_id] = time.time()
+        if isinstance(seq, int) and seq > self._last_event_seq.get(client_id, 0):
+            self._last_event_seq[client_id] = seq
+        return True
 
     async def send_to(self, client_id: UUID, message: dict[str, Any]) -> bool:
         """Send a message to a specific client."""
@@ -278,7 +298,10 @@ async def handle_websocket(websocket: WebSocket, token: str | None = None, pool:
                     if isinstance(after_seq, int) and after_seq >= 0:
                         replayed = await manager.replay_since(client_id, after_seq, pool)
                     await manager.send_to(client_id, {
-                        "type": "subscribed", "channel": msg.get("channel"), "replayed": replayed})
+                        "type": "subscribed", "channel": msg.get("channel"), "replayed": replayed,
+                        # Audit: a gap larger than MAX_REPLAY was silently truncated — the client can
+                        # now see it and re-subscribe from its advanced watermark until caught up.
+                        "truncated": replayed >= MAX_REPLAY})
                 else:
                     log.debug("ws_unknown_message", client_id=str(client_id)[:8], type=msg_type)
             except json.JSONDecodeError:

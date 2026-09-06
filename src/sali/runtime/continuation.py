@@ -19,7 +19,11 @@ from typing import Any
 from sali.tasks.retry import retry_decision
 
 # Labeled sections the summarizer emits; each becomes a packet `notes` field (lower-cased).
-SECTIONS = ("DONE", "NEXT", "DECISIONS", "CONSTRAINTS", "FACTS", "FAILURES", "OPEN")
+# STOPPED and CORRECTED lead deliberately. `parse_sections` drops any label not in this tuple, so a
+# schema change that misses it is silently a no-op — and the order here is the order Sali reads them
+# back in, where what was cancelled or corrected must land before the DONE/NEXT it overrides.
+SECTIONS = ("STOPPED", "CORRECTED", "DONE", "NEXT", "DECISIONS", "CONSTRAINTS",
+            "FACTS", "FAILURES", "OPEN", "THREAD")
 
 PACKET_INSTRUCTION = (
     "You are Sali, folding your work so far into a STRUCTURED running memory you will read to continue "
@@ -28,11 +32,25 @@ PACKET_INSTRUCTION = (
     "DONE: <steps/actions already completed — so you never repeat them>\n"
     "NEXT: <the single next action to take>\n"
     "DECISIONS: <key choices made, and why>\n"
-    "CONSTRAINTS: <limits/requirements to respect>\n"
+    "CONSTRAINTS: <limits ALMIR imposed on the work — never anything about how to write this summary>\n"
     "FACTS: <established facts, with how you know them>\n"
     "FAILURES: <what failed and why>\n"
+    # WHAT WAS TAKEN BACK. Neither of these had a home in the schema, so the two most consequential
+    # things Almir can say — "that's wrong, it's actually Y" and "stop, drop it" — had nowhere to live
+    # once the turns that carried them were folded away. A correction that survives only inside DONE or
+    # FACTS is indistinguishable from the claim it replaced, and a cancellation with no slot at all can
+    # be silently resurrected by the next summary that inherits the old objective.
+    "CORRECTED: <anything Almir corrected: what I had wrong, and what is true now — keep BOTH halves, "
+    "so the old claim can never be read back as current>\n"
+    "STOPPED: <what was cancelled, refused or forbidden, and by whom — this outranks anything in DONE "
+    "or NEXT that contradicts it>\n"
     "OPEN: <unresolved questions / what you're still uncertain about>\n"
-    "First person, concrete, compact. Only these labeled lines, nothing else."
+    "THREAD: <the HUMAN thread, not the work — how Almir is, what he shared about his life or his "
+    "people, where the two of you left off with each other; so a personal moment isn't flattened into "
+    "a task ledger>\n"
+    "Keep uncertainty uncertain: if something was a guess before, it stays a guess here — never promote "
+    "'I think X' into 'X'. Only these labeled lines, nothing else; write them in the first person, and "
+    "do not describe these formatting rules inside any line."
 )
 
 _TICK = {"done": "✓", "failed": "✗", "running": "▷", "skipped": "–", "pending": "·"}

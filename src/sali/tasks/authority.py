@@ -9,6 +9,8 @@ The LLM must NOT decide which task is authoritative. The system does.
 
 from __future__ import annotations
 
+import contextlib
+
 import re
 from uuid import UUID
 
@@ -78,10 +80,24 @@ _RESUME_PATTERNS = re.compile(
 )
 
 
+# NEGATION FLIPS EVERY ONE OF THE PATTERNS ABOVE, and they are unanchored, so they matched inside the
+# opposite instruction: "don't forget that" hit `forget that` and "do not cancel that task" hit
+# `cancel that` — both cancelling the primary task Almir had just asked Sali to keep. This detector is
+# shared by TaskAuthority and the attention router, so the guard belongs here, once.
+_NEGATED_CANCEL = re.compile(
+    r"\b(?:don'?t|do\s+not|never|dont|no\s+need\s+to|rather\s+than)\s+(?:you\s+)?"
+    r"(?:stop|cancel|forget|drop|leave|abort|quit|halt|abandon|scrap)\b",
+    re.IGNORECASE,
+)
+
+
 def _detect_cancellation(user_input: str) -> str | None:
     """If the user explicitly asks to cancel/stop/drop a task, return the matched phrase.
     Returns None if no cancellation intent detected."""
-    m = _CANCEL_PATTERNS.search(user_input or "")
+    text = user_input or ""
+    if _NEGATED_CANCEL.search(text):
+        return None
+    m = _CANCEL_PATTERNS.search(text)
     return m.group(0) if m else None
 
 
@@ -102,6 +118,48 @@ def _detect_resume(user_input: str) -> str | None:
     m = _RESUME_PATTERNS.search(user_input or "")
     return m.group(0) if m else None
 
+
+
+
+# Turn 4: §15 follow-up detection - phrases that suggest the user is refining a
+# completed task rather than opening a new one. Deliberately narrow: modification
+# verbs ("make/change/update"), reference words ("it/that/the"), or "also/and/but"
+# combined with an imperative. Deliberately NOT here: full task-initiating phrases
+# ("build me a", "research X for me") - those are new tasks.
+_FOLLOWUP_HINT = re.compile(
+    r"^\s*("
+    r"make\s+(?:it|the|that|this)|"
+    r"change\s+(?:it|the|that|this)|"
+    r"update\s+(?:it|the|that|this)|"
+    r"fix\s+(?:it|the|that|this)|"
+    r"remove\s+(?:the|that|this)|"
+    r"add\s+(?:a|an|another|one\s+more|to\s+(?:it|the|that|this))|"
+    r"also(?:\s+(?:add|make|change|include|remove))?\b|"
+    r"(?:and|but)\s+(?:also|then|now)\s+|"
+    r"actually,?\s+(?:make|change|update)|"
+    r"can\s+you\s+(?:make|change|update|remove|add)\s+(?:it|the|that|this)|"
+    r"a?\s*bit\s+(?:smaller|bigger|larger|shorter|longer|wider)|"
+    r"(?:smaller|bigger|larger|shorter|longer|wider)\s+(?:please|now|too)|"
+    r"one\s+more\s+thing|"
+    r"forgot\s+to\s+mention"
+    r")",
+    re.IGNORECASE,
+)
+
+# Stopwords for coarse keyword overlap when scoring followups against parent objectives.
+_FOLLOWUP_STOP = frozenset({
+    "the","a","an","and","or","but","of","to","for","with","in","on","at","by","from","as",
+    "is","are","was","were","be","been","being","this","that","these","those","it","its","our",
+    "we","us","you","your","my","me","i","he","she","they","them","up","let","lets",
+    "make","change","update","fix","remove","add","also","actually","please","now","too","one",
+    "smaller","bigger","larger","shorter","longer","wider",
+})
+
+
+def _followup_keywords(text: str) -> set[str]:
+    """Content words for coarse similarity between a follow-up message and a parent objective."""
+    words = [w.strip(".,;:!?()[]{}\"'`").lower() for w in (text or "").split()]
+    return {w for w in words if w and len(w) >= 3 and w not in _FOLLOWUP_STOP}
 
 def _is_clearly_new_task(user_input: str, current_objective: str = "") -> bool:
     """Conservative heuristic: does this input look like a new independent task?
@@ -179,7 +237,13 @@ class TaskAuthority:
         # 1. Check for explicit cancellation.
         cancel_match = _detect_cancellation(user_input)
         if cancel_match and current is not None:
-            await self._store.cancel(current.id, reason=cancel_match)
+            # Turn 2 fix: revoke_intent (not bare store.cancel) so we get the durable tombstone,
+            # dependent-work propagation, and archive. Otherwise store.resume() would happily
+            # revive this task on "resume the previous task", and downstream commitments/goals
+            # linked to it would stay open with no bus event to notify observers.
+            from sali.runtime.revocation import revoke_intent
+            await revoke_intent(self._store.pool, current.id, reason=cancel_match,
+                                publisher=self._store._publisher)
             log.info("task_cancelled", task_id=str(current.id), reason=cancel_match)
             return TaskTransition(
                 action=TaskAction.CANCELLED,
@@ -205,8 +269,23 @@ class TaskAuthority:
                     reason=resume_match,
                 )
 
-        # 3. No current task — nothing to manage.
+        # 3. No active primary task. Turn 4 §15: before returning NONE, check whether
+        # the message is a follow-up on a recently-completed task ("make the header
+        # smaller" after a finished landing page). If so, return FOLLOWUP with the
+        # matched parent so the runtime can offer / auto-create a child task that
+        # inherits the parent's workspace and write roots.
         if current is None:
+            match = await self.detect_followup(user_input)
+            if match is not None:
+                parent, reason = match
+                log.info("task_followup_detected", parent_task_id=str(parent.id),
+                         reason=reason)
+                return TaskTransition(
+                    action=TaskAction.FOLLOWUP,
+                    previous_task=parent,
+                    new_task=None,
+                    reason=f"follow-up on completed task: {reason}",
+                )
             return TaskTransition(
                 action=TaskAction.NONE,
                 previous_task=None,
@@ -220,10 +299,29 @@ class TaskAuthority:
         #    can be resumed later. Clear is_primary so it's no longer authoritative.
         if _is_clearly_new_task(user_input, current.objective):
             async with self._store.pool.acquire() as conn:
+                # Turn 2 fix: also transition status to 'superseded' so a restart's adopt-
+                # orphan scan (recovery.py) cannot silently resurrect the task Almir explicitly
+                # replaced. Before this, the row stayed 'running' with is_primary=false and no
+                # tombstone; detect_orphaned_tasks picked it up and recover_task adopted it
+                # back to primary as soon as the successor task finished.
                 await conn.execute(
-                    "UPDATE task SET is_primary = false, updated_at = now() "
+                    "UPDATE task SET is_primary = false, status = 'superseded', updated_at = now() "
                     "WHERE id = $1 AND status NOT IN ('done','failed','abandoned','cancelled','superseded')",
                     current.id)
+            # Turn 2: emit the supersession event so the iOS Tasks view, the WebSocket
+            # replay, and any observer sees the transition happen. Before this fix the
+            # inline UPDATE went silent - a task went "not primary" without a single
+            # event on the bus. Kept as inline (not store.supersede()) because the new
+            # task hasn't been planned yet, so superseded_by must stay NULL until plan_task
+            # fires and TaskAuthority.activate_task links them.
+            from sali.tasks.store import _emit_task
+            with contextlib.suppress(Exception):
+                async with self._store.pool.acquire() as conn:
+                    await _emit_task(conn, "task.superseded", current.id,
+                                     {"reason": "new independent user request",
+                                      "request": user_input[:120],
+                                      "successor_task_id": None},
+                                     publisher=self._store._publisher)
             log.info("task_superseded_by_new_request",
                      task_id=str(current.id), new_request=user_input[:80])
             return TaskTransition(
@@ -247,6 +345,42 @@ class TaskAuthority:
         if current is not None and current.id != task_id:
             await self._store.supersede(current.id, task_id, reason="new task planned")
         return await self._store.activate(task_id)
+
+
+    async def detect_followup(self, user_input: str) -> tuple[Task, str] | None:
+        """§15 follow-up detection. Only runs when there is NO active primary task; matches the
+        message against recently-completed tasks and returns (parent_task, reason) if a strong
+        match is found, else None.
+
+        Two-signal gate:
+          1. The message must have a follow-up phrasing hint (make it smaller / also add / change X).
+          2. The message must share content keywords with a recently-completed task's objective.
+
+        Conservative on purpose - a false positive silently rediscovers the wrong task; a false
+        negative just means Almir has to be more explicit ("continue the landing-page task").
+        """
+        hint = _FOLLOWUP_HINT.search(user_input or "")
+        if hint is None:
+            return None
+        recents = await self._store.recent_completed(limit=20)
+        if not recents:
+            return None
+        target = _followup_keywords(user_input)
+        # A pure hint with no content words ("also add one more") still counts - use the most
+        # recent completed task as the match. A hint plus content words that overlap the objective
+        # is a stronger match. Score by overlap size; break ties by recency (recents is DESC order).
+        best_score = -1
+        best_task = None
+        for parent in recents:
+            parent_kw = _followup_keywords(str(parent.objective or ""))
+            overlap = len(target & parent_kw)
+            # Even zero overlap wins vs -1: with only a hint we take the most-recent task (§15).
+            if overlap > best_score:
+                best_score = overlap
+                best_task = parent
+        if best_task is None:
+            return None
+        return (best_task, hint.group(0)[:80])
 
     async def _most_recent_resumable(self) -> Task | None:
         """The most recently superseded/paused task that can be resumed.
@@ -274,6 +408,7 @@ class TaskAction:
     CANCELLED = "cancelled"
     SUPERSEDED = "superseded"
     RESUMED = "resumed"
+    FOLLOWUP = "followup"  # Turn 4: message continues from a recently-completed task
 
 
 class TaskTransition:

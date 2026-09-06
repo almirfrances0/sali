@@ -202,11 +202,14 @@ async def test_emergency_capsule_is_minimal_but_actionable(live_pool: Any) -> No
 # ── context checkpoint / manifest (§23/§25) ─────────────────────────────────────────────────────────
 
 class _FoldingProvider(FakeModelProvider):
-    """Drives a few tool cycles under a tiny window so the loop compacts, then finishes."""
+    """Brain-audit Turn 3: proactive intra-turn compaction is gone. The overflow-recovery
+    branch still runs when the provider ACTUALLY refuses on context. So drive that branch
+    directly: raise a context-length error once, then succeed - the loop should fold and retry."""
 
     def __init__(self, *, tool_iters: int, ctx_limit: int) -> None:
         super().__init__(ctx_limit=ctx_limit)
         self._left = tool_iters
+        self._overflowed_once = False
 
     async def chat(self, messages: Any, **kw: Any) -> Any:
         from sali.provider.base import ChatResult
@@ -214,6 +217,11 @@ class _FoldingProvider(FakeModelProvider):
 
     async def chat_stream(self, messages: Any, **kw: Any) -> Any:
         from sali.provider.base import ChatChunk, ChatResult, ToolCall
+        # First call: raise a real overflow so the recovery branch runs + writes the checkpoint.
+        if not self._overflowed_once:
+            self._overflowed_once = True
+            from sali.core.errors import ProviderError
+            raise ProviderError("context length exceeded (num_ctx overflow)")
         if self._left > 0:
             self._left -= 1
             res = ChatResult("", None, [ToolCall("memory_info", {})], 5, 5, "fake")

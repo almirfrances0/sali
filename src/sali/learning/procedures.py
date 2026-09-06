@@ -18,9 +18,10 @@ from sali.core.toolvocab import binary_of
 from sali.learning.mining import normalize_tool_step, sequences_by_run, signature
 from sali.learning.model import LearnedProcedure
 from sali.memory import writer as memory_writer
+from sali.provider.presets import BALANCED
 from sali.provider.base import ChatMessage, ModelProvider
 
-_NAME_OPTS: dict[str, Any] = {"temperature": 0.3, "top_k": 40, "top_p": 0.9}
+# Brain-audit Turn 6: _NAME_OPTS deleted; preset=BALANCED used at call site.
 _NAME_SYSTEM = (
     "Name this recurring sequence of shell commands as a short procedure — 2 to 5 words, like a "
     "label Almir would recognise (e.g. 'Docker deploy', 'DB backup'). Reply with ONLY the name."
@@ -32,7 +33,7 @@ async def _name_procedure(provider: ModelProvider, steps: list[str]) -> str:
         res = await provider.chat(
             [ChatMessage(role="system", content=_NAME_SYSTEM),
              ChatMessage(role="user", content="\n".join(steps))],
-            options=_NAME_OPTS,
+            preset=BALANCED,
         )
         name = res.content.strip().splitlines()[0].strip(" .\"'`") if res.content.strip() else ""
     except Exception:  # noqa: BLE001 - naming is best-effort; fall back to the steps

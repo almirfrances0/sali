@@ -67,6 +67,15 @@ _SYSTEM = (
     "your desktop", "your environment", "your kernel", "your os", "check your pc", "check the system",
     "analyse the system", "analyze the system", "analyse my", "analyze my", "audit this machine",
     "audit the system", "diagnose the environment", "diagnose the system", "scan the system",
+    # Bare status phrasings. The list had "this pc"/"my pc"/"check your pc" but not "pc status", so
+    # "what is pc status" classified as an ordinary lookup: no live check, no self/world sections, and
+    # Sali answered from weights — reporting a GTX 1050 Ti, 4 cores and 7.8 GB on a machine with an
+    # RTX 4070, an i9-11900K and 15.4 GiB. A host question that misses this list is a host question
+    # answered from imagination.
+    "pc status", "system status", "machine status", "status of the pc", "status of my pc",
+    "how is the pc", "how's the pc", "hows the pc", "how is the machine", "check the pc",
+    "vram", "disk space", "free space", "how much ram", "how much memory", "how much disk",
+    "uptime", "temperature", "cpu usage", "gpu usage", "memory usage", "disk usage",
     "what host", "hostname", "what os", "which os", "what machine", "which machine", "what computer",
     "am i on", "where do i live", "where am i running", "what's running", "whats running",
     "what is running", "running services", "running processes", "system state", "environment state",
@@ -89,6 +98,26 @@ class RetrievalPlan:
     use_tools: bool = False
     use_experience: bool = False  # a doing/fixing turn — pull past procedures + incidents
     system_query: bool = False  # subject is Sali's own host/self/environment — prefer live over memory
+
+
+# A request to WRITE OR CHANGE CODE. Almir's standing rule, 2026-09-03: "by default all coding tasks
+# must be created as tasks with a reviewer and steps."
+#
+# This is enforced, not suggested, because suggesting it failed three times. Asked for a five-page site,
+# Sali did the whole thing inline and then described pages it had never written; told "you did not even
+# create task for it" and then "no tasks!" outright, it still never called plan_task — `plan_task` has
+# been called ZERO times in the lifetime of this database. A task is not bookkeeping: it runs in the
+# background so his chat stays free, it shows him the steps as they land, it survives a restart, and it
+# gets a reviewer (TaskReviewer is wired by default at runtime.py:113). Doing coding work inline gives up
+# all four.
+CODING_WORK_RE = re.compile(
+    r"\b(build|create|make|write|implement|code|develop|scaffold|generate|set ?up|refactor|rewrite|"
+    r"port|migrate|add)\b[^.?!]{0,80}\b(site|website|page|pages|app|application|script|program|"
+    r"project|api|endpoint|service|module|component|feature|function|class|tool|cli|bot|server|"
+    r"dashboard|form|test|tests|suite|html|css|python|javascript|typescript|react|tailwind|flask|"
+    r"django|node)\b",
+    re.IGNORECASE,
+)
 
 
 def _has(query: str, phrases: tuple[str, ...]) -> bool:

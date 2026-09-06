@@ -102,7 +102,9 @@ async def test_workspace_skill_and_research_reach_the_model(live_pool: Any) -> N
         confidence=0.7, content_hash="h")
 
     await loop.run("keep going on the Laravel portfolio")
-    system = "\n".join(m.content for m in fake.calls[0]["messages"] if m.role == "system")
+    # Context sections render into the user message now (KV-cache: system prefix stays stable), so check
+    # the FULL turn, not just the system messages.
+    system = "\n".join(m.content for m in fake.calls[0]["messages"])
     assert "CURRENT TASK WORKSPACE" in system and bound["workspace_root"] in system  # workspace block
     assert "RELEVANT SKILLS" in system and "laravel" in system                       # skill guidance
     assert "RESEARCH FINDINGS" in system and "content globs" in system               # research findings

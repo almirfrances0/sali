@@ -12,6 +12,8 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+import time
+
 from sali.api.auth import Identity, require_identity, require_owner
 from sali.api.devices import DeviceStore
 from sali.api.models import (
@@ -19,12 +21,50 @@ from sali.api.models import (
     EnrollCodeRequest,
     EnrollCodeResponse,
     EnrollRequest,
+    LoginRequest,
     PushTokenRequest,
     RefreshRequest,
     SessionResponse,
 )
+from sali.api.password import verify_password
 
 router = APIRouter(prefix="/api/v1")
+
+# ── Login brute-force throttle ──────────────────────────────────────────────────
+# The password may be short and the API is internet-exposed, so failed logins are capped per client. This
+# is coarse (behind Cloudflare all requests share the edge IP, so it becomes a near-global cap) but a weak
+# default password on an open endpoint warrants it; a correct login clears the client's failure count.
+_LOGIN_MAX_FAILS = 10
+_LOGIN_WINDOW_S = 300.0
+_login_failures: dict[str, list[float]] = {}
+
+
+def _login_client_key(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _login_recent_failures(request: Request) -> list[float]:
+    key = _login_client_key(request)
+    now = time.monotonic()
+    kept = [t for t in _login_failures.get(key, []) if now - t < _LOGIN_WINDOW_S]
+    if kept:
+        _login_failures[key] = kept
+    else:
+        _login_failures.pop(key, None)
+    return kept
+
+
+def _login_guard(request: Request) -> None:
+    if len(_login_recent_failures(request)) >= _LOGIN_MAX_FAILS:
+        raise HTTPException(status_code=429, detail="too many attempts — wait a few minutes and try again")
+
+
+def _login_record_failure(request: Request) -> None:
+    _login_failures.setdefault(_login_client_key(request), []).append(time.monotonic())
+
+
+def _login_clear(request: Request) -> None:
+    _login_failures.pop(_login_client_key(request), None)
 
 
 async def _store(request: Request) -> DeviceStore:
@@ -66,6 +106,23 @@ async def enroll(body: EnrollRequest, request: Request) -> SessionResponse:
         body.code, name=body.name.strip(), model=body.model, platform=body.platform)
     if session is None:
         raise HTTPException(status_code=401, detail="invalid or expired enrollment code")
+    return _session_response(session)
+
+
+@router.post("/auth/login", response_model=SessionResponse)
+async def login(body: LoginRequest, request: Request) -> SessionResponse:
+    """Authenticate with the owner PASSWORD and mint a session (password auth). No prior token needed — the
+    password IS the authority. The app re-calls this with its stored password whenever a token expires or is
+    revoked, so an expiring/revoked token can NEVER lock the owner out; a wrong password (401) is the only
+    thing that stops it — which is exactly what `sali change-password` (rotate = log everyone out) causes.
+    Throttled per client to blunt brute force against a possibly-weak password on an open endpoint."""
+    _login_guard(request)
+    store = await _store(request)
+    if not verify_password(body.password, await store.get_password_hash()):
+        _login_record_failure(request)
+        raise HTTPException(status_code=401, detail="incorrect password")
+    _login_clear(request)
+    session = await store.login(name=body.name, model=body.model, platform=body.platform)
     return _session_response(session)
 
 

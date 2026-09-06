@@ -1,5 +1,11 @@
 # Cloudflare Deployment — Sali Remote Presence
 
+> **LAN discovery landed.** The iPhone prefers a direct LAN connection when it finds Sali on the
+> same Wi-Fi via Bonjour, and falls back to the Cloudflare Tunnel only when local is unreachable.
+> The tunnel remains the correct path for cellular / away-from-home use. The backend default bind
+> is now `0.0.0.0:8080` (not loopback) so both transports work. See [`DISCOVERY.md`](DISCOVERY.md)
+> for the discovery protocol.
+
 How to expose the Sali API at `https://sali.salieno.com` **securely** (Prompt 13 §22/§26). Cloudflare is
 **one** layer of defense, not the only one — the API authenticates and authorizes every request itself
 (device sessions, roles). Never rely on the URL being hard to guess.

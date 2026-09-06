@@ -47,7 +47,41 @@ class ModelSettings(BaseModel):
     # How long Ollama keeps the model resident after a call. Sali is a live resident, not a batch
     # job — evicting the 35B after 5 min idle means the next "hey sali" pays a ~20s cold reload.
     # Keep it warm; "-1" would pin it forever (at the cost of held VRAM).
-    keep_alive: str = "30m"
+    keep_alive: str = "24h"  # dedicated box: a 30m idle window forced a ~16GB cold reload (audit)
+    # The EMBEDDER gets its own residency, and it is not a copy-paste of the line above.
+    #
+    # `embed()` passed no keep_alive at all, so it inherited Ollama's 5-minute default while the chat
+    # model was pinned for 24h. Measured: with the embedder evicted, the first `memory.retrieve` of a
+    # turn took 6,951 ms; the very next one, warm, took 30 ms. That ~7-second cliff landed on exactly
+    # the turn Almir comes back to after a break — the one that should feel fastest.
+    #
+    # It is safe to pin because it is 376 MB and CPU-ONLY (embed_num_gpu = 0): it costs host RAM, of
+    # which this box uses 4 of 15 GB, and not one byte of the 923 MiB of free VRAM. Shorter than the
+    # chat model's 24h because an embedder that has genuinely gone unused all day is worth releasing.
+    embed_keep_alive: str = "8h"
+    # ── Power envelope (host survival, 2026-09-01 post-mortem) ────────────────────────────────────
+    # sali:latest is a 35B MoE with ~3B active. That "3B active" holds for GENERATION and is
+    # dangerously false for PREFILL: a full prompt-processing batch routes across essentially every
+    # expert, so prefill touches all 35B of weights. With ~40% of layers on the CPU it streams GBs of
+    # expert weights through every core at full tilt WHILE the GPU runs flat out — the highest
+    # combined draw this box can produce. Sustained, that tripped the PSU and powered the machine off.
+    #
+    # These two settings shave the peak of that transient. They cost prefill throughput and buy
+    # continued existence, which is the right trade for a resident (see scripts/power_envelope.sh for
+    # the hardware half of the same envelope — software alone cannot save a committed prefill).
+    num_thread: int = 8      # CPU threads for the offloaded layers (of 16) — never all-core AVX
+    # 2048, and the value is measured, not inherited. This machine runs a 22.7 GB model on a 12 GB
+    # card: 8,833 MiB of weights sit in VRAM and 13,878 MiB stay CPU-mapped, so every prefill batch
+    # streams those host-resident weights across PCIe. Batch size therefore sets how many times that
+    # happens: a 10k-token prompt is 20 streams at 512 and 5 at 2048.
+    # Measured on a real cold turn, same prompt size, nothing else changed:
+    #     512  -> 375 tok/s   (10,466 tokens = 28.0 s)   <- ollama's default
+    #    2048  -> 690 tok/s   (10,466 tokens = 15.2 s)   <- 1.84x, +48 MiB VRAM
+    #    4096  -> 662 tok/s   (10,540 tokens = 15.9 s)   <- past the knee, slower
+    # This is the single largest latency win available on this host and it costs no capability and no
+    # context. It is a runner-fingerprint option (see provider/ollama._runner_options), so changing it
+    # reloads the model once.
+    num_batch: int = 2048
 
 
 class RuntimeSettings(BaseModel):
@@ -64,6 +98,11 @@ class RuntimeSettings(BaseModel):
     # Configurable via SALI_RUNTIME__CONTEXT_LIMIT; the effective limit is min(this, provider window).
     context_limit: int = 24_576
     output_reserve: int = 3_072  # tokens always kept free for the model's reply (§18)
+    # Brain-audit Turn 1: on pure conversational turns (iter 0, no primary task, not
+    # internal, not a delegation), skip the ~10.6k-token native tools= payload. If the
+    # model wants to act it can say so and the next iteration includes tools. Set True to
+    # restore the pre-audit behaviour (always send tools) as a kill switch.
+    always_send_tools: bool = False
 
 
 class SshSettings(BaseModel):
@@ -160,6 +199,22 @@ def _default_skills_root() -> str:
     return str(Path(__file__).resolve().parents[3] / "skills")
 
 
+class PushSettings(BaseModel):
+    """APNs push for the iPhone app (§11). Inert until an Apple auth key actually exists.
+
+    The key is a CREDENTIAL and lives in the encrypted vault under `key_ref`
+    (`sali secrets set apns.key`); `key_path` is only for a .p8 that already lives elsewhere on
+    disk. Neither this file nor Postgres ever holds the key itself (§21/§22).
+    """
+
+    enabled: bool = True
+    team_id: str = ""                 # Apple Developer Team ID (10 chars)
+    key_id: str = ""                  # the .p8 key's own 10-char Key ID
+    key_ref: str = "apns.key"         # vault ref holding the .p8 contents
+    key_path: str | None = None       # alternative: a readable .p8 on disk
+    topic: str = "com.salieno.sali"   # the app's bundle id — APNs calls this the topic
+
+
 class PermissionsSettings(BaseModel):
     # The whole machine is open to Sali: it can read and create files anywhere. The real guards
     # are the OS's own permissions (it runs as Almir, not root), the small fs_deny set below, and
@@ -179,6 +234,41 @@ class PermissionsSettings(BaseModel):
     jail_learning: bool = True  # an isolated sandbox is available for learning-time experiments
 
 
+class TemporalSettings(BaseModel):
+    """Where the owner actually is, in time.
+
+    This is configuration and not a reading of the host, because on this system those disagree by
+    seven hours: Sali's machine is set to America/New_York while Almir works in Africa/Dar_es_Salaam.
+    Nothing in the codebase had any notion of a timezone, so "remind me at 9am" would have been
+    resolved against the host's zone and fired at 02:00 his time. UTC stays the canonical internal
+    timeline; this only decides what a civil-time phrase MEANS and how an instant is shown to him."""
+
+    owner_timezone: str = "UTC"
+
+
+class ApiSettings(BaseModel):
+    """FastAPI / uvicorn network settings and LAN-discovery advertisement.
+
+    Bind default is `0.0.0.0` so a device on the same Wi-Fi/LAN can reach Sali directly (this is
+    what enables Bonjour discovery to be useful — the iPhone finds a service that's actually
+    reachable). Auth is IP-agnostic: every existing `require_identity`/`require_controller` gate
+    still runs on a LAN packet exactly as it does on a Cloudflare-tunnel packet. Set to
+    `127.0.0.1` explicitly (via env `SALI_API__BIND_HOST=127.0.0.1` or the TOML config file) to
+    force loopback-only for hardened deployments.
+
+    mDNS advertisement is on by default. The iPhone browses for `_sali._tcp.local.`; the TXT
+    record carries only public metadata (service tag, stable runtime_id, version, path to the
+    unauth `/identity` verifier). Never tokens.
+    """
+
+    bind_host: str = "0.0.0.0"
+    bind_port: int = 8080
+    mdns_enabled: bool = True
+    # A friendly display name for the Bonjour instance. Rarely useful to change; distinguishing
+    # multiple Salis on the same LAN (test rigs) is what this exists for.
+    mdns_service_name: str = "Sali"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="SALI_",
@@ -196,6 +286,9 @@ class Settings(BaseSettings):
     comms: CommsSettings = Field(default_factory=CommsSettings)
     browser: BrowserSettings = Field(default_factory=BrowserSettings)
     perception: PerceptionSettings = Field(default_factory=PerceptionSettings)
+    push: PushSettings = Field(default_factory=PushSettings)
+    temporal: TemporalSettings = Field(default_factory=TemporalSettings)
+    api: ApiSettings = Field(default_factory=ApiSettings)
 
     @classmethod
     def settings_customise_sources(

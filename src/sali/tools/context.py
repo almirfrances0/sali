@@ -7,6 +7,9 @@ permission settings so filesystem/exec tools confine themselves consistently.
 
 from __future__ import annotations
 
+import contextlib
+from pathlib import Path
+
 from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import UUID
@@ -26,6 +29,7 @@ class MemorySink(Protocol):
     async def remember(
         self, content: str, *, source: MemorySource, note: str | None = None,
         importance: float = 0.6, needs_grounding: bool = False, about: str | None = None,
+        kind: str | None = None,
     ) -> None: ...
 
     async def forget(self, query: str, *, reason: str) -> dict[str, Any]: ...
@@ -192,9 +196,13 @@ class ToolContext:
     research: Any = None  # injected by the loop; just-in-time task-bound web research (Prompt 5 §14)
     decisions: Any = None  # injected by the loop; the durable decision ledger (Prompt 6 §30)
     phases: Any = None  # injected by the loop; task phases (Prompt 6 §31)
-    delegate: Any = None  # injected by the loop; delegate one bounded objective to a subagent (§16)
+    # `delegate` removed (brain-audit turn 8): Sali is a single executive agent. No subagent runtime,
+    # no delegation tool, no ToolContext channel for it. AskUser stays for user-clarification pauses.
     clarify: Any = None  # injected by the loop; ask the user a clarifying question (§44)
     is_subagent: bool = False  # true inside a bounded subagent run — it must not manage tasks (§16)
+    internal: bool = False  # true on an autonomy/continuation/internal turn (not a live user message);
+    # lets a tool refuse actions that only a present, intentional user should trigger — e.g. plan_task's
+    # dead-work guard, which stops the autonomy loop resurrecting an objective Almir abandoned/completed.
     workspace: Any = None  # injected by the loop; TaskWorkspace for the active task (None = no workspace)
     schedules: ScheduleSink | None = None  # injected by the loop; lets a tool set up recurring work
     documents: IngestSink | None = None  # injected by the loop; lets a tool ingest a document
@@ -209,7 +217,27 @@ class ToolContext:
 
     @property
     def paths(self) -> PathGuard:
-        return PathGuard(self.settings.permissions)
+        """Anchor relative paths to the RIGHT default so ordinary work stays where Almir can find it.
+
+        Almir, watching Sali land files across his home: "sali have a freedom to write anywhere but
+        when working on project he must use his folder so easy for me to track it." The daemon's CWD
+        is opaque (systemd starts it wherever), so a relative path like `create_file("foo.py", ...)`
+        used to resolve to `/foo.py` and be rejected by the write-root guard - forcing the model to
+        supply an absolute path, which it invented freely under `~/`. Files landed anywhere.
+
+        Ladder (most specific first): the active task's workspace (deterministic, unchanged), then
+        Sali's canonical workspace root (`permissions.workspace` = ~/Desktop/sali-works). Absolute
+        paths still resolve as themselves, so freedom is preserved for anything Sali or Almir names
+        explicitly - the change is only what a bare name means when no context says otherwise."""
+        base = None
+        ws = getattr(self, "workspace", None)
+        if ws is not None:
+            base = getattr(ws, "workspace_root", None)
+        if base is None:
+            with contextlib.suppress(Exception):
+                base = Path(self.settings.permissions.workspace).expanduser()
+                base.mkdir(parents=True, exist_ok=True)
+        return PathGuard(self.settings.permissions, base)
 
 
 def local_context(settings: Settings | None = None) -> ToolContext:

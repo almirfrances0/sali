@@ -38,10 +38,18 @@ async def detect_orphaned_tasks(pool: Any) -> list[dict[str, Any]]:
             "  (SELECT count(*) FROM task_step WHERE task_id=t.id AND status='done') AS done_steps, "
             "  (SELECT count(*) FROM task_step WHERE task_id=t.id) AS total_steps "
             "FROM task t "
+            # Turn 2: revoked tasks are tombstoned as a durable "no longer a current intent";
+            # a running-with-stale-heartbeat one whose intent has been revoked must NOT surface
+            # as a recovery candidate, or a restart would silently resurrect what Almir called off.
             "WHERE t.status = 'running' "
-            "  AND t.last_heartbeat IS NOT NULL "
-            "  AND t.last_heartbeat < now() - interval '2 minutes' "
-            "ORDER BY t.last_heartbeat DESC")
+            "  AND NOT EXISTS (SELECT 1 FROM revoked_intent r "
+            "                  WHERE r.task_id = t.id AND r.superseded_by IS NULL) "
+            # A task that never got a heartbeat was INVISIBLE here, so a restart orphaned it forever
+            # with nothing able to adopt it (observed: a real task sat 'running' with last_heartbeat
+            # NULL for six hours). Fall back to updated_at, which is always stamped, so "running but
+            # untouched for a while" is caught either way.
+            "  AND coalesce(t.last_heartbeat, t.updated_at) < now() - interval '2 minutes' "
+            "ORDER BY coalesce(t.last_heartbeat, t.updated_at) DESC")
         results = []
         for row in rows:
             # Check if there's an interrupted execution in flight
@@ -104,6 +112,13 @@ async def recover_task(pool: Any, task_id: UUID) -> dict[str, Any]:
     - The task is marked as ready to resume (status stays 'running').
     - A recovery context is built for the LLM.
     """
+    # Turn 2: a revoked task is a durable "no longer a current intent" (§20). Restart-
+    # recovery MUST consult the tombstone before doing any work - otherwise a well-timed
+    # crash could resurrect the very task Almir just cancelled. Belt-and-suspenders on top
+    # of the scan-side filter below, because a race could still slip a revoked id through.
+    from sali.tasks.revocation import RevocationStore
+    if await RevocationStore(pool).is_revoked(task_id):
+        return {"error": "task revoked", "task_id": str(task_id), "status": "revoked"}
     async with pool.acquire() as conn, conn.transaction():
         task = await conn.fetchrow("SELECT * FROM task WHERE id = $1", task_id)
         if task is None:
@@ -122,15 +137,49 @@ async def recover_task(pool: Any, task_id: UUID) -> dict[str, Any]:
             "SELECT artifact_path, artifact_type, created_at "
             "FROM task_artifact WHERE task_id = $1 ORDER BY created_at", task_id)
 
-        # Clear interrupted state — task is being recovered
+        # ADOPT AN ORPHAN. Recovery deliberately does not take primacy from a task that has it — but a
+        # running task with is_primary=false and no other primary is invisible to everything that could
+        # work it: `active_task()` selects `WHERE is_primary`, so `continue_primary()` never sees it, and
+        # recovery itself only ever restored it to that same unreachable state.
+        #
+        # Observed live: mid-task Sali called plan_task, `activate_task` superseded the in-flight task as
+        # "new task planned", and it was left status='running', is_primary=false, step 2 pending. A
+        # restart ran recovery, recovery "recovered" it, and nothing moved — for eleven minutes, then
+        # indefinitely. Claiming primacy is safe precisely BECAUSE it is conditional on nobody holding it.
+        if not task["is_primary"]:
+            adopted = await conn.fetchval(
+                "UPDATE task SET is_primary = true, updated_at = now() "
+                "WHERE id = $1 AND NOT EXISTS ("
+                "  SELECT 1 FROM task WHERE is_primary AND status NOT IN "
+                "    ('done','failed','abandoned','cancelled','superseded')) "
+                "RETURNING id", task_id)
+            if adopted is not None:
+                await conn.execute(
+                    "INSERT INTO event (event_type, subject_type, subject_id, payload) "
+                    "VALUES ('task.adopted','task',$1,$2)",
+                    task_id, {"reason": "orphaned running task, no primary held"})
+
+        # Clear interrupted state — task is being recovered.
+        #
+        # The retry is charged only when the interruption left REAL WRECKAGE behind: a tool execution
+        # caught mid-flight, or a step that actually failed. A task found `running` with nothing in
+        # flight was not retried — it was interrupted, by a deploy or a reboot, and charging it for that
+        # is how routine restarts silently consumed a healthy task's whole budget. This matters most for
+        # a task that is `running` but not primary: nothing drives it, so it can never refresh its own
+        # heartbeat and looked orphaned on EVERY start.
+        # 'interrupted' as well as 'running': `mark_task_interrupted` runs immediately BEFORE this and
+        # rewrites every in-flight execution to 'interrupted', so a check for 'running' alone would
+        # never once have fired in production — the tool caught mid-flight would look like a clean stop.
+        dirty = (last_exec is not None and last_exec["status"] in ("running", "interrupted")) or any(
+            s["status"] == "failed" for s in steps)
         await conn.execute(
             "UPDATE task SET "
             "  interrupted_at = NULL, "
             "  recovery_reason = NULL, "
-            "  retry_count = retry_count + 1, "
+            "  retry_count = retry_count + CASE WHEN $2 THEN 1 ELSE 0 END, "
             "  last_heartbeat = now(), "
             "  updated_at = now() "
-            "WHERE id = $1", task_id)
+            "WHERE id = $1", task_id, dirty)
 
         # Build recovery context
         completed = [dict(s) for s in steps if s["status"] == "done"]

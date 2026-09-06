@@ -12,6 +12,7 @@ from typing import Any
 
 from sali.learning.episodes import consolidate_stm, prune_stm
 from sali.learning.failures import record_failures
+from sali.learning.overclaims import learn_from_overclaims
 from sali.learning.model import ConsolidationResult
 from sali.learning.procedures import learn_procedures, record_procedure_outcomes
 from sali.learning.queue import queue_gaps
@@ -52,6 +53,10 @@ class LearningService:
                 outcomes = await record_procedure_outcomes(conn)  # §43: reinforce/penalize by how they ran
                 experiences = await learn_tool_experiences(conn)  # §16/§67: per-binary reliability/latency
                 failures = await record_failures(conn)
+                # §44: recurring over-claims the response validator struck become ONE durable lesson per
+                # family (deduped, fail-open) so retrieval teaches the model to stop — closing
+                # detection→learning→prevention instead of re-catching the same lie forever.
+                overclaims = await learn_from_overclaims(conn)
                 episodes = await consolidate_stm(conn, self.provider)
                 pruned = await prune_stm(conn)
                 gaps = await queue_gaps(conn)  # §45/§46: notice new learning gaps, bounded by budget
@@ -68,6 +73,8 @@ class LearningService:
                                 {"name": proc.name, "evidence": proc.evidence})
                 if failures:
                     await _emit(conn, "learning.failure", {"count": failures})
+                if overclaims:
+                    await _emit(conn, "learning.overclaim", {"count": overclaims})
                 if episodes:
                     await _emit(conn, "learning.episode", {"count": episodes})
                 if outcomes:
@@ -81,7 +88,7 @@ class LearningService:
                   episodes=episodes, pruned=pruned, tool_experiences=len(experiences))
         return ConsolidationResult(procedures=procedures, failures_recorded=failures,
                                    episodes_created=episodes, stm_pruned=pruned,
-                                   tool_experiences=len(experiences))
+                                   tool_experiences=len(experiences), overclaims_recorded=overclaims)
 
     async def procedures(self) -> list[dict[str, Any]]:
         """The procedures Sali has learned so far (most-evidenced first)."""

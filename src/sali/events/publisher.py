@@ -115,6 +115,11 @@ class EventPublisher:
 
         Returns the event with its durable sequence set.
         """
+        # Ephemeral streaming tokens bypass database persistence to eliminate latency
+        if event.event_type in ("agent.token", "agent.thinking"):
+            await self._deliver_live(event)
+            return event
+
         # 1. Persist durably
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -148,10 +153,13 @@ class EventPublisher:
             subject_type=subject_type, subject_id=subject_id, origin=origin, data=data or {}))
 
     async def publish_on_conn(self, conn: Any, event: SaliEvent) -> SaliEvent:
-        """Publish an event using an existing connection (for transactional safety).
+        """Persist an event using an existing connection so it participates in the caller's transaction.
 
-        Use this when the event must participate in an existing transaction.
-        The event is persisted on the given connection; live delivery happens after.
+        IMPORTANT: this NO LONGER broadcasts live. Broadcasting inside the caller's transaction
+        would show clients an event that a subsequent rollback erases from the durable log — a
+        phantom event. Callers who need live delivery must invoke `publish_committed(event)` AFTER
+        their transaction commits. Callers who don't need live delivery (durable-only writes) can
+        just call this and stop.
         """
         row = await conn.fetchrow(
             "INSERT INTO event (event_type, subject_type, subject_id, payload) "
@@ -162,15 +170,22 @@ class EventPublisher:
             event.to_db_payload(),
         )
         event.sequence = row["seq"]
-
-        # Mark as locally published so the bridge doesn't re-deliver
+        # Mark as locally published so the bridge doesn't re-deliver AFTER commit fires NOTIFY.
         if self._bridge is not None and event.sequence is not None:
             self._bridge.mark_local(event.sequence)
-
-        # Live delivery (best-effort, outside the caller's transaction)
-        await self._deliver_live(event)
-
         return event
+
+    async def publish_committed(self, event: SaliEvent) -> None:
+        """Broadcast an event to live subscribers AFTER the caller's transaction has committed.
+
+        The pair (publish_on_conn INSIDE tx, publish_committed AFTER commit) is the transaction-
+        safe pattern. If the tx rolls back, the caller simply never calls publish_committed and
+        no phantom event reaches WebSocket clients. Rolled-back rows are already gone from the
+        durable log; the mark_local set is bounded so a rolled-back seq eventually falls off.
+        """
+        if event.sequence is None:
+            log.warning("publish_committed_missing_sequence", event_type=event.event_type)
+        await self._deliver_live(event)
 
     async def _deliver_live(self, event: SaliEvent) -> None:
         """Deliver event to all live subscribers."""

@@ -53,9 +53,19 @@ class ResourceReading:
 @dataclass(slots=True)
 class ResourceBudget:
     """Thresholds derived from the real machine where possible (§9). Adapt before catastrophe, not after."""
-    vram_high: float = 0.85
-    vram_critical: float = 0.92
-    vram_emergency: float = 0.97
+    # VRAM (MEASURED 2026-09-02, and the reason long tasks could not run unattended): sali:latest is a
+    # RESIDENT 35B on a 12 GB card — its own steady state is 90.9%, and 93.6% once the KV cache fills.
+    # With the old ladder that meant the host was permanently HIGH and frequently CRITICAL, and
+    # `ResourceAuthority.decide` sheds background work under CRITICAL — so every autonomous
+    # task-continuation turn was rejected outright, forever. The thresholds were written for a general
+    # host, not for one whose whole purpose is to keep a model resident: the signal that matters here is
+    # "something ELSE is consuming the card", not "the model Sali needs is loaded". Raised so normal
+    # single-model residency reads as healthy while genuine over-commit still escalates. The hard
+    # protections are unchanged and independent: the per-generation gate in provider/ollama.py, the
+    # single-residency proof, temperature, and the power-envelope service.
+    vram_high: float = 0.97
+    vram_critical: float = 0.985
+    vram_emergency: float = 0.995
     ram_high: float = 0.85
     ram_critical: float = 0.93
     ram_emergency: float = 0.97

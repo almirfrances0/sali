@@ -77,7 +77,10 @@ async def test_restatement_corroborates_not_duplicates(db_conn: Any) -> None:
     )
     assert m2.id == m1.id
     assert m2.evidence_count == 2
-    assert m2.confidence > m1.confidence  # corroboration raised it
+    # §6 distinct-source rule: the SAME source re-stating a fact is tracked (evidence_count bumps) but
+    # must NOT inflate confidence — otherwise Sali could self-reinforce a belief by simply repeating it.
+    # A DIFFERENT source is what raises confidence (see the distinct-source path).
+    assert m2.confidence == m1.confidence
     current = await db_conn.fetchval(
         "SELECT count(*) FROM memory WHERE content='Ollama is installed' AND valid_until IS NULL"
     )

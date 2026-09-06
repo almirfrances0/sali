@@ -102,7 +102,9 @@ _LOOP_TABLES = (
     # intent revocation + resource stewardship (standalone tombstone + incident ledgers)
     "revoked_intent, resource_incident, "
     # iPhone control center: device sessions FK api_device CASCADE, enrollment_code FK api_device SET NULL
-    "device_session, enrollment_code, api_device"
+    "device_session, enrollment_code, api_device, "
+    # persistent organism additions (open loops / curiosities / proactive-decision audit trail)
+    "open_loop, curiosity, proactive_decision, decision_trace"
 )
 
 

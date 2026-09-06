@@ -170,7 +170,10 @@ async def test_advance_autocomplete_gated_by_review(live_pool: Any) -> None:
         artifacts=(("/gone/app.js", "created"),), gated=True)
     updated, err = await store.advance(task.id, 2, "done", run_id=uuid4())
     assert err is None
-    assert updated is not None and updated.status == "running"  # stayed running — review blocked it
+    # Turn 8: NEEDS_REWORK now flips task.status to 'needs_changes' (was: stayed 'running').
+    # That was exactly the visibility gap the audit called out - a task that looks running
+    # while the reviewer is telling it to rework.
+    assert updated is not None and updated.status == "needs_changes"
     latest = await reviewer.latest_review(task.id)
     assert latest is not None and latest.status is ReviewStatus.NEEDS_REWORK
 
@@ -178,7 +181,9 @@ async def test_advance_autocomplete_gated_by_review(live_pool: Any) -> None:
 async def test_advance_autocomplete_completes_when_review_passes(live_pool: Any) -> None:
     task, store, _r = await _seed(
         live_pool, [{"status": "done", "verified": True}, {"status": "pending"}], gated=True)
-    updated, err = await store.advance(task.id, 2, "done", run_id=uuid4())
+    # Turn 3: advance() with verified_by marks the step verified, so the reviewer grades it
+    # "verified" (not "attempted", which is now blocked by the tightened _PASSING set).
+    updated, err = await store.advance(task.id, 2, "done", run_id=uuid4(), verified_by=uuid4())
     assert err is None and updated is None  # review passed → auto-completed + archived
     assert await store.get(task.id) is None
 

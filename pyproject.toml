@@ -25,6 +25,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
     "websockets>=15.0",
+    "zeroconf>=0.140",  # mDNS/Bonjour — advertise Sali on the LAN so the iPhone finds him
 ]
 
 [project.optional-dependencies]
@@ -42,6 +43,7 @@ pdf = ["pypdf>=6"]           # document ingestion of PDFs
 cal = ["icalendar>=6,<8"]   # robust CalDAV event parsing (a minimal parser works without it)
 browser = ["playwright>=1.55"]  # browser automation (also: playwright install firefox)
 watch = ["watchdog>=4"]     # continuous filesystem perception (the event engine still runs without it)
+push = ["h2>=4"]           # APNs speaks HTTP/2 only; httpx needs h2 to talk it (§11 iPhone banners)
 
 [project.scripts]
 sali = "sali.__main__:main"
@@ -130,3 +132,23 @@ source_modules = [
     "sali.runtime", "sali.tools", "sali.security", "sali.verify", "sali.ingest", "sali.comms",
 ]
 forbidden_modules = ["sali.provider.ollama", "sali.provider.fake"]
+
+# ONE PC · ONE SALI · ONE MIND. `sali.kernel` is the only place a Kernel — and through it the one
+# AgentRuntime, AgentLoop, coordinator and inference path — is built, and `sali.cli` is the only
+# place allowed to reach for it, because CLI commands are the machine's process entry points.
+#
+# The API is deliberately absent from that list: it receives the mind's runtime by injection
+# (app.state.runtime) and has no way to construct one. That is what makes `sali serve` beside
+# `sali daemon` impossible rather than merely discouraged — see docs/ONE-MIND.md.
+[[tool.importlinter.contracts]]
+name = "Only the CLI may reach the composition root (one Kernel per machine)"
+type = "forbidden"
+source_modules = [
+    "sali.api", "sali.runtime", "sali.context", "sali.retrieval",
+    "sali.twin", "sali.learning", "sali.ingest",
+    "sali.memory", "sali.graph", "sali.tasks", "sali.scheduler", "sali.comms", "sali.browser",
+    "sali.perception", "sali.events", "sali.skills",
+    "sali.security", "sali.verify", "sali.tools", "sali.provider", "sali.db", "sali.obs",
+    "sali.config", "sali.core",
+]
+forbidden_modules = ["sali.kernel"]

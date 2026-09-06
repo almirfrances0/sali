@@ -27,6 +27,7 @@ class AttentionCategory(StrEnum):
     CANCEL_PRIMARY_TASK = "cancel_primary_task"    # explicit stop of the primary
     QUEUE_FOR_LATER = "queue_for_later"            # store; act after the primary finishes
     CONTINUE_PRIMARY = "continue_primary"          # refine/continue the active task (or start one if none)
+    MODIFY_PRIMARY_TASK = "modify_primary_task"    # Turn 6: correct the running task's plan (add/edit/skip step)
 
 
 class Priority(StrEnum):
@@ -59,6 +60,20 @@ _INTERRUPT = re.compile(
     r"\b(stop\s+for\s+a\s+(?:moment|sec|second|minute)|pause\s+(?:for|a\s+moment|what\s+you)"
     r"|hold\s+on|one\s+sec|before\s+you\s+continue|quick\s+interruption|just\s+for\s+a\s+(?:sec|moment)"
     r"|hang\s+on|take\s+a\s+break\s+from)\b", re.IGNORECASE)
+# Bare control words (audit): a naked "stop"/"cancel"/"wait" carried none of the two-word cancel
+# phrases, fell through to CONTINUE_PRIMARY, and QUEUED behind the very turn it was meant to stop.
+_BARE_CANCEL = re.compile(
+    # "leave it", "never mind" and "forget it" are the same instruction as "stop" and were carried by
+    # neither layer: attention read them as ordinary conversation and CONTINUED the task, and the
+    # revocation pattern wanted a trailing keyword ("leave it ALONE") that nobody says. "Leave it." is
+    # one of the directive's own examples of Almir calling work off.
+    r"^\s*(?:(?:stop|cancel|abort|drop|leave|forget)\s*(?:it|that|this)?"
+    r"|never\s*mind|nevermind|don'?t\s+bother)\s*[.!]*\s*$",
+    re.IGNORECASE)
+_STOP_WORKING = re.compile(
+    r"^\s*(?:please\s+)?stop\s+(?:what\s+you'?re\s+doing|working(?:\s+on\s+(?:that|this|it))?"
+    r"|everything|the\s+work|now)\s*[.!]*\s*$", re.IGNORECASE)
+_BARE_WAIT = re.compile(r"^\s*(?:wait|hold\s+on|hold\s+up|pause|one\s+moment)\s*[.!]*\s*$", re.IGNORECASE)
 # a quick independent action — a concrete verb on a concrete target
 _QUICK_ACTION = re.compile(
     r"\b(zip|unzip|compress|archive|send|read|show|display|list|open|download|upload|move\s+the|copy\s+the"
@@ -69,6 +84,38 @@ _STATUS_Q = re.compile(
     r"\b(what\s+(?:are|were)\s+you\s+(?:doing|working)|what\s+did\s+you\s+(?:just\s+)?do"
     r"|what'?s\s+(?:the\s+)?status|where\s+are\s+you\s+(?:at|with|now)|how'?s\s+it\s+going"
     r"|are\s+you\s+(?:done|finished)|current\s+(?:task|status)|what\s+task\s+are\s+you)\b", re.IGNORECASE)
+# Turn 6: mid-task correction/refinement phrases. Only fires when a primary is active
+# and none of the higher-priority categories (cancel/queue/replace) matched. Deliberately
+# narrow - matches natural correction verbs targeting the running plan, not generic
+# imperatives that could BE a new task ("build me a" is not a correction).
+# Turn 6 (adversarial-hardened): every alternative requires an EXPLICIT tie to the running
+# plan - a step number, the word "step/plan/task/objective", or a follow-on phrase from a
+# recent turn. Broad noun lists ("add another column") were dropped because they matched
+# fresh requests unrelated to the primary task ("add another column to my database schema"
+# on a deploy-task-primary would silently suspend deployment to edit a plan it has nothing
+# to do with). "actually X" was narrowed to explicit plan edits.
+_MODIFY_HINT = re.compile(
+    r"\b("
+    # explicit step-anchored actions
+    r"(?:change|edit|update|rewrite|fix)\s+step\s*#?\s*\d+"
+    r"|(?:add|insert)\s+(?:a|another|one\s+more)\s+step\b"
+    r"|skip\s+step\s*#?\s*\d+"
+    r"|remove\s+step\s*#?\s*\d+"
+    r"|(?:redo|reset|retry)\s+step\s*#?\s*\d+"
+    r"|(?:on|for|in)\s+step\s*#?\s*\d+"
+    # explicit task-anchored actions (this/it/the task/plan/objective)
+    r"|(?:rename|retitle|call)\s+(?:this|it|the)\s+task"
+    r"|update\s+(?:the|this)\s+(?:plan|steps|objective|task)"
+    r"|(?:change|edit)\s+(?:the|this)\s+(?:plan|steps|objective|task)"
+    # "actually" narrowed: must reference the plan explicitly
+    r"|actually\s+(?:use|call|name|title)\s+(?:step|it|the\s+task)"
+    r"|actually,?\s+(?:skip|redo|reset)\s+step"
+    # forgot-to + step reference
+    r"|forgot\s+to\s+(?:add|include)\s+(?:a|another|the)\s+step"
+    r")\b",
+    re.IGNORECASE,
+)
+
 _QUESTION_START = re.compile(
     r"^\s*(what|why|how|when|where|which|who|is|are|was|were|does|did|can|could|should|do\s+you\s+know)\b",
     re.IGNORECASE)
@@ -82,11 +129,12 @@ class AttentionDecision:
 
     @property
     def touches_primary(self) -> bool:
-        """Does acting on this message change the primary task's state (suspend/replace/cancel)?"""
+        """Does acting on this message change the primary task's state (suspend/replace/cancel/modify)?"""
         return self.category in (
             AttentionCategory.INTERRUPT_TASK,
             AttentionCategory.REPLACE_PRIMARY_TASK,
             AttentionCategory.CANCEL_PRIMARY_TASK,
+            AttentionCategory.MODIFY_PRIMARY_TASK,
         )
 
 
@@ -107,6 +155,16 @@ def classify(message: str, *, has_primary: bool = False, current_objective: str 
     if not text:
         return AttentionDecision(AttentionCategory.CONVERSATION, prio, "empty message")
 
+    # Bare control words MUST preempt now — never queue behind the very work they address. "stop"-class
+    # ends the work (cancel: preempts, revokes, no auto-resume); "wait"-class pauses it (interrupt:
+    # preempts, then auto-resumes after the exchange). Checked first so nothing re-routes them.
+    if _BARE_CANCEL.match(text) or _STOP_WORKING.match(text):
+        return AttentionDecision(AttentionCategory.CANCEL_PRIMARY_TASK,
+                                 _at_least(prio, Priority.HIGH), "bare stop/cancel — preempt now")
+    if _BARE_WAIT.match(text):
+        return AttentionDecision(AttentionCategory.INTERRUPT_TASK,
+                                 _at_least(prio, Priority.HIGH), "bare wait — preempt now")
+
     # Explicit "do it later" wins regardless of task state.
     if _QUEUE.search(text):
         return AttentionDecision(AttentionCategory.QUEUE_FOR_LATER, prio, "explicit defer language")
@@ -125,6 +183,14 @@ def classify(message: str, *, has_primary: bool = False, current_objective: str 
         return AttentionDecision(AttentionCategory.CONTINUE_PRIMARY, prio, "new request becomes the focus")
 
     # --- a primary task IS active ---
+    # Turn 6: mid-task correction ("actually use tabs", "add another column", "skip step 3",
+    # "rename this task"). Only in the primary-active region so a fresh chat is never
+    # misrouted here. AFTER cancel/replace above (a plain "stop" still wins), BEFORE
+    # status/interrupt/quick_action below (a correction is more specific than a question).
+    if _MODIFY_HINT.search(text):
+        return AttentionDecision(AttentionCategory.MODIFY_PRIMARY_TASK, prio,
+                                 "mid-task correction — call modify_task")
+
     if _STATUS_Q.search(text):
         return AttentionDecision(AttentionCategory.CONVERSATION, prio, "status question about current work")
 

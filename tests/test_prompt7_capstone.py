@@ -80,12 +80,13 @@ async def test_prompt7_capstone(live_pool: Any) -> None:
     await _complete_all_steps(live_pool, t1.id)
     err = await store.finish(t1.id, status="done")
     assert err is None
-    async with live_pool.acquire() as c:  # the task is gone; the lesson survives (task_id → NULL)
-        assert await c.fetchval("SELECT count(*) FROM task WHERE id=$1", task1_id) == 0
+    async with live_pool.acquire() as c:  # Turn 1: task row STAYS; queryable + FK-linked
+        task_row = await c.fetchrow("SELECT status, archived_at FROM task WHERE id=$1", task1_id)
+        assert task_row is not None and task_row["archived_at"] is not None
         cand = await c.fetchrow("SELECT verification_state, evidence_level, task_id FROM "
                                 "learning_candidate WHERE id=$1", cand_id)
     assert cand["verification_state"] == "verified" and cand["evidence_level"] == 5
-    assert cand["task_id"] is None   # outlived its task, still evidence-backed
+    assert cand["task_id"] == task1_id  # FK still resolves to the archived task
 
     # ── DAILY CONSOLIDATION: promote the verified lesson into durable, reusable knowledge (§9/§21) ────
     summary = await DailyConsolidation(live_pool, publisher=EventPublisher(live_pool)).run(

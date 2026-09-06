@@ -8,6 +8,7 @@ terminal window with the full message. Works from an interactive session or the 
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
@@ -55,6 +56,19 @@ class Notify(Tool):
         if not message:
             return ToolResult(ok=False, display="nothing to say", error="message is required")
         title = str(args.get("title") or "Sali").strip()
+        # Ground this SELF-INITIATED message before it reaches Almir's desktop (§ proactive grounding).
+        # A proactive turn carries no tool receipts, so strike only the receipt-free families — a
+        # capability Sali lacks ("I texted your wife"), a machine state the machine disproves — never
+        # action_done/file_send, which would over-strike a legitimate "I finished X". Fail-open: a
+        # grounder hiccup must never block a notification. Struck strikes feed the same /grounding ledger.
+        with contextlib.suppress(Exception):
+            from sali.verify.response_claims import validate_proactive
+            _rv = await validate_proactive(message, cap_of={})
+            if _rv.changed:
+                message = _rv.rewritten
+                if getattr(ctx, "pool", None) is not None:
+                    from sali.runtime.grounding_log import GroundingLog
+                    await GroundingLog(ctx.pool).record(session_id=None, run_id=None, claims=_rv.struck)
         env = _desktop_env()
         sent = _notify_send(title, message, env)
         opened = _open_terminal(title, message, env) if args.get("terminal") else False

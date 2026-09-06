@@ -41,7 +41,10 @@ def build_twin_memories(snapshot: TwinSnapshot) -> list[tuple[str, str]]:
     kernel = props.get("kernel", "")
     arch = props.get("arch", "")
     machine = (
-        f"This is Almir's machine: {snapshot.machine_name}"
+        # Recalled later as a plain fact about where Sali lives, so it is phrased from inside: he is
+        # not describing someone else's computer, he is describing his own environment. Whose hardware
+        # it is stays in the identity prefix, where it is stated once and correctly.
+        f"This machine — the one I live on — is {snapshot.machine_name}"
         + (f" (kernel {kernel}, {arch})" if kernel or arch else "")
         + (". Its hardware — " + "; ".join(hw_bits) + "." if hw_bits else ".")
     )

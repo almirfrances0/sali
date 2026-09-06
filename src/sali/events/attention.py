@@ -47,7 +47,11 @@ _CRITICAL_SIGNALS = frozenset({"disk_full", "service_failed", "security_exposure
 _IMPORTANT_SIGNALS = frozenset({"new_service", "recurring_failure", "config_change", "source_delete",
                                 "unknown_process"})
 # Signals that (at a high tier) genuinely need model interpretation rather than a fixed response.
-_INVESTIGATE_SIGNALS = frozenset({"new_service", "recurring_failure", "unknown_process"})
+# 'new_service' intentionally NOT here: on a box with WireGuard/Cloudflare, ephemeral sockets churn
+# constantly; auto-investigating each one spawned mid-chat `ss` runs and polluted durable memory with
+# "new listening socket …" experiences. New sockets still record/notify via the tiers above; they just
+# no longer wake an autonomous investigate turn.
+_INVESTIGATE_SIGNALS = frozenset({"recurring_failure", "unknown_process"})
 
 _TIER_ACTION = {
     AttentionTier.ROUTINE: AttentionAction.IGNORE,

@@ -72,7 +72,12 @@ async def unacknowledged_observations(conn: Any, *, limit: int = 8) -> tuple[lis
     ) or 0
     rows = await conn.fetch(
         "SELECT seq, payload->>'summary' AS summary FROM event "
-        "WHERE event_type='desktop.observed' AND seq > $1 ORDER BY seq DESC LIMIT $2",
+        "WHERE event_type='desktop.observed' "
+        # Exclude machine-firehose observations (new sockets / failed services / disk pressure) — those are
+        # NOT 'what Almir's doing on screen' and were leaking into every turn as 'new listening socket …',
+        # making Sali raise UDP/port topics unprompted. Mirrors the filter already in world_state.py.
+        "AND coalesce(payload->>'kind','') NOT IN ('port_opened','service_failed','disk_pressure') "
+        "AND seq > $1 ORDER BY seq DESC LIMIT $2",
         int(through), int(limit),
     )
     if not rows:

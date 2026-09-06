@@ -21,6 +21,18 @@ from sali.tasks.store import TaskStore
 pytestmark = pytest.mark.db
 
 
+# A crash is only a retry when it LOST something. `retry_count` used to rise on every recovery cycle,
+# including one where nothing was in flight — so routine daemon restarts consumed a healthy task's whole
+# budget and marked it "exhausted 3 retries" (measured live: task 9df85b0b burned 2 of 3 on two restarts
+# three minutes apart while progressing normally). These tests still assert that the budget persists and
+# is enforced; they now stage a genuine crash — a tool caught mid-flight — instead of an empty one.
+async def _crash_mid_tool(pool: Any, task_id: Any, attempt: int = 1) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO task_execution (task_id, step_seq, tool_name, status, attempt) "
+            "VALUES ($1, 1, 'execute_command', 'running', $2)", task_id, attempt)
+
+
 # ---- TEST 1: Task checkpoint persistence --------------------------------------------------------
 
 async def test_checkpoint_persists(live_pool: Any) -> None:
@@ -169,11 +181,13 @@ async def test_retry_count_persists(live_pool: Any) -> None:
     await store.activate(task.id)
 
     # First recovery
+    await _crash_mid_tool(live_pool, task.id, 1)
     await mark_task_interrupted(live_pool, task.id, reason="crash_1")
     r1 = await recover_task(live_pool, task.id)
     assert r1["retry_count"] == 1
 
     # Second recovery
+    await _crash_mid_tool(live_pool, task.id, 2)
     await mark_task_interrupted(live_pool, task.id, reason="crash_2")
     r2 = await recover_task(live_pool, task.id)
     assert r2["retry_count"] == 2
@@ -193,6 +207,7 @@ async def test_retry_limit_enforced(live_pool: Any) -> None:
 
     # Exhaust retries
     for i in range(3):
+        await _crash_mid_tool(live_pool, task.id, i + 1)
         await mark_task_interrupted(live_pool, task.id, reason=f"crash_{i}")
         if i < 2:
             await recover_task(live_pool, task.id)

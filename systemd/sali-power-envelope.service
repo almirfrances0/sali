@@ -1,0 +1,60 @@
+# The power envelope Sali's continued existence depends on. Replaces nvidia-powercap.service,
+# which capped only the GPU — half the load — and therefore did not prevent the 2026-09-01
+# power-off. See scripts/power_envelope.sh for the full post-mortem.
+#
+#   sudo cp systemd/sali-power-envelope.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now sali-power-envelope
+#   sudo systemctl disable --now nvidia-powercap    # superseded (GPU-only)
+[Unit]
+Description=Sali power envelope — cap CPU package + GPU so a 35B MoE prefill cannot trip the PSU
+Documentation=file:/home/almir/Desktop/sali/scripts/power_envelope.sh
+
+# NEVER put multi-user.target in After= or Wants= here. It cost Sali every automatic start
+# between 2026-09-01 and 2026-09-05.
+#
+# systemd.target(5), "Default Dependencies": a target automatically gains After= on every unit it
+# Wants=. This unit AND sali.service are both in multi-user.target.wants/, so systemd derives
+# multi-user.target After=sali.service. Adding an explicit After=multi-user.target here closed the
+# loop:
+#
+#     multi-user.target --after--> sali.service --after--> sali-power-envelope.service
+#                       <--after-------------------------------------'
+#
+# PID 1 cannot order a cycle, so it deleted the only Wants=-strength (deletable) edge in it:
+#     "multi-user.target: Job sali.service/start deleted to break ordering cycle
+#      starting with multi-user.target/start"
+# Sali therefore never auto-started once. Every start in the journal was a hand-typed
+# `sudo systemctl restart sali`. The login looked causal; it was coincidence.
+#
+# This unit needs exactly two things, and neither is multi-user.target:
+#   * /sys/class/powercap/intel-rapl:0 — intel_rapl_msr is a MODULE, udev-autoloaded
+#     asynchronously (boot 0: RAPL domains at +5.81s, sysinit.target at +6.37s). Nothing in
+#     sysinit ordering waits for it, so the ExecStartPre below waits for it explicitly.
+#   * a working nvidia-smi — nvidia-persistenced only reaches active once it has opened
+#     /dev/nvidia* (boot 0: +6.40s), which is the earliest honest signal available.
+After=nvidia-persistenced.service
+
+[Service]
+Type=oneshot
+
+# FAIL CLOSED. power_envelope.sh's RAPL branch prints "UNCAPPED" to stderr and still returns 0, so
+# without this gate the unit could go active having applied only the GPU half — and sali.service's
+# Requires= would be satisfied with the CPU package still at its 255W board limit. That is the exact
+# condition that collapsed the rail on 2026-09-01. Wait up to 30s for the module, then refuse.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do [ -w /sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw ] && exit 0; sleep 0.5; done; echo "intel-rapl:0 never appeared — refusing to declare a power envelope" >&2; exit 1'
+
+# Same idea for the GPU half, but preserving the script's own semantics: if nvidia-smi is not
+# installed at all the script deliberately continues, so this gate does too. It only closes the
+# "driver not ready yet" race that moving this unit earlier in boot would otherwise open.
+ExecStartPre=/bin/sh -c 'command -v nvidia-smi >/dev/null 2>&1 || exit 0; for i in $(seq 1 60); do nvidia-smi -L >/dev/null 2>&1 && exit 0; sleep 0.5; done; echo "nvidia-smi never became ready — refusing to declare a power envelope" >&2; exit 1'
+
+ExecStart=/home/almir/Desktop/sali/scripts/power_envelope.sh
+RemainAfterExit=yes
+
+# Type=oneshot disables the start timeout by default (systemd.service(5)), and this unit is now
+# ordered before multi-user.target. A wedged nvidia-smi would otherwise stall the boot forever.
+TimeoutStartSec=120
+
+# Re-apply after resume: RAPL limits do not always survive a suspend cycle.
+[Install]
+WantedBy=multi-user.target sleep.target

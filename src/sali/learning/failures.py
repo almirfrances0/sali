@@ -1,8 +1,15 @@
 """Learn from failure (spec §18): a verified tool failure becomes a retrievable episodic memory.
 
 When Sali later faces a similar task, retrieval surfaces "last time this failed with X" so it
-doesn't blindly repeat the mistake. Each failure is a functional claim keyed by its execution id,
-so consolidating repeatedly never duplicates it. Deterministic — the record is what happened.
+doesn't blindly repeat the mistake. Each failure is a functional claim keyed by the LESSON — the tool
+plus the program or operation that failed — so the same mistake made ten times is one memory that
+`_resolve_claim` supersedes in place. Deterministic — the record is what happened.
+
+It used to be keyed by the tool_execution id. That prevented re-processing one execution twice, but it
+is not what "same lesson, one memory" means: every fresh occurrence got a fresh row, the identical
+`cd /home/almir/...` failure was stored 55 times, and by 2026-09-03 tool-failure episodes were 46% of
+live memory (101 of 219 rows, only 15 distinct). Retrieval then put "the execute_command tool failed"
+at the top of Sali's context on every turn, and Sali stopped reaching for tools at all.
 """
 
 from __future__ import annotations
@@ -39,6 +46,18 @@ def _step_summary(tool_name: str, plan: Any) -> str:
     return tool_name
 
 
+def _lesson_key(tool_name: str, step: str, command: str | None) -> str:
+    """The identity of the LESSON, not of the execution.
+
+    Two failures are the same lesson when the same tool failed doing the same kind of thing. For a
+    command tool that is the program being run (`_binary`), so fifty-five failures of `cd ...` are one
+    claim rather than fifty-five memories. For other tools the step summary already carries the operation
+    and is bounded to 60 characters.
+    """
+    signature = (_binary(command) if command else step) or tool_name
+    return f"failure:{tool_name}:{signature[:60]}"
+
+
 async def record_failures(conn: Any, *, limit: int = 50) -> int:
     """Record recent verified failures not yet captured — and, when a later step in the same run
     fixed it, the correction too (§18's diagnosis→correction). Caller owns the transaction."""
@@ -48,8 +67,14 @@ async def record_failures(conn: Any, *, limit: int = 50) -> int:
         # Only RECENT failures — old dev-time failures are noise, not lessons. Bounded so the whole
         # historical backlog isn't turned into hundreds of episodic memories.
         "WHERE te.status = 'verified_failure' AND te.started_at > now() - interval '2 days' "
-        "  AND NOT EXISTS (SELECT 1 FROM memory m WHERE m.claim_key = 'failure:' || te.id::text "
-        "    AND m.valid_until IS NULL) "
+        # Has this EXECUTION already been turned into a lesson? Deliberately not filtered by
+        # `valid_until IS NULL`: a retired or superseded memory still means the execution was
+        # processed. With the old filter, retiring duplicate failure memories caused the next
+        # consolidation to recreate every one of them. Both key shapes are checked so executions
+        # recorded under the old per-execution claim_key are not re-recorded under the new one.
+        "  AND NOT EXISTS (SELECT 1 FROM memory m "
+        "    WHERE m.claim_key = 'failure:' || te.id::text "
+        "       OR m.structured->>'tool_execution_id' = te.id::text) "
         "ORDER BY te.started_at DESC LIMIT $1",
         limit,
     )
@@ -93,6 +118,9 @@ async def record_failures(conn: Any, *, limit: int = 50) -> int:
             "correction": fix_step or fix_command,
             "verified": True,  # the correction was a verified_success later in the same run
             "outcome": "resolved",
+            # Which execution produced this lesson. The claim_key now names the lesson, so this is what
+            # tells the consolidator that this particular execution has already been accounted for.
+            "tool_execution_id": str(row["id"]),
         }
         # Record each distinct failure→fix once (dedup by content signature) — same lesson, one memory.
         if await conn.fetchval(
@@ -103,7 +131,8 @@ async def record_failures(conn: Any, *, limit: int = 50) -> int:
         await memory_writer.remember(
             conn, layer=MemoryLayer.EPISODIC, content=content,
             source=MemorySource.SYSTEM_OBSERVATION, functional=True,
-            claim_key=f"failure:{row['id']}", importance=0.6, obs_conf=1.0, note=note,
+            claim_key=_lesson_key(row["tool_name"], step, command),
+            importance=0.6, obs_conf=1.0, note=note,
             structured=incident,
         )
         count += 1

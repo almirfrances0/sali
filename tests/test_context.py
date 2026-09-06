@@ -50,7 +50,7 @@ def test_stale_memory_is_surfaced_not_asserted() -> None:
     bundle = RetrievalBundle(memories=[_hit("GPU driver is 550", stale=True)])
     assembled = _engine().assemble("what driver do I have?", bundle, tool_specs=[])
     assert "GPU driver is 550" in assembled.conflicts
-    system = assembled.messages[0].content
+    system = "\n".join(m.content for m in assembled.messages)  # memory renders into the user message
     assert "STALE" in system  # labeled, with an instruction to verify
 
 
@@ -58,17 +58,22 @@ def test_memory_provenance_is_rendered_at_use_time() -> None:
     # Each recalled memory carries WHERE it came from into context, so the model weighs a web claim
     # differently from something Almir said — provenance isn't thrown away at the moment of use.
     bundle = RetrievalBundle(memories=[_hit("Almir prefers Neovim")])  # source=USER_EXPLICIT
-    system = _engine().assemble("what editor do I like?", bundle, tool_specs=[]).messages[0].content
+    system = "\n".join(m.content for m in
+                       _engine().assemble("what editor do I like?", bundle, tool_specs=[]).messages)
     assert "Almir told you" in system  # the source label for USER_EXPLICIT
     assert "confidence" in system
 
 
 def test_live_note_included_when_present() -> None:
+    # Brain-audit Turn 5: LIVE_NOTE is now an empty string (duplicated IDENTITY's
+    # "go look rather than assume" clause). engine.py:270's `if live_note:` guard treats
+    # empty as falsy, so no "live" section is appended. The rule survives in IDENTITY.
     assembled = _engine().assemble(
         "how much RAM now?", RetrievalBundle(), tool_specs=[], live_note=LIVE_NOTE
     )
-    assert "live" in assembled.included
-    assert "go check it directly" in assembled.messages[0].content.lower()
+    assert "live" not in assembled.included
+    # IDENTITY still carries the "go look" rule (kept from before Turn 5).
+    assert "go look rather than assume" in assembled.messages[0].content.lower()
 
 
 def test_machine_changes_included_when_present() -> None:
@@ -77,10 +82,11 @@ def test_machine_changes_included_when_present() -> None:
         machine_changes="While Almir was away: Docker was installed.",
     )
     assert "machine_changes" in assembled.included
-    assert "docker was installed" in assembled.messages[0].content.lower()
+    assert "docker was installed" in "\n".join(m.content for m in assembled.messages).lower()
 
 
 def test_user_query_always_in_messages() -> None:
     assembled = _engine().assemble("a very specific question", RetrievalBundle(), tool_specs=[])
     assert assembled.messages[-1].role == "user"
-    assert assembled.messages[-1].content == "a very specific question"
+    # the query LEADS the user message; a per-turn voice/plan-task instruction is appended after it
+    assert assembled.messages[-1].content.startswith("a very specific question")

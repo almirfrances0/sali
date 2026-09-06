@@ -58,11 +58,18 @@ class HealthService:
         self._pool = pool
         self._provider = provider
         self._perception = perception
+        self._cached: tuple[float, Health] | None = None  # (monotonic stamp, snapshot)
 
     async def online(self) -> bool:
         return await check_internet()
 
-    async def check(self, *, probe_embedder: bool = True) -> Health:
+    async def check(self, *, probe_embedder: bool = True, max_age_s: float = 0.0) -> Health:
+        """Full subsystem probe. ``max_age_s`` returns a recent snapshot instead of re-probing —
+        the per-turn health note paid a leased embed inference + an internet TCP probe on the
+        first-token path of EVERY reply (audit); faculties tolerate a stale-by-seconds answer."""
+        import time as _time
+        if max_age_s > 0 and self._cached is not None                 and (_time.monotonic() - self._cached[0]) < max_age_s:
+            return self._cached[1]
         detail: dict[str, str] = {}
         datastore = await self._probe(self._probe_datastore, detail, "datastore")
         model = await self._probe(self._provider.health, detail, "model")
@@ -72,8 +79,10 @@ class HealthService:
         perception = await self._probe(self._probe_perception, detail, "perception")
         internet = await check_internet()
         detail["internet"] = "reachable" if internet else "offline"
-        return Health(datastore=datastore, model=model, embedder=embedder,
-                      perception=perception, internet=internet, detail=detail)
+        h = Health(datastore=datastore, model=model, embedder=embedder,
+                   perception=perception, internet=internet, detail=detail)
+        self._cached = (_time.monotonic(), h)
+        return h
 
     async def _probe(self, fn: Any, detail: dict[str, str], name: str) -> bool:
         try:

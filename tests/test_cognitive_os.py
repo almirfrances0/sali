@@ -17,11 +17,11 @@ from sali.provider.base import ChatResult
 from sali.provider.fake import FakeModelProvider
 from sali.retrieval.service import RetrievalService
 from sali.runtime import cognitive
-from sali.runtime.loop import AgentLoop, _DelegateSink
+from sali.runtime.loop import AgentLoop
 from sali.runtime.runtime import AgentRuntime
 from sali.security.confirm import AutoAllowConfirmer
 from sali.security.policy import PolicyEngine
-from sali.tasks.coordination import DelegationStore, QuestionStore
+from sali.tasks.coordination import QuestionStore
 from sali.tasks.reviewer import TaskReviewer
 from sali.tasks.store import TaskStore
 from sali.tasks.watchdog import WatchdogConfig
@@ -41,7 +41,7 @@ def _loop(pool: Any, provider: FakeModelProvider) -> AgentLoop:
         policy=PolicyEngine(), confirmer=AutoAllowConfirmer(), settings=_settings())
     pub = EventPublisher(pool)
     for st in (loop._tasks, loop._decisions, loop._phases, loop._research_store, loop._skills,
-               loop._delegations, loop._questions):
+               loop._questions):
         st._publisher = pub
     loop._reviewer = TaskReviewer(pool, pub)
     loop._tasks._reviewer = loop._reviewer
@@ -110,61 +110,17 @@ def test_capability_registry_lists_what_sali_can_do(live_pool: Any) -> None:
 
 
 # ── single executive agent — NO subagent (Prompt 12 §7 + user directive) ─────────────────────────────
+# Brain-audit turn 8 removed the inert `Delegate` tool + `_DelegateSink` + `DelegationStore` scaffolds.
+# The invariants they proved (no second reasoning stream, no delegate tool advertised) are now enforced
+# by absence: there is no delegate tool CLASS to register, no ToolContext channel to pass one through,
+# no `delegation` row that anything writes to. The remaining guard is a positive check that the tool
+# registry has no delegate entry (belt-and-suspenders — the class doesn't exist, so registration would
+# fail with an ImportError). The AST-based scaffold-removal tests live in
+# tests/test_brain_turn8_delegation_scaffold_removed.py.
 
-async def test_delegation_store_index_still_guarantees_at_most_one(live_pool: Any) -> None:
-    # Delegation is disabled at the sink/tool, but the DelegationStore's 0-or-1 partial-unique index
-    # remains as a structural safety net (no two subagents could ever run even if something tried).
-    pub = EventPublisher(live_pool)
-    store = TaskStore(live_pool, pub)
-    task = await store.create("x", ["a"])
-    ds = DelegationStore(live_pool, pub)
-    d1 = await ds.start(parent_task_id=task.id, parent_run_id=uuid4(), objective="A",
-                        workspace=None, session_id=uuid4())
-    d2 = await ds.start(parent_task_id=task.id, parent_run_id=uuid4(), objective="B",
-                        workspace=None, session_id=uuid4())
-    assert d1 is not None and d2 is None   # a second concurrent subagent is structurally impossible
-
-
-async def test_subagent_is_disabled_no_spawn_no_second_model_call(live_pool: Any) -> None:
-    # Sali is ONE executive agent. delegate() must NEVER spawn a sub-run (a second reasoning stream could
-    # issue a concurrent model call and load sali:latest twice — which this machine cannot handle).
-    loop = _loop(live_pool, FakeModelProvider())
-    store = loop._tasks
-    task = await store.create("Build the app", ["scaffold", "auth"])
-    await store.activate(task.id)
-    sink = _DelegateSink(loop=loop, tasks=store, run_id=uuid4(), store=loop._delegations)
-    out = await sink.delegate("research the API version requirement")
-    assert out["ok"] is False and "single executive agent" in out["reason"]   # refused, nothing spawned
-    # nothing was started: no delegation row, still exactly one primary task
-    assert await loop._delegations.list_for_task(task.id) == []
-    async with live_pool.acquire() as c:
-        assert await c.fetchval("SELECT count(*) FROM task WHERE is_primary") == 1
-
-
-async def test_delegate_tool_always_refuses_and_is_unregistered(live_pool: Any) -> None:
-    from sali.core.clock import SystemClock
-    from sali.runtime.loop import _ClarifySink
-    from sali.tools.builtins.agent_tool import AskUser, Delegate
-    from sali.tools.builtins.task_tool import PlanTask
-    from sali.tools.context import ToolContext
-
-    loop = _loop(live_pool, FakeModelProvider())
-    store = loop._tasks
-    task = await store.create("build", ["a"])
-    await store.activate(task.id)
-    clarify = _ClarifySink(store=loop._questions, tasks=store, run_id=uuid4())
-    ctx = ToolContext(settings=Settings(), clock=SystemClock(), pool=live_pool, tasks=store,
-                      delegate=_DelegateSink(loop=loop, tasks=store, run_id=uuid4(),
-                                             store=loop._delegations), clarify=clarify)
-    # the delegate tool always refuses (single agent); clarification still works
-    assert not (await Delegate().run({"objective": "research X"}, ctx)).ok
-    assert (await AskUser().run({"question": "A or B?"}, ctx)).output["status"] == "waiting_for_user"
-    # and it is not even advertised in the tool registry
+def test_no_delegate_tool_is_advertised() -> None:
+    """The tool registry must not advertise any tool named 'delegate'."""
     assert "delegate" not in {t.name for t in default_registry().advertise()}
-    # the subagent-context guard on task tools remains intact
-    sub = ToolContext(settings=Settings(), clock=SystemClock(), tasks=store, is_subagent=True,
-                      clarify=clarify)
-    assert not (await PlanTask().run({"objective": "x", "steps": ["a"]}, sub)).ok
 
 
 # ── user clarification: waiting_for_user (§44) ──────────────────────────────────────────────────────

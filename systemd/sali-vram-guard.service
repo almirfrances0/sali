@@ -1,0 +1,31 @@
+# System-level GPU guard — nothing may load the model twice, and the card may not run over the line.
+#
+# Independent of Sali on purpose: both 2026-09-01 power-offs happened with Sali NOT running, when a
+# separate app drove ollama to load the model without checking if it was already loaded. This guard
+# watches the one resource everything shares — the 12GB card — and stops a duplicate/second load or a
+# runaway before it compounds. See scripts/vram_guard.py for exactly what it does and does not catch.
+#
+#   sudo cp systemd/sali-vram-guard.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now sali-vram-guard
+#   journalctl -u sali-vram-guard -f
+[Unit]
+Description=Sali VRAM guard — stop any duplicate/second model load before it browns out the machine
+# NEVER put multi-user.target in After= here. This unit is WantedBy=multi-user.target, and a target
+# automatically gains After= on everything it Wants= (systemd.target(5)) — so pointing back at the
+# target creates the ordering cycle that cost sali.service every automatic start until 2026-09-05.
+# See sali-power-envelope.service for the full note. ollama is the only real dependency.
+After=ollama.service
+
+[Service]
+Type=simple
+# Root: it must be able to unload ollama's model and, as a last resort, stop a rogue GPU process.
+User=root
+ExecStart=/home/almir/Desktop/sali/.venv/bin/python /home/almir/Desktop/sali/scripts/vram_guard.py
+Restart=always
+RestartSec=2
+# The guard is the machine's seatbelt — it should come back instantly and never be the thing that dies.
+Nice=-5
+OOMScoreAdjust=-800
+
+[Install]
+WantedBy=multi-user.target

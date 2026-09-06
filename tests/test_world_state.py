@@ -75,7 +75,8 @@ def test_world_note_becomes_a_context_section() -> None:
     note = WorldState(focused_app="Code", recent_errors=["port 3000 in use"]).render()
     result = engine.assemble("why isn't this working?", RetrievalBundle(), [], world_note=note)
     assert "world" in result.included
-    assert "Focused: Code" in result.messages[0].content and "port 3000" in result.messages[0].content
+    _ctx = "\n".join(m.content for m in result.messages)  # sections live in the user message now
+    assert "Focused: Code" in _ctx and "port 3000" in _ctx
 
 
 async def test_builder_without_perception_still_works(live_pool: Any) -> None:

@@ -57,9 +57,23 @@ def test_queue_for_later() -> None:
 
 
 def test_continuation_stays_on_task() -> None:
+    # Turn 6 hardened: a phrase must anchor to an explicit step/plan/task/objective
+    # to route as MODIFY. A bare "also make X use Y" without a step reference stays
+    # on CONTINUE_PRIMARY (safer default - too broad a match risks misrouting new tasks).
     d = classify("also make the login page use the new theme", has_primary=True,
                  current_objective="build the login page")
-    assert d.category is C.CONTINUE_PRIMARY and not d.touches_primary
+    assert d.category is C.CONTINUE_PRIMARY
+
+    # Explicit step reference DOES route as MODIFY - the intent is unambiguous.
+    d = classify("on step 2, use the new theme", has_primary=True,
+                 current_objective="build the login page")
+    assert d.category is C.MODIFY_PRIMARY_TASK and d.touches_primary
+
+    # A neutral progress question is CONVERSATION; a bare continuation of thought
+    # (no correction verb, no status question) stays CONTINUE_PRIMARY.
+    d = classify("the color could be a bit warmer", has_primary=True,
+                 current_objective="build the login page")
+    assert d.category is C.CONTINUE_PRIMARY
 
 
 def test_priority_signals() -> None:

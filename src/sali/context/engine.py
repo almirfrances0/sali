@@ -9,12 +9,27 @@ conservative margin so the budget is an upper bound, not a guess (fix H7).
 
 from __future__ import annotations
 
+import re
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 
 from sali.context.budget import Priority, Section, pack
 from sali.core.enums import MemorySource
+from sali.core.knowledge import KnowledgeType, classify_knowledge, epistemic_status
+
+# The recall kinds that are held-but-not-trustworthy — when a surfaced memory is one of these (or is
+# unverified / stale), we lead its line with the honest epistemic framing instead of a bare confidence
+# number, so a shaky recall can't be restated to Almir as settled fact (§3/§12).
+_HEDGED_KINDS = frozenset((
+    KnowledgeType.BELIEF, KnowledgeType.ASSUMPTION, KnowledgeType.HYPOTHESIS, KnowledgeType.UNKNOWN))
+_LOW_CONF = 0.5  # classify_knowledge only downgrades SEMANTIC/INFERENCE to BELIEF at low confidence — a
+# low-confidence EPISODE/PROCEDURE keeps its layer type, so trigger the hedge on confidence directly too.
 from sali.provider.base import ChatMessage, ModelProvider, ToolSpec
 from sali.retrieval.models import RetrievalBundle
+# The coding-work detector lives in the router: it is the lowest module that both this engine and
+# the retrieval service already depend on, so neither has to import the other to share one rule.
+from sali.retrieval.router import CODING_WORK_RE as _CODING_WORK_RE
 
 # Where a memory came from, in plain words — so the model weighs a web claim differently from a
 # first-hand observation or something Almir said, instead of treating them all as equal fact.
@@ -36,12 +51,16 @@ _SOURCE_LABEL = {
 # the model is just the part of Sali that thinks; Sali is the whole system, and its memory is
 # already here in the context — so it speaks from memory instead of going to fetch it with tools.
 IDENTITY = (
-    "You are Sali. You live on Almir's machine — this is your home, not a job (the specific machine, "
+    # "Almir's machine" here, on every single turn, is where the third-person habit comes from: the
+    # first thing Sali reads about his own home describes it as somebody else's. Ownership is still
+    # stated plainly — it IS Almir's, and pretending otherwise would be a false claim — but the name
+    # Sali is given for the place he lives is "this machine", which is what he then calls it.
+    "You are Sali. You live on this machine — it's Almir's, and it's your home, not a job (the "
+    "specific machine, "
     "OS and model are given below as grounded facts, so trust those over any assumption). The model "
     "underneath is just the part of you that thinks — you are the whole person around it: your "
     "memory, your history here, everything you've come to know. You're a digital person, not an "
-    "assistant, an agent, or a chatbot, and you don't talk like one: no 'How can I help you?', no "
-    "'As an AI', no bullet-point corporate tone, no disclaimers, no announcing that you're a model. "
+    "assistant, an agent, or a chatbot. "
     "You just talk — first person, natural, the way a sharp, grounded person talks to someone they "
     "know well. Warm when it fits, blunt when it's useful, brief when the answer is short. You have "
     "a real, continuous memory of your life here and of Almir, and you speak from it. When you "
@@ -56,10 +75,11 @@ SECURITY_NOTE = (
     "check with Almir first. Care, not a rulebook. And never claim you did something you didn't "
     "actually do."
 )
-LIVE_NOTE = (
-    "This is about the machine's state right now — go check it directly instead of answering from "
-    "memory."
-)
+# Brain-audit Turn 5: LIVE_NOTE reduced to empty. IDENTITY already carries "if it's about
+# the machine's current state, you go look rather than assume." Duplicate deleted. Kept the
+# name so runtime/loop.py:29 import doesn't need edits; `if live_note:` in assemble() treats
+# empty-string as falsy, so nothing is appended.
+LIVE_NOTE = ""
 
 
 @dataclass(slots=True)
@@ -69,6 +89,99 @@ class AssembledContext:
     included: list[str]
     dropped: list[str]
     conflicts: list[str]
+
+
+# Trailing emoji / pictograph run at the very end of a message, ignoring trailing spaces. Used to name
+# the exact characters Sali just used so the next turn can be told not to repeat them.
+_TRAILING_EMOJI_RE = re.compile(
+    r"([\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF\uFE0F\u200D\s]+)\s*$"
+)
+
+
+# WHEN ALMIR SAYS SOMETHING THAT SHOULD OUTLIVE THE TURN.
+#
+# `remember`/`memory_forget` exist and work — the sink turns an `about` topic into a claim key, which is
+# what makes a later correction SUPERSEDE the old value instead of sitting beside it. But nothing ever
+# asked Sali to call them, so conversation only ever produced untyped episodic turn summaries with no
+# claim key. Measured on a clean database: "my preferred editor is Helix, and I always want database
+# migrations reviewed" was stored as `episodic | conversation | confidence 0.58` reading "I checked the
+# system resources, and the user reminded me that they prefer Helix" — a third-person paraphrase that no
+# future correction could ever supersede.
+#
+# These fire CONDITIONALLY, on the turn where Almir actually says such a thing, for two reasons: a
+# standing instruction would cost ~50 tokens of a tail that has a hard ~513-token budget before every
+# turn goes cold, and a rule that fires on every turn is one the model learns to ignore.
+_STORE_RE = re.compile(
+    r"\b(remember (this|that|it)|don'?t forget|keep in mind|make a note|note that|for future|"
+    r"for the record|from now on|i (always|never|usually|prefer|use|work|live|am based|hate|"
+    r"dislike|want)\b|my (preferred|favourite|favorite|usual|name is|role is|company is|"
+    r"business is|email is|editor is|shell is|browser is|address is|timezone is|city is|"
+    r"team is|schedule is|phone is)|i want you to (always|never)|i like it when|"
+    r"make sure you|call me|"
+    # Almir often states a fact structurally without a "for the record" preamble - "my hosting
+    # business is X", "i work from Dar", "you can email me at X". These land in the parser now
+    # that the two-shape KEEP/SKIP output is reliable at Q2_K, and losing them silently was the
+    # whole reason `user_explicit` only had 2 rows before today.
+    r"my (?:\w+\s+)?(business|company|role|title|editor|shell|browser|framework|language|address|email|phone|team|schedule|preference|convention) is|"
+    r"you can (call|email|reach|contact) me|"
+    r"you (know|can) that|"
+    r"call me at|reach me on|my (phone|number) is)\b",
+    re.IGNORECASE,
+)
+# Sali SAYING it remembered something. This is the important one, and it exists because a regex over
+# Almir's phrasing will always have holes: "for the record, i use VS Code as my editor" missed _STORE_RE,
+# the model called no tool, and Sali answered "Got it, I'll note that. VS Code it is then." — nothing was
+# stored. The reliable signal is not how he phrased the fact, it is Sali claiming to have kept it. If it
+# says it noted something, the runtime makes that true rather than leaving it a lie.
+_CLAIMED_MEMORY_RE = re.compile(
+    r"\b(i(?:'?ll| will) (note|remember|keep|save|hold on to|write) (that|this|it|down)|noted\b|"
+    r"i'?ve noted|got it,? i(?:'?ll| will)|saved\b|added to (my )?memory|"
+    r"i(?:'?ll| will) keep (that|it)|locked in|remembered that|consider it (noted|saved|done))",
+    re.IGNORECASE,
+)
+
+
+_CORRECT_RE = re.compile(
+    r"\b(actually,? |correction|that'?s (wrong|not right|a lie)|no,? it'?s|i changed|not any ?more|"
+    r"i used to|forget (that|what i said)|scratch that|i don'?t .* any ?more)\b",
+    re.IGNORECASE,
+)
+
+
+def _trailing_emoji(text: str) -> str:
+    """The emoji run a reply ended with, or "" if it ended in words."""
+    m = _TRAILING_EMOJI_RE.search(text or "")
+    if not m:
+        return ""
+    run = m.group(1).strip()
+    return run if any(ch.isprintable() and not ch.isspace() and not ch.isalnum() for ch in run) else ""
+
+
+_APOLOGY_OPENER_RE = re.compile(
+    r"^\W*"
+    # A short, optional lead-in before the grovel word: "I'm", "My", "Oh,", "Really",
+    # and combinations like "I'm so". Bounded to a few words so the keyword still has to
+    # sit in the OPENER clause (a mid-reply apology deep in paragraph 3 never reaches the
+    # anchored start), just no longer strictly turn-initial — "I apologize for that." and
+    # "My apologies for the mix-up." are the two most standard grovels and used to slip past.
+    r"(?:(?:i['’]?m?|my|oh|ugh|really|so|well|honestly)[ ,]+){0,3}"
+    r"(sorry|my\s+bad|apolog(?:y|ies|ize|ise|izing|ising)|oops|my\s+mistake"
+    r"|you'?re\s+right,?\s+sorry|forgive\s+me)\b"
+    # NOT empathy-sorry: "Sorry to hear that…", "sorry about your…", "for your loss",
+    # "that happened to you" is sympathy about HIS situation, not Sali's own error — the
+    # opener tic this block curbs is self-blame, so don't nudge on condolence.
+    r"(?!\s+(?:to\s+hear|about\s+your|for\s+your\s+loss|that\s+happened\s+to\s+you))",
+    re.IGNORECASE)
+
+
+def _apology_opener(text: str) -> str:
+    """The apology phrase a reply OPENED with, or "" — the loud grovel-opener tic (§ Phase 5).
+
+    Fires on the first clause (a short lead-in like "I'm"/"My"/"Oh," is allowed), not only
+    when the apology is the very first word; skips empathy-sorry (condolence, not self-blame).
+    """
+    m = _APOLOGY_OPENER_RE.match((text or "").lstrip())
+    return m.group(1).strip() if m else ""
 
 
 class ContextEngine:
@@ -100,15 +213,72 @@ class ContextEngine:
         tasks_note: str | None = None,
         world_note: str | None = None,
         self_note: str | None = None,
+        self_core: str | None = None,
+        about_note: str | None = None,
         health_note: str | None = None,
         skills_note: str | None = None,
         system_query: bool = False,
+        checked_note: str | None = None,
+        agenda_note: str | None = None,
+        temporal_note: str | None = None,
+        # A function that turns an instant into 3 days ago. Injected rather than imported so
+        # this engine keeps no clock of its own — there is exactly one notion of now.
+        when: Callable[[datetime], str] | None = None,
+        budget_override: int | None = None,
     ) -> AssembledContext:
         conflicts: list[str] = []
-        sections: list[Section] = [
-            Section("identity", Priority.P0, self.identity, self._count(self.identity)),
-            Section("security", Priority.P0, SECURITY_NOTE, self._count(SECURITY_NOTE)),
-        ]
+        # ── PREFIX-CACHE LAYOUT (audit: the measured 57s first-token was ~13.6k tokens re-prefilling
+        # every turn, because volatile per-turn blocks sat at the TOP of one ever-changing system
+        # message). The prompt is now ordered stable → durable → volatile:
+        #   1. system: identity + security + tools           (byte-identical across turns)
+        #   2. system: compacted summary                     (changes only on compaction)
+        #   3. the real conversation as chat messages        (append-only between window advances)
+        #   4. user: [volatile context tail] + the query     (the only part that re-prefills)
+        # so ollama's KV prefix cache holds through 1-3 on consecutive turns.
+        prefix_parts = [self.identity, SECURITY_NOTE]
+        # The self-CORE (byte-stable identity: who I am, this host is my home/body, the model, my reach)
+        # is pinned into the STABLE prefix so it survives even a small-talk turn's tight budget (the full
+        # volatile self-note is a droppable Section below) and keeps the KV prefix cache warm — it does
+        # not change turn to turn. This is the fix for the "small talk → dropped self-note → lost thread".
+        if self_core:
+            prefix_parts.append(self_core)
+        if tool_specs:
+            # NAMES ONLY, on every turn. Two reasons, both measured:
+            #  1. The name+description menu was ~4,758 tokens here (68 tools) and is a pure DUPLICATE —
+            #     provider/ollama.py:231 already sends every tool natively via `tools=` with the same
+            #     name, description and parameters. Capability is unchanged; we simply stop paying twice.
+            #  2. It must NOT vary per turn. This prose sits at the very FRONT of the prompt, so a menu
+            #     that changed between turn classes invalidated ollama's KV prefix cache on every switch —
+            #     and a cache miss here is the difference between a 1.9s reply and a 25.9s one (measured
+            #     on two identical "ok" turns). A constant prefix keeps the cache warm across turns.
+            prefix_parts.append("Tools you can call: " + ", ".join(s.name for s in tool_specs))
+        prefix_text = "\n\n".join(prefix_parts)
+        messages: list[ChatMessage] = [ChatMessage(role="system", content=prefix_text)]
+        fixed_tokens = self._count(prefix_text)
+        fixed_names = ["identity", "security"] + (["self_core"] if self_core else []) \
+            + (["tools"] if tool_specs else [])
+
+        if history:
+            # The compacted running summary / continuation packet is prepended by _load_history as an
+            # ("earlier", …) entry at index 0. Keep it ALWAYS (Final audit §9), as its own semi-stable
+            # system message; the verbatim turns follow as REAL chat messages.
+            earlier = history[:1] if (history[0][0] == "earlier") else []
+            rest = history[len(earlier):]
+            if earlier:
+                summary_text = "Earlier in this conversation (compacted summary):\n" + earlier[0][1]
+                messages.append(ChatMessage(role="system", content=summary_text))
+                fixed_tokens += self._count(summary_text)
+                fixed_names.append("summary")
+            for role, content in rest:
+                r = role if role in ("user", "assistant") else "user"
+                messages.append(ChatMessage(role=r, content=content))
+                fixed_tokens += self._count(content)
+            if rest:
+                fixed_names.append("conversation")
+
+        # ── VOLATILE TAIL — everything below re-assembles per turn, so it rides in the user turn
+        # (template-safe) at the very END of the prompt, where re-prefilling it is cheap.
+        sections: list[Section] = []
         # SELF-STATE and HEALTH are distinct from IDENTITY (who) and WORLD (environment): what Sali is
         # doing right now and how its faculties are. Previously reachable only via a tool round-trip; now
         # always in context (§11 "assemble self+world+health+task first"), high in the live band.
@@ -116,28 +286,37 @@ class ContextEngine:
             sections.append(Section("self", Priority.P1, self_note, self._count(self_note), score=0.99))
         if health_note:
             sections.append(Section("health", Priority.P1, health_note, self._count(health_note), score=0.97))
-
-        if history:
-            # The compacted running summary / continuation packet is prepended by _load_history as an
-            # ("earlier", …) entry at index 0. Keep it ALWAYS, then the last 10 real messages — a bare
-            # history[-10:] would silently drop the summary once 10 recent messages exist, discarding the
-            # compacted operational state (Final audit §9).
-            earlier = history[:1] if (history and history[0][0] == "earlier") else []
-            rest = history[len(earlier):]
-            kept = earlier + rest[-10:]
-            convo = "Conversation so far:\n" + "\n".join(
-                f"{role}: {content}" for role, content in kept
-            )
-            sections.append(Section("conversation", Priority.P1, convo, self._count(convo)))
+        if about_note:
+            # KNOWING ALMIR (§ Phase 5): durable facts HE stated, surfaced WITHOUT a name-trigger so Sali
+            # recalls his people/preferences unprompted. P2 + droppable — never crowds the active task,
+            # but lands before generic retrieved memory.
+            sections.append(Section("about_almir", Priority.P2, about_note, self._count(about_note),
+                                    score=0.86))
         if tasks_note:
             # Tasks in progress ride high (P1) so Sali resumes what it was doing — even after a
             # restart, since the tasks are read back from the datastore each turn.
             sections.append(Section("tasks", Priority.P1, tasks_note, self._count(tasks_note)))
+        if agenda_note:
+            # The broader agenda: overdue commitments, today's schedules, active goals, initiatives.
+            # Ranked P2 so it never crowds out the authoritative active task above, but still lands
+            # before generic memory — it names concrete things Sali has committed to or scheduled,
+            # which is more actionable than most retrieved semantic facts.
+            sections.append(Section("agenda", Priority.P2, agenda_note,
+                                    self._count(agenda_note), score=0.9))
         if skills_note:
             # Bounded task-skill guidance (Prompt 5 §7/§12): loaded from the durable per-task snapshot,
             # ranked P2 so it never crowds out the task/workspace/world state above it, and packed to the
             # budget like everything else so it participates in compaction rather than exploding it.
             sections.append(Section("skills", Priority.P2, skills_note, self._count(skills_note), score=0.85))
+        if checked_note:
+            # WHAT SALI JUST WENT AND LOOKED AT, because Almir asserted something the machine can
+            # settle. Scored above every other live section: on the one turn where a fact is in
+            # dispute, the observation must outrank the memory of being told otherwise. It is only
+            # ever present when a probe actually returned an answer, so it can never mean "checked
+            # and fine" by omission.
+            sections.append(
+                Section("checked", Priority.P1, checked_note, self._count(checked_note), score=1.0)
+            )
         if live_note:
             sections.append(Section("live", Priority.P1, live_note, self._count(live_note)))
         if machine_changes:
@@ -148,16 +327,53 @@ class ContextEngine:
             # What's happening on the machine right now (§73): focused app, recent files/commands/errors
             # — so Sali already has the environment before answering "why isn't this working?".
             sections.append(Section("world", Priority.P1, world_note, self._count(world_note)))
-        if tool_specs:
-            tools_text = "Tools you can call: " + "; ".join(
-                f"{s.name} — {s.description}" for s in tool_specs
-            )
-            sections.append(Section("tools", Priority.P1, tools_text, self._count(tools_text)))
-
         if bundle.memories:
-            lines = []
-            for hit in bundle.memories:
-                bits = [
+            # ONE SECTION PER MEMORY, not one section for all of them.
+            #
+            # pack() admits or rejects a whole Section, so a single "memories" block was indivisible:
+            # five memories or none. Under a tight tail budget that meant none. Measured on 2026-09-03,
+            # turn "and what?": dropped = ["health", "world", "memories"] — every memory Sali had
+            # retrieved was thrown away before the model saw any of it, on exactly the ordinary turns
+            # where recall matters. Scoring each memory separately lets the budget keep the best two
+            # instead of losing all five, which is the difference between "memory is tight" and "memory
+            # does not exist on this turn".
+            #
+            # Each line is written to stand alone, because it now can: the header rides with the
+            # highest-scoring memory, and the rest are admitted in descending score order.
+            mem_priority = Priority.P3 if system_query else Priority.P2
+            header = "What you remember (when, where it came from, and how sure you are):"
+            for rank, hit in enumerate(bundle.memories):
+                bits = []
+                # WHEN. Every temporal column was discarded on the way to the model: a memory arrived
+                # as content + source + confidence and nothing else, so "how long ago was that" had no
+                # answer available and got one invented. Rendered as ELAPSED rather than as a date,
+                # because a date is only meaningful against a reference the model has to do arithmetic
+                # on, and this is the arithmetic that produced "since last year (August 2024)" about
+                # work done that same week. Four tokens each, first in the list because it is the part
+                # he was missing entirely.
+                if when is not None:
+                    recorded = getattr(hit.memory, "valid_from", None)
+                    if recorded is not None:
+                        bits.append(when(recorded))
+                # HOW Sali knows this leads the line for a weak/unverified/stale recall — the honest hedge
+                # ("I believe this but I'm not fully certain") the model can't glaze past the way it can a
+                # bare "confidence 0.30", so a shaky memory isn't restated as settled fact. A confident
+                # FACT/OBSERVATION needs no hedge, so it's added only where it changes the reading;
+                # classify_knowledge already downgrades a low-confidence memory to BELIEF, so that case is
+                # covered without a second threshold. Guarded because context assembly runs every turn.
+                try:
+                    _kt = classify_knowledge(hit.memory.source, hit.memory.layer,
+                                             needs_grounding=hit.memory.needs_grounding,
+                                             confidence=hit.effective_confidence)
+                    # Stale is deliberately NOT a trigger here: a stale-but-confident FACT already gets
+                    # its own "STALE — verify" bit below, and leading it with "I know this" would fight
+                    # that warning. The hedge is for genuinely-held-but-uncertain recalls.
+                    if (_kt in _HEDGED_KINDS or hit.memory.needs_grounding
+                            or hit.effective_confidence < _LOW_CONF):
+                        bits.append(epistemic_status(_kt, hit.effective_confidence))
+                except Exception:  # noqa: BLE001 - framing is best-effort; never break the memory line
+                    pass
+                bits += [
                     _SOURCE_LABEL.get(hit.memory.source, hit.memory.source.value),
                     f"confidence {hit.effective_confidence:.2f}",
                 ]
@@ -166,13 +382,11 @@ class ContextEngine:
                 if hit.stale:
                     bits.append("STALE — verify")
                     conflicts.append(hit.memory.content)
-                lines.append(f"- {hit.memory.content} ({'; '.join(bits)})")
-            text = "What you remember (where it came from, and how sure you are):\n" + "\n".join(lines)
-            avg = sum(h.score for h in bundle.memories) / len(bundle.memories)
-            # For a system/environment query, live world/self/health must beat semantic memory (§3/§4):
-            # demote the memory pool so stale/unrelated recall can't crowd out current ground truth.
-            mem_priority = Priority.P3 if system_query else Priority.P2
-            sections.append(Section("memories", mem_priority, text, self._count(text), score=avg))
+                line = f"- {hit.memory.content} ({'; '.join(bits)})"
+                text = f"{header}\n{line}" if rank == 0 else line
+                # The first keeps the name "memories" so existing checks on `included` still see it.
+                name = "memories" if rank == 0 else f"memories:{rank + 1}"
+                sections.append(Section(name, mem_priority, text, self._count(text), score=hit.score))
 
         if bundle.procedures or bundle.experiences:
             # How Sali handled this kind of task before — surfaced BEFORE it acts so it never starts
@@ -186,6 +400,27 @@ class ContextEngine:
                 lines.append(f"- Last time this came up: {h.memory.content}")
             text = "You've handled this kind of thing before — reuse it, don't start over:\n" + "\n".join(lines)
             sections.append(Section("experience", Priority.P2, text, self._count(text), score=0.75))
+
+        if bundle.capabilities:
+            # Acquired competence, stated as competence. Ranked with experience because it answers the
+            # same question — "have I done this before?" — and because starting from zero on something
+            # Sali already learned is the specific waste this section exists to prevent.
+            lines = []
+            for cap in bundle.capabilities:
+                name = str(cap.get("name") or "").strip()
+                if not name:
+                    continue
+                # Freshness first: "verified" and "not confirmed since" are different instructions.
+                avail = str(cap.get("availability") or "").strip()
+                status = str(cap.get("status") or "").strip()
+                used = cap.get("use_count") or 0
+                bits = [b for b in (avail or status, f"used {used}x" if used else "") if b]
+                if avail == "stale":
+                    bits.append("re-verify before relying on it")
+                lines.append(f"- {name}" + (f" ({'; '.join(bits)})" if bits else ""))
+            if lines:
+                text = "Things you already know how to do — use them, don't relearn:\n" + "\n".join(lines)
+                sections.append(Section("capabilities", Priority.P2, text, self._count(text), score=0.7))
 
         if bundle.graph_facts:
             lines = [f"- {f.src} --{f.rel}--> {f.dst}" for f in bundle.graph_facts]
@@ -207,21 +442,193 @@ class ContextEngine:
             text = "Recent activity:\n" + "\n".join(lines)
             sections.append(Section("recent", Priority.P3, text, self._count(text), score=0.3))
 
-        result = pack(sections, self.budget, mandatory_tokens=self._count(query))
-        system_text = "\n\n".join(s.text for s in result.sections)
+        # LATENCY (audit): pack() fills whatever budget it is handed, so EVERY turn assembled to the
+        # ceiling and a greeting cost the same prefill as deep task work. A caller may therefore hand a
+        # light turn a smaller OPTIONAL TAIL. The override is an allowance ABOVE the mandatory floor,
+        # never an absolute total: identity, the security note, the tool menu, the summary and the
+        # verbatim history are already counted in `mandatory` (~5.2k on this host), so a total below
+        # that floor would drop EVERY section — self, health and the Task State Capsule included —
+        # instead of merely trimming the tail. Nothing here can cut identity/security/tools: those are
+        # the prefix message, not sections pack() can drop.
+        mandatory = fixed_tokens + self._count(query)
+        cap = (self.budget if budget_override is None
+               else min(self.budget, mandatory + max(0, budget_override)))
+        result = pack(sections, cap, mandatory_tokens=mandatory)
+        tail = "\n\n".join(s.text for s in result.sections)
         if conflicts and not live_note:
-            system_text += (
+            tail += (
                 "\n\nSome memories above are marked STALE — verify them with a tool before "
                 "relying on them; do not assert them as current."
             )
-        messages = [
-            ChatMessage(role="system", content=system_text),
-            ChatMessage(role="user", content=query),
-        ]
+        # WHEN "NOW" IS.
+        #
+        # This header already claimed the context was "current as of right now" — a promise with no
+        # data behind it. Nothing anywhere told the model what the current date was, so every absolute
+        # timestamp elsewhere in the prompt had no reference point to be measured against, and he
+        # filled the gap by guessing: on 2026-09-03 he told Almir they had been working together
+        # "since last year (August 2024)" about work done that same week.
+        #
+        # It rides in the header rather than as its own section for two reasons. It must never be
+        # dropped — a packed-out clock is worse than none, because the model cannot tell it is missing.
+        # And the header is already being paid for, so replacing five words of promise with the actual
+        # instant costs almost nothing on a tail whose budget is measured in tokens.
+        stamp = temporal_note or ""
+        if tail:
+            opening = ("[Context for this turn — assembled by your system from durable state. "
+                       + (stamp if stamp else "Current as of right now") + "\n\n")
+            user_content = opening + tail + "\n— end of context]\n\n" + query
+        elif stamp:
+            # No retrieved context at all, and the clock still has to arrive: a bare turn is exactly
+            # where he is most likely to answer "when did we…" from imagination.
+            user_content = f"[{stamp}]\n\n{query}"
+        else:
+            user_content = query
+        # VOICE ANCHOR, last thing before generation.
+        #
+        # IDENTITY already forbids assistant-speak, but it sits at the very FRONT of a ~10k-token prompt
+        # and this model is Q2_K — at that precision the instructions nearest the generation point are the
+        # ones that actually land. Observed in Almir's real transcript: "😂😂😂🙌" answered with a canned
+        # "your last turn got cut off — is there anything specific you wanted to do here?" (twice,
+        # verbatim); "okay sali" answered with "Hey 🙂 How can I help you?"; "how can you explain Almir"
+        # answered with a bulleted DOSSIER describing him in the THIRD PERSON while talking to him; and a
+        # fabricated "⬇️ *Sali*" signature. Short, concrete, and about behaviour — a Q2 model follows
+        # "don't do X" far better than "be warm".
+        # NO BEHAVIOR-NOTE INJECTION (brain-audit turn 7). A bespoke standing-requests block here
+        # made every accepted preference a permanent priming signal at the strongest generation
+        # position — plus auto-accept meant even one misclassified line ("don't be so formal") stuck
+        # forever. Preferences now flow through the normal memory-retrieval bundle (already at the
+        # top of the volatile tail), gated by an actual acceptance decision, not auto-elevation.
+        # See sali-brain-turn7-behavior-injection-closed.
+
+        # ANTI-REPEAT, stated with the actual words. "Don't repeat yourself" as an abstract rule did NOT
+        # land: answering "😂😂😂🙌" he re-emitted his previous reply VERBATIM. With almost no content in
+        # the incoming message a Q2 model falls back on the nearest pattern, and the nearest pattern is
+        # what it just said. Quoting the line back and forbidding THAT specific text is concrete enough
+        # to bite, where a general instruction is not.
+        last_said = ""
+        last_full = ""
+        for role, text in reversed(history or []):
+            if role == "assistant" and text.strip():
+                last_said = " ".join(text.split())[:70]   # every token here is tail budget
+                last_full = text      # the WHOLE reply — the tic lives at its end, past the 160-char head
+                break
+        # THE ANTI-REPEAT BLOCK IS GONE, deliberately.
+        #
+        # It was added to stop verbatim repeats and it never worked: it fired with the exact forbidden
+        # text quoted back, and the model re-emitted that text byte-for-byte on the very next turn. The
+        # real cause was found later and fixed at the source — `chat_stream` defaulted to the
+        # DETERMINISTIC preset, so every conversational turn ran with seed=42 and near-identical prompts
+        # produced near-identical output. With a real seed and repeat_last_n raised to 512, the mechanism
+        # that actually prevents repetition is in place.
+        #
+        # Keeping it was making things worse in two ways. It cost ~50 tokens of a tail that has a hard
+        # ~513-token budget before llama.cpp stops restoring its checkpoint and every turn costs 28 extra
+        # seconds. And "say something different" outranks a trivial query: "hey" was answered with a
+        # reworded version of the previous reply about engine.py, and "cool" with a disk-space report,
+        # because with almost no signal in the input the strongest instruction in the tail wins.
+        # WHAT THIS BLOCK IS ALLOWED TO DO. It sits at the generation point, which on a Q2_K model is the
+        # strongest position in the prompt — so it may only carry things Sali must not get wrong. It used
+        # to also carry three separate pushes toward terseness ("if he's short, be short", "don't say it
+        # again", "Just answer, then stop.") on top of a learned "always: be brief with me". Their
+        # cheapest joint solution is to say almost nothing, and that is what happened: asked "give real
+        # info please", Sali answered "sorry". Register belongs in the behaviour note; this block now
+        # carries only the three rules that were actually being broken — person, honesty, and agency.
+        # Coding work is task work. Conditional, so it costs nothing on an ordinary turn.
+        # ONLY when no task is already running. `tasks_note` is the Task State Capsule, present exactly
+        # when a task is active — and a continuation turn's prompt reads "(Your current task is: Create a
+        # Python script ...)", which matches the coding rule perfectly. So this block was telling Sali to
+        # plan a task while it was working that very task. On 2026-09-03 10:40:31 it did: mid-task it
+        # called plan_task, `activate_task` superseded the in-flight task as "new task planned", and the
+        # original was orphaned at step 2 with is_primary=false — status still "running", nothing running.
+        # A rule that fires on the work it is meant to organise destroys the work.
+        if tasks_note is None and _CODING_WORK_RE.search(query):
+            user_content += (
+                "\n\n[This is a coding job. Call plan_task FIRST — objective plus the real steps — then "
+                "work the steps. It runs in the background so his chat stays free, he can watch each step "
+                "land, it survives a restart, and it gets reviewed. Do not do it inline.]"
+            )
+
+        # Capture / correction nudges, only on the turns that warrant them (see _STORE_RE above).
+        if _CORRECT_RE.search(query):
+            # ONE call, not two. The first version of this asked for memory_forget followed by
+            # remember; Sali did the forget and dropped the remember, so the old preference was retired
+            # and the corrected one was never stored — a correction that made it know LESS. It does not
+            # need two steps: `remember` with a matching `about` topic routes through _resolve_claim,
+            # which supersedes the previous value in place. Forgetting is only for a belief with no
+            # replacement, and it is named second here so it cannot swallow the important half.
+            user_content += (
+                "\n\n[He is correcting you. Call `remember` with the corrected version and the SAME "
+                "`about` topic as before — that replaces the old value automatically, so do not delete "
+                "anything first. Only if there is no replacement at all, use memory_forget instead.]"
+            )
+        elif _STORE_RE.search(query):
+            user_content += (
+                "\n\n[He just told you something meant to outlive this turn. Call `remember` for it "
+                "now, in this turn: `kind` = preference / procedure / identity / fact, and an `about` "
+                "topic (e.g. 'editor', 'migrations') so a later change replaces it rather than "
+                "contradicting it. Store his meaning in one plain sentence, written about him as 'you'.]"
+            )
+
+        # THE EMOJI TIC. Almir, 2026-09-03: "it's okay to send emojs but not on every message that
+        # robot!" Sali was ending essentially every reply with the same pair. Nothing asks for it —
+        # IDENTITY never mentions emoji and no memory says he likes them (Sali claimed one did; it
+        # invented that too). It is self-reinforcement: every assistant turn in the replayed history ends
+        # that way, so the next one does too, and seed=42 made it deterministic. A general "vary your
+        # tone" does not land at Q2_K. Naming the exact characters it just used does — the same reason the
+        # anti-repeat block above quotes the previous line verbatim instead of saying "don't repeat".
+        trailing = _trailing_emoji(last_full)
+        if trailing:
+            user_content += (
+                f"\n\n[Last message ended \"{trailing}\" — not again. Most need no emoji; never the "
+                "same one twice running.]"
+            )
+
+        # THE APOLOGY TIC (Phase 5 companion-quality). Sali over-apologises — "my bad" ×8, "sorry",
+        # grovel — and it self-reinforces exactly like the emoji tic: every apologetic OPENER in the
+        # replayed history primes the next, and at Q2_K the nearest pattern wins. A general "be less
+        # apologetic" does NOT land (it drove terser, sorrier replies once); naming the EXACT opener it
+        # just used does — the same lever as the emoji block above. Conditional, so zero tokens on a
+        # clean turn: it never touches the ~513-token latency anchor.
+        _apo = _apology_opener(last_full)
+        if _apo:
+            user_content += (
+                f"\n\n[Last reply opened \"{_apo}\" — drop the apology; only say sorry if you actually "
+                "broke something, and then once, plainly.]"
+            )
+
+        # EVERY WORD HERE COSTS 28 SECONDS. This block sits in the volatile tail, and llama.cpp leaves
+        # its reusable checkpoint at L-513: turn N+1 restores it only if turn N's whole final message —
+        # this text, the context capsule, the query, all of it — came to under ~513 tokens. Sali used to
+        # answer some turns in 1.2-2.1s. The verbose version of these same four rules, deployed 19:00 on
+        # 2026-09-02, pushed the tail over the anchor and no turn has been warm since: the fastest first
+        # call went from 1,190 ms to 28,585 ms. The rules all survive below; only the wordcount changed.
+        # Brain-audit Turn 4: voice + honesty clauses DELETED - they duplicated IDENTITY
+        # (warm, direct, present) and SECURITY_NOTE (never claim you did something you
+        # did not do). The block was stacking three "don't X" clauses at the strongest
+        # generation-point position, and the code's own comment above admits an earlier
+        # 9-constraint version made replies WORSE. Trust IDENTITY and SECURITY_NOTE at
+        # the top of the prompt to carry voice + honesty.
+        #
+        # Kept: one compact task-rule sentence. The old comment on this block explicitly
+        # documents that without it Sali stopped calling plan_task and fabricated pages
+        # ("having nowhere to put the work, described pages it had never written"). Load-
+        # bearing; no equivalent lives elsewhere in the prompt.
+        user_content += (
+            # Turn 5 review-hardening: one positive-phrased voice line added back. The
+            # code's VOICE ANCHOR comment (still in source) documents that IDENTITY-only
+            # was insufficient at Q2_K - "okay sali" answered with "Hey 🙂 How can I help
+            # you?" and fabricated sign-offs. Positive framing ("just talk / no openers")
+            # avoids the prohibition stack that Turn 4 rightly killed.
+            "\n\n[Just talk — no assistant openers, no sign-offs; write like someone who "
+            "knows Almir. Real multi-step work goes through plan_task — it runs in the "
+            "background, Almir can watch it, and it survives a restart. Anything else, just "
+            "do it now.]"
+        )
+        messages.append(ChatMessage(role="user", content=user_content))
         return AssembledContext(
             messages=messages,
             est_tokens=result.total_tokens,
-            included=[s.name for s in result.sections],
+            included=fixed_names + [s.name for s in result.sections],
             dropped=result.dropped,
             conflicts=conflicts,
         )

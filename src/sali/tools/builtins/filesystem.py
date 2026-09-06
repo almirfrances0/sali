@@ -303,6 +303,58 @@ class DeleteFile(Tool):
                 else VerifyResult(False, "file still exists after delete"))
 
 
+class SendFile(Tool):
+    name = "send_file"
+    description = (
+        "Send a file to Almir on his DEVICE so he can download it. Almir is on his iPhone / the app, "
+        "NOT sitting at this PC — a file left at a local path never reaches him, so this is the ONLY way "
+        "to actually GIVE him a file (a report, a build output, a document, a whole project folder). Set "
+        "zip=true to bundle a folder or many files into one archive first. Use this whenever Almir asks "
+        "you to send / share / give him a file. After you call this, a downloadable file card appears "
+        "right in Almir's chat automatically — so just tell him plainly it's sent (e.g. \"Sent — it's in "
+        "your chat, tap to download\"). NEVER tell him a local file path, and never say he'll get a "
+        "notification, an email, or that it's 'on the Desktop' — none of that is how he receives it."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Absolute path of the file or folder to send."},
+            "zip": {"type": "boolean", "description": "Zip it first (required to send a folder)."},
+            "name": {"type": "string", "description": "Optional name Almir should see for the file."},
+        },
+        "required": ["path"],
+    }
+    risk_level = RiskLevel.R1
+    capabilities = frozenset({Capability.READ})
+    idempotent = False
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        if ctx.pool is None:
+            return ToolResult(ok=False, display="unavailable", error="file sending isn't available here")
+        try:
+            path = ctx.paths.check_read(str(args.get("path", "")))
+        except PathViolation as exc:
+            return ToolResult(ok=False, display="denied", error=str(exc))
+        if not path.exists():
+            return ToolResult(ok=False, display="not found",
+                              error=f"{path} doesn't exist yet — create it first, then send it")
+        from sali.runtime.sent_files import SentFileStore
+        name = str(args.get("name", "")).strip() or None
+        try:
+            info = await SentFileStore(ctx.pool).register(
+                session_id=ctx.session_id, run_id=ctx.run_id, source_path=str(path),
+                root=str(ctx.settings.permissions.workspace),
+                zip_it=bool(args.get("zip")), name=name)
+        except Exception as exc:  # noqa: BLE001 — surface a soft failure, never crash the turn
+            return ToolResult(ok=False, display="send failed", error=str(exc)[:200])
+        return ToolResult(
+            ok=True,
+            output={"sent": True, "file_id": info["id"], "filename": info["filename"],
+                    "bytes": info["bytes"], "download_url": info["download_url"]},
+            display=f"sent {info['filename']} to Almir ({info['bytes']} bytes)")
+
+
 def register_builtins(registry: ToolRegistry) -> None:
-    for cls in (ListDir, ReadFile, FileMetadata, SearchFiles, CreateFile, ModifyFile, DeleteFile):
+    for cls in (ListDir, ReadFile, FileMetadata, SearchFiles, CreateFile, ModifyFile, DeleteFile,
+                SendFile):
         registry.register(cls())

@@ -148,6 +148,29 @@ class ExecuteCommand(Tool):
             # Fake-root, writable-ephemeral system: install/delete freely, host untouched.
             argv = jail.build_sandbox_argv(argv, allow_network=perms.exec_allow_network)
 
+        # §7/§8/§53: consequential (non-sandbox) commands are recorded in the SideEffectStore ledger
+        # so a partially-completed workflow stays VISIBLE and recoverable after interruption or
+        # restart. Idempotency check via idempotency_key (command text + cwd) prevents accidental
+        # re-execution of an already-succeeded destructive command. The plan/attempt/succeed|fail
+        # lifecycle was previously dormant — nothing outside the store's own file called it.
+        side_effect_id = None
+        skip_run = False
+        if not sandbox and _is_destructive(command):
+            side_effect_id = await self._plan_side_effect(ctx, command, cwd)
+            if side_effect_id == "ALREADY_DONE":
+                # An identical destructive command succeeded before — §53 idempotency: return the
+                # prior success instead of executing again.
+                return ToolResult(ok=True, display="already done (idempotent)",
+                                  output={"returncode": 0, "stdout": "", "stderr": "",
+                                          "idempotent": True})
+            if side_effect_id is not None:
+                with contextlib.suppress(Exception):
+                    from sali.tasks.side_effects import SideEffectStore
+
+                    pool = getattr(ctx, "pool", None) or getattr(ctx.settings, "pool", None)
+                    if pool is not None:
+                        await SideEffectStore(pool).attempt(side_effect_id)
+
         try:
             # 1 MiB before the flood-kill (was 256 KiB) — a real log/build/journalctl dump shouldn't
             # be SIGKILLed mid-run; the loop still truncates what the model sees to _TOOL_OUTPUT_CAP.
@@ -156,16 +179,60 @@ class ExecuteCommand(Tool):
                 max_output=1024 * 1024, cwd=cwd,
             )
         except CommandTimeout as exc:
+            if side_effect_id is not None:
+                await self._settle_side_effect(ctx, side_effect_id, ok=False, error=str(exc))
             return ToolResult(ok=False, display="timeout", error=str(exc))
         except FileNotFoundError as exc:
+            if side_effect_id is not None:
+                await self._settle_side_effect(ctx, side_effect_id, ok=False, error=str(exc))
             return ToolResult(ok=False, display="not found", error=str(exc))
 
+        if side_effect_id is not None:
+            await self._settle_side_effect(
+                ctx, side_effect_id, ok=(rc == 0),
+                error=None if rc == 0 else (err.strip()[:300] or f"exit {rc}"))
         return ToolResult(
             ok=(rc == 0),
             output={"returncode": rc, "stdout": out[:_MAX], "stderr": err[:_MAX], "sandboxed": sandbox},
             display=f"exit {rc}" + (" (sandboxed)" if sandbox else ""),
             error=None if rc == 0 else (err.strip()[:300] or f"exit {rc}"),
         )
+
+    async def _plan_side_effect(self, ctx: ToolContext, command: Any, cwd: str) -> Any:
+        """Register the intended destructive action in SideEffectStore. Returns the id, or the
+        string 'ALREADY_DONE' if idempotency check found a prior success, or None on any error."""
+        try:
+            from sali.tasks.side_effects import SideEffectStore
+
+            pool = getattr(ctx, "pool", None) or getattr(ctx.settings, "pool", None)
+            if pool is None:
+                return None
+            key = f"exec::{cwd}::{_as_text(command)[:400]}"
+            store = SideEffectStore(pool)
+            done = await store.already_done(key)
+            if done is not None:
+                return "ALREADY_DONE"
+            sid, was_done = await store.plan(
+                kind="command_exec", target=_as_text(command)[:200],
+                task_id=getattr(ctx, "task_id", None), run_id=getattr(ctx, "run_id", None),
+                idempotency_key=key)
+            return "ALREADY_DONE" if was_done else sid
+        except Exception:  # noqa: BLE001 - ledger is a safety net, never blocks the real command
+            return None
+
+    async def _settle_side_effect(self, ctx: ToolContext, side_effect_id: Any, *,
+                                    ok: bool, error: str | None = None) -> None:
+        with contextlib.suppress(Exception):
+            from sali.tasks.side_effects import SideEffectStore
+
+            pool = getattr(ctx, "pool", None) or getattr(ctx.settings, "pool", None)
+            if pool is None:
+                return
+            store = SideEffectStore(pool)
+            if ok:
+                await store.succeed(side_effect_id, after_state="completed")
+            else:
+                await store.fail(side_effect_id, error=error)
 
 
 async def _run_background(argv: list[str], *, cwd: str) -> ToolResult:

@@ -26,14 +26,29 @@ _REVOKE = re.compile(
     r"|stop working on (?:that|it|this|the)\b"
     r"|don'?t (?:want|need) (?:that|it|this|the)\b.*\banymore"
     r"|(?:i )?don'?t want (?:that|it|this) anymore"
-    r"|scrap (?:that|it|this|the)\b)")
+    r"|scrap (?:that|it|this|the)\b"
+    # Bare forms. The patterns above all require a qualifier after the pronoun ("leave it ALONE",
+    # "cancel that TASK"), so the way people actually call work off — "leave it.", "never mind." —
+    # matched nothing and the intent stayed live for recovery to pick back up.
+    r"|^\s*(?:leave|drop|scrap|forget)\s+(?:it|that|this)\s*[.!]*$"
+    r"|^\s*(?:never\s*mind|nevermind)\s*[.!]*$)")
+
+
+# The same words with a negation in front mean the OPPOSITE, and the patterns above are unanchored, so
+# "don't forget it" matched "forget it" and abandoned the very work Almir was asking Sali to hold on to.
+# A revocation is irreversible from the conversation's point of view, so this direction of error is the
+# expensive one.
+_NEGATED = re.compile(r"\b(?:don'?t|do\s+not|never|dont)\s+(?:you\s+)?"
+                      r"(?:forget|leave|drop|scrap|abandon|cancel|stop)\b")
 
 
 def classify_revocation(message: str) -> bool:
     """True when the user is clearly ABANDONING the current work (not merely interrupting it, §1). The
     caller revokes the active task's intent on a match. Conservative — most messages return False."""
     text = (message or "").strip().lower()
-    return bool(text and len(text) < 400 and _REVOKE.search(text))
+    if not text or len(text) >= 400 or _NEGATED.search(text):
+        return False
+    return bool(_REVOKE.search(text))
 
 
 class RevocationStore:

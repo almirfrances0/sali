@@ -54,6 +54,21 @@ async def service_active(unit: str) -> VerifyResult | None:
     return VerifyResult(state == "active", f"service {unit} is {state}")
 
 
+async def service_loaded(unit: str) -> bool | None:
+    """Whether systemd KNOWS this unit at all.
+
+    `systemctl is-active` answers "inactive" for a unit that does not exist, identically to one that
+    exists and is stopped (both rc=4 here). Anything that reports a service state to a PERSON must ask
+    this first, or a misheard name — "the daemon is running" — comes back as a confident, wrong
+    "daemon.service is inactive". Crash recovery does not need it: there, a start of a unit that does
+    not exist genuinely did fail."""
+    rc, out, _err, ran = await _run(["systemctl", "show", "--property=LoadState", "--value", "--", unit])
+    if not ran:
+        return None
+    state = (out.splitlines()[0] if out else "").strip()
+    return None if not state else state == "loaded"
+
+
 async def service_inactive(unit: str) -> VerifyResult | None:
     v = await service_active(unit)
     if v is None:

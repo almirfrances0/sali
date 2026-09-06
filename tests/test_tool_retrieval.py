@@ -78,6 +78,8 @@ def test_tool_facts_render_as_a_context_section() -> None:
         ToolFact(capability="packet_capture", description="Capture and inspect network traffic",
                  tools=["tcpdump", "tshark"])])
     result = engine.assemble("which tool captures packets?", bundle, [])
-    system = result.messages[0].content
+    # Sections now render into the user message (kept out of the system prefix to keep ollama's KV
+    # cache warm), so assert against the FULL assembled context — what the model actually receives.
+    system = "\n".join(m.content for m in result.messages)
     assert "Tools on this machine" in system and "tcpdump" in system and "packet_capture" in system
     assert "tools_available" in result.included

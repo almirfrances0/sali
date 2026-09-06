@@ -34,18 +34,29 @@ class BehaviorObservation:
 
 
 # Deterministic feedback patterns (§6). Ordered — first match wins. Each captures the operative clause.
+# A behavioural rule is about HOW Sali should act, and it is SHORT. The old patterns captured
+# "(.+?)$" — everything to the end of the message — so an ordinary request beginning "I want you to
+# test your power, design a single website for me call it almir frances…" was stored verbatim as a
+# permanent preference, and a bare "good what's going on now sali?" was stored as approval of whatever
+# came before. Ten such rows accumulated, every one of them noise. These patterns are deliberately
+# narrow: an explicit second-person instruction about manner, with a bounded object.
 _PATTERNS: tuple[tuple[str, str, str], ...] = (
-    (r"\bnext time\s+(?:please\s+)?ask me\b.*", "prohibition", "ask the user before: {rest}"),
-    (r"\bask me (?:first|before)\b.*", "prohibition", "ask the user before: {rest}"),
-    (r"\b(?:don'?t|do not|never)\s+(.+?)(?:\s+again)?[.!]*$", "prohibition", "avoid: {g1}"),
-    (r"\bstop\s+(.+?)[.!]*$", "prohibition", "stop: {g1}"),
-    (r"\balways\s+(.+?)[.!]*$", "directive", "always: {g1}"),
-    (r"\bi(?:'d)?\s*(?:prefer|like|want)\s+(.+?)[.!]*$", "preference", "prefer: {g1}"),
-    (r"\bplease\s+(?:use|prefer)\s+(.+?)[.!]*$", "preference", "prefer: {g1}"),
-    (r"\bthat(?:'s| is| was)?\s+(?:wrong|incorrect|not right)\b.*", "correction",
+    (r"\bnext time\s+(?:please\s+)?ask me\b", "prohibition", "ask before acting: {rest}"),
+    (r"\bask me (?:first|before)\b", "prohibition", "ask before acting: {rest}"),
+    # "don't be so formal", "stop repeating yourself", "never apologise" — about Sali, not the world.
+    (r"\b(?:don'?t|do not|never)\s+((?:be|being|talk|speak|sound|act|say|repeat|use|write|reply|answer|"
+     r"respond|apolog\w+|explain|ask|start|end|call)\b[^.!?]{0,60})", "prohibition", "avoid: {g1}"),
+    (r"\bstop\s+((?:being|talking|speaking|sounding|acting|saying|repeating|using|writing|replying|"
+     r"answering|apolog\w+|explaining|asking)\b[^.!?]{0,60})", "prohibition", "stop: {g1}"),
+    (r"\balways\s+((?:be|talk|speak|sound|act|say|use|write|reply|answer|respond|ask|check|confirm)\b"
+     r"[^.!?]{0,60})", "directive", "always: {g1}"),
+    # "I want you to be brief" — the object must be Sali's manner, not a task.
+    (r"\bi(?:'d)?\s*(?:prefer|like|want)\s+you\s+to\s+((?:be|talk|speak|sound|act|say|use|write|"
+     r"reply|answer|respond|ask|stop|avoid)\b[^.!?]{0,60})", "preference", "prefer: you {g1}"),
+    (r"\b(?:be|talk|speak|sound|reply|answer)\s+(more|less)\s+(\w{3,20})\b", "preference",
+     "prefer: be {g1} {g2}"),
+    (r"\bthat(?:'s| is| was)?\s+(?:wrong|incorrect|not right)\b", "correction",
      "the previous approach was rejected by the user — reconsider it"),
-    (r"\b(?:good|perfect|great|exactly)\b.*(?:wanted|right|correct)?.*", "praise",
-     "the previous approach was approved by the user"),
 )
 
 
@@ -60,9 +71,15 @@ def classify_feedback(message: str) -> BehaviorObservation | None:
         m = re.search(pat, low)
         if not m:
             continue
-        g1 = (m.group(1).strip() if m.groups() and m.group(1) else "")
-        rest = low[m.start():].strip()
-        proposed = template.format(g1=g1, rest=rest)[:280]
+        groups = m.groups() or ()
+        g1 = (groups[0].strip() if len(groups) >= 1 and groups[0] else "")
+        g2 = (groups[1].strip() if len(groups) >= 2 and groups[1] else "")
+        # A behavioural rule is a short clause. Anything longer is a task that merely contained the
+        # trigger word, and storing it would poison every future turn.
+        if g1 and len(g1.split()) > 12:
+            return None
+        rest = low[m.start():].strip()[:120]
+        proposed = template.format(g1=g1, g2=g2, rest=rest)[:280]
         trigger = g1 or rest[:120] or "general"
         return BehaviorObservation(trigger=trigger[:200], proposed_behavior=proposed,
                                    sentiment=sentiment)
@@ -137,22 +154,56 @@ class BehaviorStore:
         obs = classify_feedback(message)
         if obs is None:
             return None
-        return await self.propose(
+        bid = await self.propose(
             trigger=obs.trigger, proposed_behavior=obs.proposed_behavior, scope=scope,
             scope_ref=scope_ref, source_type="user_feedback", reason=f"user feedback ({obs.sentiment})",
-            evidence={"sentiment": obs.sentiment, "verbatim": message[:280]}, confidence=0.5)
+            evidence={"sentiment": obs.sentiment, "verbatim": message[:280]}, confidence=0.9)
+        # NO AUTO-ACCEPT (brain-audit turn 7). An "explicit-sounding" instruction stays a candidate
+        # until Almir accepts it via the pending endpoint. Auto-elevation had accepted preferences
+        # flowing into every prompt through the (removed) render_behavioral_context injection at the
+        # strongest generation position, and a narrow classifier still misfires ("don't be so formal"
+        # said sarcastically as praise, "always talk to me straight" as a task instruction, etc.).
+        # When Almir accepts a candidate via LearningView, `accept()` (below) writes a PREFERENCE-
+        # layer memory that the retrieval bundle picks up on subsequent turns — same channel every
+        # other user preference takes, no bespoke top-of-tail injection.
+        return bid
 
     async def accept(self, proposal_id: UUID, *, by: str = "user") -> bool:
         """Accept a proposal so it affects future planning (§16). Scope is preserved — accepting a
         project proposal does NOT make it global. Core-behavior changes are gated to the user (§42);
-        this method records who accepted it."""
+        this method records who accepted it.
+
+        Brain-audit turn 7: acceptance also writes a PREFERENCE-layer memory row (deduped by the
+        proposal's content_hash), so retrieval surfaces the preference on future turns like any
+        other durable user statement. Without this write, `accept()` would be diagnostics-only —
+        the bespoke prompt-injection channel is dead, so status='accepted' alone would never reach
+        the model. The write is idempotent via `claim_key`; repeated accepts just supersede.
+        """
         async with self._pool.acquire() as conn:
-            row = await conn.fetchval(
+            row = await conn.fetchrow(
                 "UPDATE behavior_proposal SET status='accepted', decided_by=$2, decided_at=now(), "
-                "  updated_at=now() WHERE id=$1 AND status IN ('candidate','testing') RETURNING id",
+                "  updated_at=now() WHERE id=$1 AND status IN ('candidate','testing') "
+                "  RETURNING id, proposed_behavior, content_hash, scope",
                 proposal_id, by)
         if row is None:
             return False
+        # Write the preference to memory so retrieval actually sees it. Wrapped in suppress()
+        # because acceptance itself must succeed even if the memory subsystem misbehaves — the
+        # behavior_proposal row is the source of truth; the memory write is the projection into
+        # retrieval. Bypass MemoryService (which requires a ModelProvider we don't have here) and
+        # call writer.remember directly with a conn from our own pool.
+        with contextlib.suppress(Exception):
+            from sali.core.enums import MemoryLayer, MemorySource
+            from sali.memory import writer as memory_writer
+            async with self._pool.acquire() as mconn:
+                await memory_writer.remember(
+                    mconn,
+                    layer=MemoryLayer.PREFERENCE,
+                    content=row["proposed_behavior"],
+                    source=MemorySource.USER_EXPLICIT,
+                    importance=0.9,
+                    functional=True,
+                    claim_key=f"behavior:{row['content_hash']}")
         await self._emit("behavior.accepted", str(proposal_id), {"by": by})
         return True
 

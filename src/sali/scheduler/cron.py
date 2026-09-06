@@ -10,7 +10,8 @@ fire time deterministically. Two kinds:
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 _FIELD_BOUNDS = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 6))  # min, hour, dom, month, dow
 _INTERVAL = re.compile(r"^\s*(\d+)\s*([smhd])\s*$", re.IGNORECASE)
@@ -36,12 +37,31 @@ def parse_when(when: str) -> tuple[str, str]:
         "like '0 9 * * *'")
 
 
-def next_run(kind: str, spec: str, after: datetime) -> datetime:
-    """The first fire time strictly after ``after``."""
+def next_run(kind: str, spec: str, after: datetime, tz: str | None = None) -> datetime:
+    """The first fire time strictly after ``after``, as an aware UTC instant.
+
+    A CRON SPEC IS CIVIL TIME, NOT UTC. "0 9 * * *" means nine in the morning where the person lives —
+    and this system's owner is in Africa/Dar_es_Salaam while the host it runs on is set to
+    America/New_York, so evaluating the spec against UTC put every daily reminder three hours late and
+    every host-local one seven hours out. The fields are therefore matched in ``tz`` and only the
+    ANSWER is converted back, which is also what makes it survive DST: the schedule stays at 09:00
+    local across a transition instead of silently sliding an hour, because the offset is re-derived at
+    each firing rather than baked in once.
+
+    An INTERVAL is a duration, not a civil time — "every 30m" means every thirty minutes wherever you
+    are — so it is unaffected by the zone and deliberately does not consult it."""
     if kind == "interval":
         return after + _interval_delta(spec)
     if kind == "cron":
-        return _next_cron(spec, after)
+        if tz is None or tz == "UTC":
+            return _next_cron(spec, after)
+        zone = ZoneInfo(tz)
+        local_after = after.astimezone(zone)
+        # Matched naively inside the zone: the walk below steps minute by minute over civil fields,
+        # and an aware arithmetic there would drag the offset along with it. Re-localising the result
+        # is what applies the correct offset for the day the schedule actually lands on.
+        local_next = _next_cron(spec, local_after.replace(tzinfo=None))
+        return local_next.replace(tzinfo=zone).astimezone(UTC)
     raise ScheduleError(f"unknown schedule kind {kind!r}")
 
 

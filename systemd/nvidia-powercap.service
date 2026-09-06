@@ -1,0 +1,22 @@
+# The GPU envelope Sali's safety depends on — tracked here rather than living only as untracked
+# host state that an `apt upgrade` can silently drop.
+#
+# The 35B model does not fit this 12GB card, so it runs split across GPU and CPU. An uncapped load
+# transient on this PSU powers the machine off. `sali.service` Requires= this unit, so Sali can
+# never load the model onto an uncapped card.
+#
+#   sudo cp systemd/nvidia-powercap.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now nvidia-powercap
+[Unit]
+Description=Cap NVIDIA GPU power + persistence (prevents the CPU+GPU transient that powers this machine off under model load)
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/nvidia-smi -pm 1
+ExecStart=/usr/bin/nvidia-smi -pl 140
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

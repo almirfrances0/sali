@@ -50,7 +50,7 @@ def _hash(secret: str) -> str:
 
 def _normalize_code(code: str) -> str:
     """Codes are shown grouped (XXXXX-XXXXX) and typed case-insensitively; normalize before hashing."""
-    return code.strip().upper().replace("-", "").replace(" ", "")
+    return "".join(ch for ch in code.upper() if ch.isalnum())
 
 
 def _new_code() -> tuple[str, str]:
@@ -119,7 +119,19 @@ class DeviceStore:
                 "RETURNING id, role, label",
                 code_hash)
             if row is None:
-                log.warning("enrollment_redeem_failed")  # unknown / used / expired — never says which
+                check_row = await conn.fetchrow(
+                    "SELECT id, used_at, expires_at FROM enrollment_code WHERE code_hash = $1",
+                    code_hash)
+                if check_row is None:
+                    log.warning("enrollment_redeem_failed", reason="code_not_found")
+                elif check_row["used_at"] is not None:
+                    log.warning("enrollment_redeem_failed", reason="code_already_used",
+                                used_at=check_row["used_at"].isoformat())
+                elif check_row["expires_at"] <= _now():
+                    log.warning("enrollment_redeem_failed", reason="code_expired",
+                                expires_at=check_row["expires_at"].isoformat())
+                else:
+                    log.warning("enrollment_redeem_failed", reason="unknown")
                 return None
             device_id = await conn.fetchval(
                 "INSERT INTO api_device (name, platform, model, role) "
@@ -147,24 +159,77 @@ class DeviceStore:
         return IssuedSession(device_id=device_id, role=role, access_token=access, refresh_token=refresh,
                              access_expires_at=access_exp, refresh_expires_at=refresh_exp)
 
+    # Grace window during which an ALREADY-ROTATED refresh token is accepted once more. The client
+    # scenario: our refresh_session succeeded server-side, the row was rotated, the fresh tokens
+    # were sent back — but the response was lost in transit (Cloudflare restart, LTE handoff, WS
+    # reaper closed the socket between response bytes, whatever). The client still holds the OLD
+    # refresh token. Without a grace window, their next attempt hits an already-rotated row, the
+    # server returns 401, the iOS client wipes credentials and forces re-enrollment. This
+    # exactly matches the "requires enrollment again after restart" complaint (§8).
+    #
+    # 90 s covers a generous LTE-handover + Cloudflare-reconnect budget without meaningfully
+    # weakening the single-active-session invariant. If a genuine attacker replays a captured
+    # refresh within the same 90 s, they'd still need to defeat every OTHER auth control (device
+    # already active, in-flight session usage). And accepting a grace-window token immediately
+    # invalidates ALL prior sessions on this device, so the presumed lost-response successor
+    # session (if any) is retired — one clean session going forward.
+    _REFRESH_GRACE_SECONDS = 90
+
     async def refresh_session(self, refresh_token: str) -> IssuedSession | None:
-        """Rotate a refresh token → a new access + refresh pair (§24). The old session is revoked, so a
-        replayed (already-rotated) refresh token is rejected. Returns None if invalid/expired/revoked."""
+        """Rotate a refresh token → a new access + refresh pair (§24 + production fix).
+
+        Normal path: refresh row is live and not-revoked → rotate atomically.
+
+        Grace path (production fix): refresh row IS revoked but was rotated in the last
+        `_REFRESH_GRACE_SECONDS`. Treat this as a client retrying after a lost response and
+        re-issue a fresh session, revoking ALL prior sessions on the device so the presumed
+        (never-received) successor is retired and only ONE session remains active.
+
+        Returns None if the token is truly unknown / expired / device-revoked.
+        """
         rhash = _hash(refresh_token)
         async with self._pool.acquire() as conn, conn.transaction():
+            # Normal, non-revoked case first.
             row = await conn.fetchrow(
                 "SELECT s.id, s.device_id, d.role, d.name, d.status "
                 "FROM device_session s JOIN api_device d ON d.id = s.device_id "
                 "WHERE s.refresh_hash = $1 AND NOT s.revoked AND s.refresh_expires_at > now() "
                 "FOR UPDATE OF s",
                 rhash)
-            if row is None or row["status"] != "active":
+            if row is not None and row["status"] == "active":
+                await conn.execute(
+                    "UPDATE device_session SET revoked = true, rotated_at = now() "
+                    "WHERE id = $1", row["id"])
+                session = await self._issue(conn, row["device_id"], row["role"], row["name"])
+                log.info("session_refreshed", device_id=str(session.device_id)[:8])
+                return session
+
+            # Grace-window redelivery: the client is presenting a refresh token that was already
+            # rotated recently. Accept it once more and re-issue, then invalidate every other
+            # session on this device so the (presumed lost-response) successor is retired.
+            grace_row = await conn.fetchrow(
+                f"SELECT s.id, s.device_id, d.role, d.name, d.status "
+                f"FROM device_session s JOIN api_device d ON d.id = s.device_id "
+                f"WHERE s.refresh_hash = $1 AND s.revoked = true "
+                f"  AND s.rotated_at > now() - INTERVAL '{self._REFRESH_GRACE_SECONDS} seconds' "
+                f"  AND s.refresh_expires_at > now() "
+                f"FOR UPDATE OF s",
+                rhash)
+            if grace_row is None or grace_row["status"] != "active":
                 log.warning("refresh_failed")
                 return None
-            await conn.execute("UPDATE device_session SET revoked = true, rotated_at = now() "
-                               "WHERE id = $1", row["id"])
-            session = await self._issue(conn, row["device_id"], row["role"], row["name"])
-        log.info("session_refreshed", device_id=str(session.device_id)[:8])
+            # Retire every other session on this device so single-active-session holds and a
+            # captured mid-air token can never race a legitimate rotation. Force refresh_expires_at
+            # to `now()` so those retired rows are ALSO excluded from the grace window (otherwise
+            # setting a fresh rotated_at would inadvertently open a new grace window for them).
+            await conn.execute(
+                "UPDATE device_session "
+                "SET revoked = true, rotated_at = COALESCE(rotated_at, now()), "
+                "    refresh_expires_at = now() "
+                "WHERE device_id = $1 AND NOT revoked", grace_row["device_id"])
+            session = await self._issue(
+                conn, grace_row["device_id"], grace_row["role"], grace_row["name"])
+        log.info("session_grace_reissued", device_id=str(session.device_id)[:8])
         return session
 
     async def authenticate(self, access_token: str | None) -> AuthedDevice | None:
@@ -222,6 +287,74 @@ class DeviceStore:
             updated = await conn.fetchval(
                 "UPDATE api_device SET push_token = $2, push_environment = $3 "
                 "WHERE id = $1 AND status = 'active' RETURNING id", device_id, token, environment)
+        return updated is not None
+
+    # ── Password auth ─────────────────────────────────────────────────────────────────────────────────
+    # The iPhone authenticates with the owner PASSWORD (api/password.py), which mints one of these same
+    # opaque sessions. The password is the DURABLE credential: the app re-logs-in with it whenever a token
+    # expires, so an expiring/revoked token can never lock the owner out.
+
+    async def get_password_hash(self) -> str | None:
+        """The stored one-way password hash, or None if the password was never set."""
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval("SELECT auth_password_hash FROM sali.sali_state WHERE id = true")
+
+    async def set_password(self, password_hash: str) -> None:
+        """Set/rotate the login password AND revoke every live session in one transaction — rotating the
+        password is the "log everyone out" switch. authenticate() requires NOT revoked, so every REST call
+        401s immediately and the WS reaper tears live sockets down within ~60s."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "UPDATE sali.sali_state SET auth_password_hash = $1, auth_password_set_at = now() "
+                "WHERE id = true", password_hash)
+            await conn.execute("UPDATE device_session SET revoked = true")
+        log.info("api_password_changed")  # never logs the password or its hash
+
+    async def login(self, *, name: str, model: str | None, platform: str) -> IssuedSession:
+        """Password-verified login → a fresh owner session. Reuses ONE stable owner device row per app
+        name (so repeated logins never flood the device list) and revokes that device's prior sessions so
+        exactly one session stays active — the same single-active-session invariant enrollment holds."""
+        clean = name.strip() or "iPhone"
+        async with self._pool.acquire() as conn, conn.transaction():
+            device_id = await conn.fetchval(
+                "SELECT id FROM api_device WHERE name = $1 AND role = 'owner' "
+                "ORDER BY created_at LIMIT 1", clean)
+            if device_id is None:
+                device_id = await conn.fetchval(
+                    "INSERT INTO api_device (name, platform, model, role) VALUES ($1, $2, $3, 'owner') "
+                    "RETURNING id", clean, platform, model)
+            else:
+                await conn.execute("UPDATE api_device SET status = 'active' WHERE id = $1", device_id)
+            await conn.execute("UPDATE device_session SET revoked = true WHERE device_id = $1", device_id)
+            session = await self._issue(conn, device_id, "owner", clean)
+        log.info("password_login", device_id=str(device_id)[:8])
+        return session
+
+    async def push_targets(self) -> list[dict[str, Any]]:
+        """Every ACTIVE device that has actually registered a push token (§11).
+
+        `environment` travels with the token on purpose: a sandbox token is rejected outright by the
+        production APNs host and vice versa, so the sender pushes each device on the host its own
+        token came from rather than picking one globally.
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, push_token, push_environment FROM api_device "
+                "WHERE status = 'active' AND push_token IS NOT NULL")
+        return [{"id": r["id"], "token": r["push_token"],
+                 "environment": r["push_environment"] or "production"} for r in rows]
+
+    async def clear_push_token(self, device_id: UUID) -> bool:
+        """Forget a token APNs has told us is dead (app deleted, or built for the other environment).
+
+        The DEVICE is untouched — it keeps its role, its sessions and its authority; it simply has no
+        push route until the app registers again on its next launch. Revocation is a different act
+        with a different method (§24).
+        """
+        async with self._pool.acquire() as conn:
+            updated = await conn.fetchval(
+                "UPDATE api_device SET push_token = NULL, push_environment = NULL "
+                "WHERE id = $1 AND push_token IS NOT NULL RETURNING id", device_id)
         return updated is not None
 
     async def counts(self) -> dict[str, int]:

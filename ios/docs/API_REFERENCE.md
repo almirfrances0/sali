@@ -14,14 +14,27 @@ implemented and tested in `src/sali/api/` (see `tests/test_api_*.py`).
 
 | Environment | Base URL | Notes |
 |-------------|----------|-------|
-| Development | `http://<kali-lan-ip>:8080` | `sali serve` on the LAN; enroll over HTTP on trusted Wi-Fi |
+| LAN (auto)  | `http://<discovered-lan-ip>:8080` | Auto-discovered via Bonjour (`_sali._tcp`) — see [DISCOVERY.md](DISCOVERY.md) |
+| Development | `http://<kali-lan-ip>:8080` | Manual override for a specific IP |
 | Production  | `https://sali.salieno.com` | Cloudflare Tunnel → origin (§ Cloudflare) |
 
 There is no hardcoded production URL in feature code — the app resolves the base URL from a selected
-`APIEnvironment` (see `Core/Networking/APIConfiguration.swift`). No secrets live in the repo.
+`APIEnvironment` (see `Core/Networking/APIConfiguration.swift`), and the LAN case is discovered at
+runtime by `ConnectionManager` without the user typing an IP. No secrets live in the repo.
 
-REST is versioned under `/api/v1`. The WebSocket is `/ws`. A public liveness probe is `GET /healthz`
-(no auth, no data) for uptime checks and tunnel health.
+REST is versioned under `/api/v1`. The WebSocket is `/ws`. Two public endpoints sit on the app
+root (no auth):
+
+* `GET /healthz` — liveness probe returning `{"status":"ok"}` for uptime checks and tunnel health.
+* `GET /identity` — Sali-verification probe returning `{"service":"sali","runtime_id":…,"version":…,"hostname":…,"protocol":"1"}`.
+  Used by the iPhone AFTER Bonjour discovery to confirm the responder is Sali before opening an
+  authenticated session. NEVER carries a token.
+
+**Backend bind default is `0.0.0.0:8080`** (all interfaces) so a device on the same LAN can reach
+Sali directly. Auth is IP-agnostic — every `require_identity` / `require_controller` /
+`require_owner` gate runs identically on LAN and tunnel packets. Override with
+`SALI_API__BIND_HOST=127.0.0.1` (env) or the `[api] bind_host = "127.0.0.1"` block in
+`~/.config/sali/sali.toml` to force loopback-only for hardened deployments.
 
 ---
 

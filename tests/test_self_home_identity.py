@@ -83,7 +83,7 @@ def test_self_and_health_sections_are_assembled() -> None:
         self_note="Myself (self-state):\nThis host is my home.",
         health_note="My faculties right now: all good.")
     assert "self" in ctx.included and "health" in ctx.included
-    text = ctx.messages[0].content
+    text = "\n".join(m.content for m in ctx.messages)  # self/health sections live in the user message
     assert "my home" in text and "faculties" in text
 
 

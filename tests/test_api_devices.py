@@ -64,6 +64,16 @@ async def test_unknown_code_is_rejected(live_pool: Any) -> None:
     assert await DeviceStore(live_pool).redeem_enrollment("ZZZZZ-ZZZZZ", name="iPhone") is None
 
 
+async def test_formatted_and_unicode_dashes_code_redemption(live_pool: Any) -> None:
+    store = DeviceStore(live_pool)
+    code, _ = await store.mint_enrollment_code()
+    # Code with em-dash and spaces/lowercase should normalize and redeem successfully
+    parts = code.split("-")
+    formatted_code = f" {parts[0].lower()} — {parts[1].lower()} \n"
+    session = await store.redeem_enrollment(formatted_code, name="iPhone Unicode Dash")
+    assert session is not None and session.role == "owner"
+
+
 async def test_access_token_expires(live_pool: Any) -> None:
     store = DeviceStore(live_pool)
     code, _ = await store.mint_enrollment_code()
@@ -75,6 +85,12 @@ async def test_access_token_expires(live_pool: Any) -> None:
 
 
 async def test_refresh_rotates_and_invalidates_old_token(live_pool: Any) -> None:
+    """Rotation issues fresh tokens and immediately invalidates the OLD ACCESS TOKEN.
+    The OLD refresh token stays USABLE for a 90-second grace window (production fix — see
+    tests/test_refresh_grace.py + src/sali/api/devices.py refresh_session for the rationale:
+    a lost response after commit was forcing re-enrollment). Outside the grace window (aged
+    row) the old refresh is dead; that's covered in test_refresh_grace_expires_after_90_seconds.
+    """
     store = DeviceStore(live_pool)
     code, _ = await store.mint_enrollment_code()
     session = await store.redeem_enrollment(code, name="iPhone")
@@ -84,8 +100,17 @@ async def test_refresh_rotates_and_invalidates_old_token(live_pool: Any) -> None
     assert rotated is not None and rotated.access_token != session.access_token
     # new access token works
     assert await store.authenticate(rotated.access_token) is not None
-    # the OLD refresh token is now dead (rotation revoked its session) — replay is rejected
-    assert await store.refresh_session(session.refresh_token) is None
+    # the OLD ACCESS token is dead (its device_session was revoked at rotation time)
+    assert await store.authenticate(session.access_token) is None
+    # the OLD refresh token is STILL VALID within the 90-second grace window — this is the
+    # production fix that eliminates re-enrollment prompts after a lost-response scenario.
+    grace_reissue = await store.refresh_session(session.refresh_token)
+    assert grace_reissue is not None, (
+        "grace-window redelivery must accept an already-rotated refresh — Almir's "
+        "'re-enrollment on restart' complaint recurs otherwise. See test_refresh_grace.py "
+        "for the full contract.")
+    # And the grace re-issue must retire the previous successor to preserve single-active-session.
+    assert await store.authenticate(rotated.access_token) is None
 
 
 async def test_revoked_device_loses_access(live_pool: Any) -> None:

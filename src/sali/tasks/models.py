@@ -21,6 +21,10 @@ class TaskStep:
     verified_by: UUID | None = None  # → tool_execution.id
     depends_on: list[int] = field(default_factory=list)  # step seqs that must finish first (§3-6 DAG)
     checkpoint: dict[str, Any] | None = None  # in-step progress → resume mid-step, not from scratch
+    parent_seq: int | None = None  # the seq of the parent step; None = a top-level step (migration 0045)
+    # Step-discipline (migration 0055): the step as an enforceable CONTRACT.
+    definition_of_done: str | None = None  # checkable completion criteria; engine verifies before 'done'
+    scope_excludes: str | None = None      # what this step must NOT touch (later steps' work)
 
 
 @dataclass(slots=True)
@@ -38,6 +42,22 @@ class Task:
     allowed_write_roots: list[str] = field(default_factory=list)
     workspace_mode: str = "none"  # none | explicit | inherited
     last_heartbeat: datetime | None = None
+    # WHEN WORK BEGAN AND ENDED, as distinct from when the task was written down. created_at counts
+    # queued time as working time; these do not. Both stay None until they genuinely happen — a task
+    # that has not started has no start time, and defaulting it to created_at would erase the very
+    # distinction they exist to make.
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    # WHEN the completed task's snapshot was written to disk. The row STAYS after that -
+    # this timestamp just says "the archive process ran." Operational queries filter by
+    # status; this column exists for observability and future cleanup policies.
+    archived_at: datetime | None = None
+    # §15 follow-up: when Almir's next message continues from a completed task
+    # ("make the header smaller" after a landing-page task finished), the child
+    # task points back at its parent. Distinct from superseded_by (which means
+    # "was replaced by") - this is "continues from".
+    parent_task_id: UUID | None = None
+    deadline_at: datetime | None = None
     interrupted_at: datetime | None = None
     recovery_reason: str | None = None
     max_retries: int = 3
@@ -115,6 +135,11 @@ def row_to_task(task_row: Any, step_rows: list[Any]) -> Task:
         allowed_write_roots=list(_col(task_row, "allowed_write_roots", []) or []),
         workspace_mode=_col(task_row, "workspace_mode", "none"),
         last_heartbeat=_col(task_row, "last_heartbeat"),
+        started_at=_col(task_row, "started_at"),
+        completed_at=_col(task_row, "completed_at"),
+        archived_at=_col(task_row, "archived_at"),
+        parent_task_id=_col(task_row, "parent_task_id"),
+        deadline_at=_col(task_row, "deadline_at"),
         interrupted_at=_col(task_row, "interrupted_at"),
         recovery_reason=_col(task_row, "recovery_reason"),
         max_retries=_col(task_row, "max_retries", 3),
@@ -136,6 +161,9 @@ def row_to_task(task_row: Any, step_rows: list[Any]) -> Task:
                 verified_by=_col(r, "verified_by"),
                 depends_on=list(_col(r, "depends_on", []) or []),
                 checkpoint=_col(r, "checkpoint"),
+                parent_seq=_col(r, "parent_seq"),
+                definition_of_done=_col(r, "definition_of_done"),
+                scope_excludes=_col(r, "scope_excludes"),
             )
             for r in step_rows
         ],

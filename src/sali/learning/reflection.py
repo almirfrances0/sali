@@ -15,9 +15,12 @@ from typing import Any
 from sali.core.enums import MemoryLayer, MemorySource
 from sali.core.toolvocab import binary_of
 from sali.memory import writer as memory_writer
-from sali.provider.base import ChatMessage, ModelProvider
+from sali.provider.base import ChatMessage
+from sali.provider.presets import CREATIVE
+from sali.provider.base import ModelProvider
 
-_REFLECT_OPTS: dict[str, Any] = {"temperature": 0.3, "top_k": 40, "top_p": 0.9}
+# Brain-audit Turn 6: _REFLECT_OPTS deleted; preset=CREATIVE used at call site so
+# reflection is open-ended (not seed=42-locked to "same thought again" every time).
 _REFLECT_SYSTEM = (
     "You are Sali, reflecting on a task you just finished. In ONE short sentence, state the single "
     "reusable lesson worth remembering for next time — something concrete and general, not a play-by-"
@@ -28,9 +31,19 @@ _REFLECT_SYSTEM = (
 async def reflect_on_recent(conn: Any, provider: ModelProvider, *, min_tools: int = 3) -> int:
     """Reflect on the most recent substantial, not-yet-reflected run. Returns 1 if a lesson was kept,
     else 0. Caller owns the transaction context; the model call runs without holding one open."""
+    # SKIP INTERNAL BACKGROUND TURNS. Sali's own housekeeping runs (grounding checks, task
+    # verification, self-directed inputs) all start with a marker in `user_input`. Reflecting on them
+    # produced 197 episodic memories with content like "Experience - TASK: Verify stored procedure
+    # for creating a Python script..." which then matched every subsequent task query and landed in
+    # context on average 11.94 times per row - the "conversation history becomes memory" failure
+    # mode Prompt A audit warns about. Almir's own words: "task history != memory". Skipping these
+    # keeps reflection on real user-facing work.
     run = await conn.fetchrow(
         "SELECT r.run_id, r.user_input FROM agent_runs r "
         "WHERE r.status='completed' "
+        "  AND r.user_input NOT LIKE 'TASK:%' "
+        "  AND r.user_input NOT LIKE '[my own background check]%' "
+        "  AND r.user_input NOT LIKE 'You wrote this down but never checked it%' "
         "  AND (SELECT count(*) FROM tool_execution t WHERE t.run_id=r.run_id) >= $1 "
         "  AND NOT EXISTS (SELECT 1 FROM event e WHERE e.event_type='learning.reflected' "
         "                  AND e.subject_id=r.run_id) "
@@ -53,7 +66,7 @@ async def reflect_on_recent(conn: Any, provider: ModelProvider, *, min_tools: in
         res = await provider.chat(
             [ChatMessage(role="system", content=_REFLECT_SYSTEM),
              ChatMessage(role="user", content=f"Goal: {run['user_input']}\nWhat you did: {ran}")],
-            options=_REFLECT_OPTS)
+            preset=CREATIVE)
         raw = (res.content or "").strip()
         if raw:
             # Take the first substantive line, stripping common preamble patterns
@@ -75,11 +88,17 @@ async def reflect_on_recent(conn: Any, provider: ModelProvider, *, min_tools: in
     # A clean run with nothing notable to say keeps nothing (§57). Otherwise write ONE structured
     # EXPERIENCE (§36) — task/tools/errors/outcome/lesson in a single episodic record, replacing the
     # old bare "Lesson learned" semantic (removes the near-duplicate the review flagged).
-    if not lesson and not errors:
+    # A MEMORY IS A LESSON. Prompt A audit: "conversation may produce memories, but neither should
+    # automatically BE memory." The old writer wrote the task's whole user_input into the content,
+    # which turned every completed run into a keyword-rich noise memory that dominated retrieval on
+    # any related query. Now: no lesson → no memory (the tool_execution rows and task record already
+    # preserve WHAT HAPPENED; those live in their own tables for audit and don't need to become
+    # semantic content the retriever surfaces). If there IS a lesson, it lands as the memory itself;
+    # the task/tools/errors go into structured for context, never into keyword-searchable content.
+    if not lesson:
         return 0
-    headline = lesson or f"{outcome}: {run['user_input'][:100]}"
     await memory_writer.remember(
-        conn, layer=MemoryLayer.EPISODIC, content=f"Experience — {run['user_input']}: {headline}",
+        conn, layer=MemoryLayer.EPISODIC, content=lesson,
         source=MemorySource.INFERENCE, importance=0.6,
         structured={"kind": "experience", "task": run["user_input"][:200], "tools": tools,
                     "errors": errors, "outcome": outcome, "lesson": lesson, "certainty": "learned"})

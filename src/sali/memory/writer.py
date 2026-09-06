@@ -23,9 +23,11 @@ from sali.core.enums import (
     MemorySource,
     compare_sources,
     contradiction_lifecycle,
+    is_observation,
     source_priority,
 )
 from sali.core.errors import SaliError
+from sali.core.knowledge import looks_checkable
 from sali.memory.confidence import apply_evidence, bump_reliability, initial_confidence
 from sali.memory.models import Memory, row_to_memory
 from sali.security.redact import redact
@@ -57,6 +59,29 @@ async def observe(
         {"kind": kind, "source": source.value},
     )
     return row["id"]  # type: ignore[no-any-return]
+
+
+# WHICH LAYERS CAN HONESTLY BE SETTLED BY LOOKING.
+#
+# An ALLOW-list, not a deny-list, because the question "could Sali go and check this?" only has a
+# sensible answer for a claim about current, observable state:
+#
+#   semantic    — "docker is installed", "the projects live in ~/Desktop" → go look. YES.
+#   system_env  — machine state, by definition observable.                → YES.
+#   episodic    — a past event. It already happened; nothing on disk can re-observe it, and asking
+#                 produced the worst bug of the day: "Experience — TASK: Create a Python script..."
+#                 was flagged, grounding said "go check this", and Sali RE-RAN THE TASK.
+#   procedural  — know-how, verified by USE (record_use success/failure), never by re-observation.
+#                 Its content mentions the paths it operates on, so it looked checkable and wasn't.
+#   identity    — nothing on the machine can confirm who Sali is.
+#   preference  — Almir's to declare; a filesystem cannot falsify a taste.
+#   working     — transient by construction.
+#
+# Measured cost of getting this wrong, live on 2026-09-03: one "create a python archive script" turn
+# became 99 background runs over three hours, seven fractally-named verification tasks, and 80
+# "[my own background check]" messages in Almir's transcript — each verification writing a new
+# procedure and a new experience, both of which were flagged, which woke grounding again.
+_GROUNDABLE_LAYERS = frozenset({MemoryLayer.SEMANTIC, MemoryLayer.SYSTEM_ENV})
 
 
 async def remember(
@@ -102,6 +127,40 @@ async def remember(
     # (a user statement, a live observation) clear the bar immediately, so they're never gated.
     promote_min = float(policy["promote_min_conf"]) if policy else 0.55
     if not functional and initial_confidence(source, obs_conf) < promote_min:
+        needs_grounding = True
+    # BEING TRUSTED AND HAVING BEEN CHECKED ARE DIFFERENT THINGS.
+    #
+    # The gate above sets this flag only when confidence is too LOW to promote, and a user statement
+    # scores 0.77 against a bar of 0.55 — so "Almir told me" cleared it instantly and nothing ever went
+    # to look. That is the conflation the directive names first: what Almir said, what Sali remembers,
+    # and what Sali verified must never silently merge. Almir is usually right, so his word is still
+    # believed at full confidence; it is simply also QUEUED to be settled by looking.
+    #
+    # An observation is excluded because it already IS the look. Identity is excluded because nothing
+    # on the machine can confirm who Sali is.
+    # PROCEDURAL is excluded beside IDENTITY, and this exclusion is the difference between a working
+    # system and a fractal task loop.
+    #
+    # A procedure is know-how — its content mentions the paths and commands it operates on ("~/archive/",
+    # "list_directory"), which trip `looks_checkable`. Flagging it woke the grounding faculty with
+    # "You wrote this down but never checked it: 'Procedure for X'..."; Sali interpreted "check" as "run
+    # the steps again", spawned a verify TASK, and every completed task writes ITS OWN new procedure
+    # ("Procedure for 'Verify procedure X': read_file → advance_task"), whose content also mentions
+    # paths, which is flagged again, which wakes grounding again, which creates another verify task…
+    #
+    # Reproduced live 2026-09-03: a single "create python archive script" turn produced 99 background
+    # runs across three hours, at least 7 fractally-named verification tasks, and 80 [background check]
+    # messages in Almir's transcript. A procedure is verified by USE (record_use success/failure), never
+    # by re-observation, so grounding has no honest question to ask about one.
+    if (not needs_grounding and not is_observation(source)
+            and layer in _GROUNDABLE_LAYERS and looks_checkable(content)
+            # An INFERENCE-source functional memory is a COMPUTED AGGREGATE (tool-usage
+            # stats keyed by claim_key like "tool:echo"), not a claim about current
+            # observable state. "echo: run 19x on this machine, 79% success" has nothing
+            # to go and look at - it summarises history. Flagging these for grounding
+            # made the daemon fire a "[my own background check] ..." internal turn every
+            # 5-10 minutes, polluting Almir's chat with what looked like his own messages.
+            and not (functional and source == MemorySource.INFERENCE)):
         needs_grounding = True
 
     if functional and claim_key is not None:
@@ -260,23 +319,48 @@ async def _corroborate(
 ) -> Memory:
     # Caller holds the transaction and has locked `existing` FOR UPDATE, so recomputing from
     # this snapshot is safe against concurrent corroborations.
-    new_conf = apply_evidence(existing["confidence"], source, obs_conf)
-    new_rel = bump_reliability(existing["reliability"], source)
+    #
+    # RESTATEMENT IS NOT EVIDENCE. Confidence used to rise on every corroboration regardless of where it
+    # came from, so the same sentence said eleven times in one conversation walked confidence toward
+    # certainty — Sali becoming steadily surer of something on no new information at all. Independent
+    # attestation is what should move belief: a second, different source genuinely raises it; the same
+    # source repeating itself refreshes recency and the evidence trail and leaves belief where it was.
+    # `memory_evidence` already records the source of every corroboration, so the check is exact rather
+    # than heuristic. Promotion below already required DISTINCT sources — this makes confidence itself
+    # obey the same rule instead of contradicting it.
+    already_attested = await conn.fetchval(
+        "SELECT 1 FROM memory_evidence WHERE memory_id=$1 AND source=$2::memory_source LIMIT 1",
+        existing["id"], source.value,
+    )
+    if already_attested:
+        new_conf = existing["confidence"]
+        new_rel = existing["reliability"]
+    else:
+        new_conf = apply_evidence(existing["confidence"], source, obs_conf)
+        new_rel = bump_reliability(existing["reliability"], source)
     row = await conn.fetchrow(
         "UPDATE memory SET confidence=$1, reliability=$2, evidence_count=evidence_count+1, "
         "  last_seen=now(), last_verified=now(), updated_at=now() WHERE id=$3 RETURNING *",
         new_conf, new_rel, existing["id"],
     )
-    await conn.execute(
-        "INSERT INTO memory_evidence (memory_id, source, source_ref, confidence, note) "
-        "VALUES ($1,$2::memory_source,$3,$4,$5)",
-        existing["id"], source.value, source_ref, obs_conf, note,
-    )
-    await conn.execute(
-        "INSERT INTO event (event_type, subject_type, subject_id, payload) "
-        "VALUES ('memory.corroborated','memory',$1,$2)",
-        existing["id"], {"source": source.value},
-    )
+    # A source RE-stating a fact it has already attested adds NO epistemic information (§6 distinct-source
+    # rule already froze confidence above), so it must not accrete a durable `memory_evidence` row nor an
+    # audit-spine `memory.corroborated` event. A static world fact re-observed every ~4 min was piling up
+    # HUNDREDS of identical-source evidence rows and making `memory.corroborated` ~20% of the entire
+    # append-only event log, for zero gain — the largest single source of write churn on the machine. The
+    # freshness stamp (last_seen/last_verified above) still moves, so decay/staleness sees it was just
+    # seen; only the redundant durable writes are skipped. New distinct-source evidence takes the full path.
+    if not already_attested:
+        await conn.execute(
+            "INSERT INTO memory_evidence (memory_id, source, source_ref, confidence, note) "
+            "VALUES ($1,$2::memory_source,$3,$4,$5)",
+            existing["id"], source.value, source_ref, obs_conf, note,
+        )
+        await conn.execute(
+            "INSERT INTO event (event_type, subject_type, subject_id, payload) "
+            "VALUES ('memory.corroborated','memory',$1,$2)",
+            existing["id"], {"source": source.value},
+        )
     # Promotion (§57): a candidate becomes trusted knowledge once it clears the confidence bar AND has
     # been attested by enough INDEPENDENT sources (distinct sources, not mere restatements — §6) — so
     # Sali restating its own inference can't self-promote it. A web/external fact is EXCLUDED: its

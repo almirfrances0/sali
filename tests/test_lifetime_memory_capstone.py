@@ -60,9 +60,13 @@ async def test_lifetime_memory_capstone(live_pool: Any) -> None:
     assert await store.finish(a.id, status="done") is None          # reviewer PASS → hook fires
 
     # memory survives WORKSPACE DELETION: the task + its executions are gone, the experience remains
+    # Turn 1: task row and its executions STAY (evidence-based completion, §7/§14/§22).
+    # store.get() with default include_archived=False still returns None, preserving the operational
+    # contract for callers that expect "post-archive => invisible."
     assert await store.get(task_a_id) is None
     async with live_pool.acquire() as c:
-        assert await c.fetchval("SELECT count(*) FROM task_execution WHERE task_id=$1", task_a_id) == 0
+        n_exec = await c.fetchval("SELECT count(*) FROM task_execution WHERE task_id=$1", task_a_id)
+    assert n_exec >= 1, "task_executions must survive as evidence"
 
     # ── PROCESS RESTART: a brand-new ExperienceStore reconstructs everything from PostgreSQL ─────────
     exp2 = ExperienceStore(live_pool)

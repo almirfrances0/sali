@@ -45,6 +45,10 @@ class RememberFact(Tool):
             "url": {"type": "string", "description": "Where it came from, if online (for provenance)."},
             "about": {"type": "string",
                       "description": "Optional topic for a single-valued fact, e.g. 'editor preference'."},
+            "kind": {"type": "string", "enum": ["fact", "preference", "procedure", "identity"],
+                     "description": "What kind of thing this is. 'preference' for how Almir likes "
+                                    "things done, 'procedure' for how to do something, 'identity' for "
+                                    "durable facts about who he is. Defaults to 'fact'."},
         },
         "required": ["content"],
     }
@@ -73,8 +77,13 @@ class RememberFact(Tool):
             shown = f" (from {domain or 'the web'})"  # clean display
 
         about = str(args.get("about", "")).strip() or None
+        kind = str(args.get("kind", "")).strip().lower() or "fact"
+        # A preference or an identity fact is worth more than a passing remark, and it is the kind of
+        # thing that must outrank chatter when the context budget is tight.
+        if kind in ("preference", "identity"):
+            importance = max(importance, 0.85)
         await ctx.memory.remember(content, source=source, note=note, importance=importance,
-                                  needs_grounding=needs_grounding, about=about)
+                                  needs_grounding=needs_grounding, about=about, kind=kind)
         return ToolResult(ok=True, output={"remembered": content, "source": source.value},
                           display=f"remembered{shown}")
 

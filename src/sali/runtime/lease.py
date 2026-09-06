@@ -196,6 +196,30 @@ class ExecutionLease:
                 "WHERE id = 'foreground' AND owner_id = $1 AND status = 'active'", self._owner_id)
         return bool(val)
 
+    async def reclaim_orphaned(self) -> bool:
+        """Clear ANY foreground lease we do not own. For the one mind, at startup, only.
+
+        This lease has to time out (300s) because it cannot see process death — a PostgreSQL row
+        knows nothing about the process that wrote it. Machine-wide ownership can: a process holding
+        the mind lock has *proof* that no other Sali exists, so an 'active' lease here belongs to
+        something that died. Clearing it turns a five-minute unexplained stall after a crash — the
+        terminal spinning while ``try_acquire`` keeps returning False — into an instant start.
+
+        Safe precisely because of that proof, and for no other reason: never call it from a process
+        that is not the sole living Sali.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock($1)", _ADVISORY_LOCK_KEY)
+            result = await conn.execute(
+                "UPDATE execution_lease SET status = 'releasing', heartbeat_at = now(), "
+                "  preempt_requested = false, preempt_reason = NULL, preempt_by = NULL "
+                "WHERE id = 'foreground' AND status = 'active' AND owner_id <> $1",
+                self._owner_id)
+        if _affected(result) > 0:
+            log.info("lease_reclaimed_orphaned", new_owner=self._owner_id)
+            return True
+        return False
+
     async def recover_stale(self) -> bool:
         """Recover a stale lease from a crashed process.
 

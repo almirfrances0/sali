@@ -68,4 +68,6 @@ async def test_functional_claim_same_value_corroborates(db_conn: Any) -> None:
         source=MemorySource.SYSTEM_OBSERVATION, functional=True, claim_key="sali|datastore",
     )
     assert again.id == first.id
-    assert again.evidence_count == 2 and again.confidence > first.confidence
+    # §6: same source re-stating the same functional value is tracked (evidence_count bumps) and holds
+    # the claim current, but does NOT inflate confidence — self-restatement is not independent evidence.
+    assert again.evidence_count == 2 and again.confidence == first.confidence

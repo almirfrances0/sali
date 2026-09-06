@@ -41,3 +41,8 @@ class RetrievalBundle:
     tool_facts: list[ToolFact] = field(default_factory=list)
     procedures: list[MemoryHit] = field(default_factory=list)   # how Sali handled this before (§4)
     experiences: list[MemoryHit] = field(default_factory=list)  # past incidents/episodes (§6)
+    # Capabilities Sali has ACQUIRED — not binaries on the machine (that is `tool_facts`), but things it
+    # learned it can do. `CapabilityStore.discover_for_task` existed to surface these during planning and
+    # had zero callers, so acquired competence was written and never read back: Sali would relearn from
+    # zero every time. This is the slot that carries it into a turn.
+    capabilities: list[dict] = field(default_factory=list)

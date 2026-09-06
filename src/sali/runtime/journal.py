@@ -24,14 +24,22 @@ class RunJournal:
     @classmethod
     async def start(
         cls, conn: Any, session_id: UUID, user_input: str, *, run_id: UUID | None = None,
+        internal: bool = False,
     ) -> RunJournal:
         """Start a new run journal. If ``run_id`` is provided (from the execution coordinator),
-        it is used as the canonical run ID — ensuring one run_id per turn across the entire system."""
+        it is used as the canonical run ID — ensuring one run_id per turn across the entire system.
+
+        ``internal`` records that this turn's input is something SALI gave himself, not something Almir
+        said. It rides in the existing `snapshot` jsonb rather than a new column, and it matters after a
+        crash: startup recovery re-drives an interrupted run from its stored `user_input`, and without
+        this flag a background turn came back as a foreground one and its internal instructions were
+        written into Almir's transcript as his own words."""
         rid = run_id or new_id()
         await conn.execute(
-            "INSERT INTO agent_runs (run_id, session_id, user_input, state, status) "
-            "VALUES ($1,$2,$3,$4,'running')",
+            "INSERT INTO agent_runs (run_id, session_id, user_input, state, status, snapshot) "
+            "VALUES ($1,$2,$3,$4,'running',$5)",
             rid, session_id, user_input, RunState.INPUT.value,
+            {"internal": True} if internal else {},
         )
         return cls(conn, rid, session_id)
 

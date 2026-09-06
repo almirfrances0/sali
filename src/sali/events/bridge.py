@@ -23,7 +23,7 @@ import contextlib
 from typing import Any
 from uuid import UUID
 
-from sali.events.bus import EventBus
+from sali.events.bus import EventBus, wait_or_wake
 from sali.events.publisher import EventPublisher, SaliEvent
 from sali.obs.log import get_logger
 
@@ -58,6 +58,17 @@ class EventBridge:
     async def start(self) -> None:
         """Start the bridge: subscribe to EventBus, begin listening."""
         self._stop.clear()
+        # Watermark to the current tail so a RESTART never re-broadcasts the durable
+        # event backlog as if it were live (that made old chats reappear one-by-one in
+        # the app). Historical catch-up is the WS replay path (subscribe/after_seq),
+        # which flags events replayed; the bridge only delivers events created AFTER
+        # this process started.
+        try:
+            async with self._pool.acquire() as conn:
+                tail = await conn.fetchval("SELECT coalesce(max(seq), 0) FROM event")
+            self._last_seq = int(tail or 0)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("event_bridge_watermark_failed", error=str(exc))
         # Subscribe to EventBus notifications
         self._wake = self._bus.subscribe()
         await self._bus.start()
@@ -76,25 +87,16 @@ class EventBridge:
         log.info("event_bridge_stopped")
 
     async def _listen_loop(self) -> None:
-        """Main loop: wait for EventBus wake, fetch durable event, deliver to subscribers."""
+        """Main loop: wait for EventBus wake OR heartbeat, fetch durable event, deliver to subscribers.
+
+        Waits on BOTH stop and wake (via wait_or_wake) so a NOTIFY on 'sali_events' fires
+        _fetch_and_deliver immediately instead of on the 5s polling tail. Previously this
+        awaited only stop.wait — LISTEN plumbing worked but no consumer ever awaited the wake.
+        """
         while not self._stop.is_set():
-            # Wait for a NOTIFY or timeout (fallback heartbeat)
-            try:
-                await asyncio.wait_for(
-                    self._stop.wait(),
-                    timeout=5.0,  # fallback poll every 5s
-                )
-                break  # stop was set
-            except TimeoutError:
-                pass  # timeout — check for new events
-            except asyncio.CancelledError:
+            await wait_or_wake(self._stop, self._wake, 5.0)
+            if self._stop.is_set():
                 break
-
-            # Check if we were woken by a NOTIFY
-            if self._wake.is_set():
-                self._wake.clear()
-
-            # Fetch any new events since our last watermark
             try:
                 await self._fetch_and_deliver()
             except Exception as exc:  # noqa: BLE001

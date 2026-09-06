@@ -1,0 +1,250 @@
+"""Sali's API — a WINDOW onto the one Sali, never a second one.
+
+This module deliberately has no way to create a Kernel, an AgentRuntime or an AgentLoop. The mind
+builds those once and *injects* its runtime into ``app.state.runtime``; every route reads that same
+object, so an HTTP request and a WebSocket frame and a terminal keystroke all reach one mind.
+
+    sali daemon   →  Kernel.become_mind() → runtime  →  create_app() + app.state.runtime = runtime
+
+That inversion is the whole design. The API used to build its own runtime from a kernel argument,
+which meant `sali serve` alongside `sali daemon` produced two AgentLoops, two coordinators and two
+processes talking to the same model — a second Sali wearing the first one's memory. Now the runtime
+must arrive from outside, so the class of bug is gone rather than guarded against.
+
+With no injected runtime (the test harness) the lifespan no-ops: routes that need only a pool work,
+and routes that need cognition find ``app.state.runtime is None`` and say so.
+
+Started by ``sali daemon`` (the mind, with all his faculties) or ``sali serve`` (the mind, API only).
+"""
+
+from __future__ import annotations
+
+import contextlib
+from collections.abc import AsyncIterator
+from typing import Any
+
+from fastapi import FastAPI, WebSocket
+from fastapi.middleware.cors import CORSMiddleware
+
+from sali.api.auth import get_or_create_token
+from sali.api.routes.api import router
+from sali.api.routes.enroll import router as enroll_router
+from sali.api.ws import handle_websocket, manager
+from sali.net.mdns import SaliBonjour
+from sali.obs.log import get_logger
+
+log = get_logger("sali.api")
+
+
+def create_app(kernel: Any = None) -> FastAPI:
+    """Build the API as a window onto an already-living mind.
+
+    The caller injects the mind's runtime (``app.state.runtime``) and pool before serving; this
+    function never constructs either. ``kernel`` is accepted only so routes can reach settings and
+    the provider handle for read-only checks — passing one does NOT make this app a Sali, and there
+    is no code path here that could turn it into one.
+
+    Startup/shutdown is a lifespan context manager: on start it attaches the cross-process
+    EventBridge and the WebSocket reaper to the injected runtime; on stop it detaches them and leaves
+    the runtime alone, because the mind — not its window — owns that lifecycle.
+    """
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        import asyncio
+        import time
+        app.state.start_time = time.time()
+        get_or_create_token()
+        log.info("api_server_starting")
+        bridge = None
+        reaper: Any = None
+        pusher: Any = None
+        bonjour: SaliBonjour | None = None
+
+        # The runtime ARRIVES here; it is never made here. No injected runtime (tests) → no-op.
+        runtime = getattr(app.state, "runtime", None)
+        pool = getattr(app.state, "pool", None)
+        if pool is None and kernel is not None:
+            pool = await kernel.pool()
+            app.state.pool = pool
+
+        if runtime is not None and pool is not None:
+            # Cross-process event bridge: PostgreSQL NOTIFY → durable event → WebSocket clients.
+            from sali.events.bridge import EventBridge
+            bridge = EventBridge(pool, runtime._publisher)
+            runtime._publisher._bridge = bridge  # wire dedup reference
+            await bridge.start()
+            app.state.event_bridge = bridge
+
+            # Periodic WebSocket reaper: close sockets whose device session was revoked/expired (§28).
+            async def _reap_loop() -> None:
+                while True:
+                    await asyncio.sleep(60)
+                    with contextlib.suppress(Exception):
+                        await manager.reap_invalid(pool)
+
+            reaper = asyncio.create_task(_reap_loop())
+            # APNs push (§11): Sali's own messages become banners on an enrolled iPhone even
+            # when the app is closed and its socket is gone. Subscribing to the PUBLISHER (rather
+            # than to the bridge) is deliberate — that same subscriber list is what the bridge
+            # delivers cross-process events to, so a message published by `sali daemon` pushes too.
+            #
+            # Absent credentials this attaches nothing and says why, once. Push is a delivery
+            # convenience layered on the socket, never a control path: a missing Apple key must
+            # leave every other part of the API untouched.
+            from sali.api.push import ApnsCredentials, ApnsSender, ApnsUnavailable
+            from sali.config.settings import load_settings
+            try:
+                settings = getattr(kernel, "settings", None) or load_settings()
+                pusher = ApnsSender(pool, ApnsCredentials.resolve(settings))
+                runtime._publisher.subscribe(pusher)
+                app.state.apns = pusher
+                log.info("apns_attached")
+            except ApnsUnavailable as exc:
+                log.info("apns_not_configured", reason=str(exc))
+
+            log.info("api_window_attached", session_id=str(runtime.session_id)[:8])
+
+            # mDNS / Bonjour advertisement — the iPhone can find this Sali on the same Wi-Fi without
+            # the user typing an IP. Discovery is announcement only: the iPhone still has to
+            # authenticate via `POST /api/v1/enroll` (with a one-time code) exactly as before. TXT
+            # record carries public metadata only; the token file is never advertised. Advertisement
+            # comes UP when Sali's API is up and goes DOWN when it stops. See src/sali/net/mdns.py.
+            try:
+                api_settings = getattr(kernel, "settings", None)
+                api_cfg = getattr(api_settings, "api", None) if api_settings is not None else None
+                mdns_enabled = getattr(api_cfg, "mdns_enabled", True) if api_cfg is not None else True
+                mdns_name = getattr(api_cfg, "mdns_service_name", "Sali") if api_cfg is not None else "Sali"
+                if mdns_enabled:
+                    # Port is the port the API was actually bound to. Best source is app.state.api_port
+                    # (published by the daemon at bind time); fall back to the settings default.
+                    bind_port = getattr(app.state, "api_port",
+                                        getattr(api_cfg, "bind_port", 8080) if api_cfg is not None else 8080)
+                    bonjour = SaliBonjour(
+                        runtime_id=str(runtime.session_id),
+                        port=int(bind_port),
+                        version=getattr(app, "version", "0.0.0"),
+                        service_name=mdns_name,
+                    )
+                    await bonjour.start()
+                    app.state.bonjour = bonjour
+                else:
+                    log.info("mdns_disabled_by_setting")
+            except Exception as exc:  # noqa: BLE001 — a Bonjour failure must never break the API
+                log.warning("mdns_start_failed", error=str(exc))
+                bonjour = None
+        try:
+            yield
+        finally:
+            log.info("api_server_stopping")
+            if bonjour is not None:
+                with contextlib.suppress(Exception):
+                    await bonjour.stop()
+            if reaper is not None:
+                reaper.cancel()
+                with contextlib.suppress(Exception):
+                    await reaper
+            if pusher is not None:
+                with contextlib.suppress(Exception):
+                    runtime._publisher.unsubscribe(pusher)
+                await pusher.aclose()
+            if bridge is not None:
+                await bridge.stop()
+            # Closing a window must not close the mind: the runtime, the pool and machine-wide
+            # ownership all belong to the process that became Sali, and it tears them down itself.
+
+    app = FastAPI(
+        title="Sali API",
+        description="Sali — local-first personal AI agent. One Sali, many interfaces.",
+        version="0.0.0",
+        docs_url="/docs",
+        redoc_url=None,
+        lifespan=lifespan,
+    )
+
+    # CORS — the client is a native iOS app (no browser Origin) plus local dev; auth is a bearer token in
+    # the Authorization header, never a cookie. So credentials mode is OFF: `*` origins with
+    # allow_credentials=True is a contradictory/invalid CORS posture (Final audit §28). With credentials
+    # off, a cross-origin site cannot ride an ambient credential, and the bearer token remains the control.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # Request size limit — small JSON bodies are capped tightly; file uploads (multipart to /files) get the
+    # larger, still-bounded upload ceiling (§33/§40). Real enforcement of the upload size is in the handler.
+    from starlette.middleware.base import BaseHTTPMiddleware
+
+    from sali.api.files import MAX_UPLOAD_BYTES
+
+    class RequestSizeLimit(BaseHTTPMiddleware):
+        JSON_MAX = 1_048_576  # 1MB for ordinary API calls
+
+        async def dispatch(self, request: Any, call_next: Any) -> Any:
+            if request.method in ("POST", "PUT", "PATCH"):
+                cap = MAX_UPLOAD_BYTES if request.url.path.endswith("/files") else self.JSON_MAX
+                content_length = request.headers.get("content-length")
+                if content_length and int(content_length) > cap:
+                    from starlette.responses import JSONResponse
+                    return JSONResponse({"error": "request too large"}, status_code=413)
+            return await call_next(request)
+
+    app.add_middleware(RequestSizeLimit)
+
+    # Store kernel on app state — runtime is created at startup
+    app.state.kernel = kernel
+    app.state.runtime = None
+    app.state.start_time = None
+
+    # REST routes — enrollment/refresh (unauthenticated, carry their own one-time secret) + the data
+    # router (uniformly behind require_identity).
+    app.include_router(enroll_router)
+    app.include_router(router)
+
+    # Public liveness probe — no data, no auth. For Cloudflare Tunnel / uptime checks (§26/§30).
+    @app.get("/healthz")
+    async def healthz() -> dict[str, str]:
+        return {"status": "ok"}
+
+    # Public discovery-verification endpoint — no auth. An iPhone that just found a service via
+    # Bonjour hits this to confirm the responder is Sali (matches `service` + `runtime_id` from
+    # the TXT record) before ever presenting a bearer token. The response carries only public
+    # metadata: the service tag, the STABLE runtime_id (a UUID that is not a secret), and the
+    # software version. It NEVER carries the api_token or any device session. Real authentication
+    # still happens through `POST /api/v1/enroll` (with a one-time pairing code) and the bearer
+    # token on subsequent requests.
+    @app.get("/identity")
+    async def identity() -> dict[str, str]:
+        runtime = getattr(app.state, "runtime", None)
+        runtime_id = str(runtime.session_id) if runtime is not None else ""
+        return {
+            "service": "sali",
+            "runtime_id": runtime_id,
+            "version": app.version,
+            # A protocol version for the discovery / identity contract, mirroring the mDNS TXT
+            # record. Bump when the shape of this endpoint changes in a breaking way.
+            "protocol": "1",
+            # DELIBERATELY NOT INCLUDED: hostname. Turn-2 security review flagged that leaking
+            # the OS hostname to every unauth network peer (an interface the daemon binds on
+            # includes docker0, wireguard, hotel Wi-Fi under bind_host=0.0.0.0) is a targeting
+            # aid ("almir-macbook", "corp-asset-123") with no client use — the iPhone doesn't
+            # render or consume it. Removing dropped the disclosure without any UX cost.
+        }
+
+    # WebSocket endpoint — authenticated with a device access token (Authorization header or ?token=).
+    @app.websocket("/ws")
+    async def websocket_endpoint(
+        websocket: WebSocket,
+        token: str | None = None,
+    ) -> None:
+        header_token = websocket.headers.get("authorization", "").removeprefix("Bearer ").strip()
+        effective_token = header_token or token
+        pool = getattr(app.state, "pool", None)
+        if pool is None and kernel is not None:
+            pool = await kernel.pool()
+        await handle_websocket(websocket, effective_token, pool)
+
+    return app

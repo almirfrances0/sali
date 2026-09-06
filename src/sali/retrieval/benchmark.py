@@ -10,6 +10,7 @@ what §67 asks for. Everything runs inside ONE rolled-back transaction, so it ne
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -24,20 +25,30 @@ _T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 class _OneConn:
-    """A pool that always hands back the SAME connection — so seeding and querying share one
-    transaction that the harness rolls back, leaving the database untouched."""
+    """A pool that always hands back the SAME connection - so seeding and querying share one
+    transaction that the harness rolls back, leaving the database untouched.
+
+    The lock is what lets the parallelised `RetrievalService.gather` work here: a real pool hands out
+    a distinct connection per task and asyncpg is happy, but a single connection cannot serve two
+    coroutines at once ("cannot perform operation: another operation is in progress"). Serialising
+    acquire() gives the benchmark the same total work in the same order, without the harness having
+    to fake being a real pool."""
 
     def __init__(self, conn: Any) -> None:
         self._conn = conn
+        self._lock = asyncio.Lock()
 
     def acquire(self) -> Any:
+        lock = self._lock
         conn = self._conn
 
         class _Ctx:
             async def __aenter__(self) -> Any:
+                await lock.acquire()
                 return conn
 
             async def __aexit__(self, *a: Any) -> bool:
+                lock.release()
                 return False
 
         return _Ctx()

@@ -18,7 +18,7 @@ from sali.provider.base import ChatMessage, ChatResult
 from sali.provider.fake import FakeModelProvider
 from sali.retrieval.service import RetrievalService
 from sali.runtime import cognitive, context_budget
-from sali.runtime.loop import AgentLoop, _DelegateSink
+from sali.runtime.loop import AgentLoop
 from sali.security.confirm import AutoAllowConfirmer
 from sali.security.policy import PolicyEngine
 from sali.skills.store import SkillStore
@@ -41,7 +41,7 @@ def _loop(pool: Any, provider: FakeModelProvider) -> AgentLoop:
         settings=Settings(db=DbSettings(name="sali_test"), model=ModelSettings(provider="fake")))
     pub = EventPublisher(pool)
     for st in (loop._tasks, loop._skills, loop._research_store, loop._decisions, loop._phases,
-               loop._delegations, loop._questions):
+               loop._questions):
         st._publisher = pub
     loop._reviewer = TaskReviewer(pool, pub)
     loop._tasks._reviewer = loop._reviewer
@@ -80,11 +80,9 @@ async def test_cognitive_os_capstone(live_pool: Any) -> None:
         source="https://laravel.com/docs/breeze", summary="composer require laravel/breeze --dev",
         confidence=0.8, content_hash="h")
 
-    # 3) delegation is DISABLED — Sali is a single executive agent (no subagent, no second model call);
-    #    the request refuses and nothing is spawned, so the primary task is untouched.
-    out = await _DelegateSink(loop=loop, tasks=store, run_id=uuid4(),
-                              store=loop._delegations).delegate("check the API's Node requirement")
-    assert out["ok"] is False and await loop._delegations.list_for_task(task.id) == []
+    # 3) delegation REMOVED (brain-audit turn 8) — Sali is a single executive agent (no subagent, no
+    #    second model call). There is no `_DelegateSink`, no `DelegationStore`, no `delegate` tool.
+    #    The primary task is untouched because there's no scaffold to touch it. Skipping the step.
 
     # 4) compaction: the fold carries the deterministic capsule (objective + NEXT ACTION + decision),
     #    bounded under the 24K budget — no summary-of-summary chain
@@ -139,4 +137,6 @@ async def test_cognitive_os_capstone(live_pool: Any) -> None:
     assert err is None and await loop2._tasks.get(original_id) is None  # PASS → completed + archived
 
     async with live_pool.acquire() as c:
-        assert await c.fetchval("SELECT count(*) FROM task WHERE id=$1", original_id) == 0  # one task, gone
+        # Turn 1: task row STAYS (queryable for §15 follow-up detection); archived_at is set.
+        row = await c.fetchrow("SELECT status, archived_at FROM task WHERE id=$1", original_id)
+        assert row is not None and row["status"] == "done" and row["archived_at"] is not None

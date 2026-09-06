@@ -1,0 +1,322 @@
+"""Check what Almir just ASSERTED against the machine, BEFORE Sali answers (§2/§11/§12).
+
+Sali already labels a retrieved memory by where it came from ("Almir told you", confidence 0.62), and a
+background faculty already re-grounds checkable memories every few minutes. Neither helps in the moment
+that decides whether he tells the truth: Almir says "VS Code is installed" and Sali answers on THAT
+turn. The background pass runs later; the provenance label only applies to something already stored. So
+a claim made in conversation was the one kind of claim nothing could ever check in time.
+
+This closes that, reusing the probes crash-recovery already trusts (``sali.tools.probe``). It reads the
+user's turn, recognises the assertion SHAPES this machine can settle, runs the probe, and hands back an
+OBSERVATION. It returns nothing when a probe cannot answer, so silence here always means "not checked"
+and never "checked and fine" — the distinction the whole directive rests on.
+
+Three deliberate choices:
+
+* NOT a model call. Asking an LLM "is this checkable?" would put one more thing that can be confidently
+  wrong on the hot path, about the very question this exists to settle mechanically.
+* It does not tell Sali what to say. It states what he saw, in the probe's own words, and lets him
+  speak from it — the same principle as the rest of this context: behaviour comes from evidence in
+  front of the model, not from rules piled into the prompt.
+* Believing Almir and having looked are different things, and BOTH are reported. When the machine
+  agrees with him, that is a VERIFIED fact Sali can stand behind; when it disagrees, Sali has the one
+  thing he needs to not simply agree.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+from dataclasses import dataclass
+
+from sali.tools.probe import (
+    binary_available,
+    package_installed,
+    path_exists,
+    port_listening,
+    service_active,
+    service_loaded,
+)
+
+# How long the whole check may take before Sali answers. Every probe is a small local subprocess
+# (`which`, `dpkg -s`, `systemctl is-active`, `ss -ltnH`) costing tens of milliseconds; this ceiling
+# exists so that a wedged one can never hold up a reply. Past the ceiling Sali simply hasn't checked,
+# which is a state he is able to say out loud.
+_DEADLINE_SECONDS = 2.5
+
+# At most this many claims per turn. A message asserting five things is a conversation, not a fact to
+# settle, and probing all of it would spend the deadline on the least important one.
+_MAX_CLAIMS = 3
+
+# What people call a program, versus what it is called on PATH. Without this, "VS Code" probes for a
+# binary named "vs" and reports a confident irrelevance.
+_BINARY_ALIAS = {
+    "vs code": "code", "vscode": "code", "visual studio code": "code", "vs-code": "code",
+    "neovim": "nvim", "helix": "hx", "sublime": "subl", "sublime text": "subl",
+    "intellij": "idea", "android studio": "studio", "postgres": "psql", "postgresql": "psql",
+    "node": "node", "nodejs": "node", "node.js": "node", "chrome": "google-chrome",
+    "google chrome": "google-chrome", "docker": "docker", "python": "python3",
+}
+
+# Words that arrive in these sentence shapes but are not programs. Probing them produces a technically
+# true, completely useless line ("github is not on PATH").
+_NOT_A_PROGRAM = frozenset({
+    "it", "that", "this", "them", "one", "some", "any", "the", "a", "an", "something", "anything",
+    "everything", "nothing", "my", "your", "his", "her", "their", "our", "and", "or", "but",
+    "github", "gitlab", "google", "openai", "anthropic", "aws", "azure", "gmail", "slack",
+    # Interrogatives reach the name group when a question survives sentence filtering ("what is
+    # installed on this machine?" produced the line "what is not on PATH", which is both absurd and
+    # exactly the kind of confident irrelevance this whole module exists to prevent).
+    "what", "which", "who", "whom", "whose", "where", "when", "why", "how", "anyone", "anybody",
+})
+
+# Generic nouns that appear where a unit name belongs. "the daemon is running" is a sentence about
+# something, not about a unit called `daemon`, and probing it announced "daemon.service is inactive" —
+# true of a unit that has never existed, and read as a contradiction of a perfectly correct statement.
+_GENERIC_SUBJECT = frozenset({
+    "daemon", "service", "server", "app", "application", "system", "process", "thing", "it",
+    "everything", "something", "program", "script", "job", "worker", "backend", "frontend", "api",
+})
+
+# A sentence OPENING with one of these is a question, not a claim. Deliberately checked at the start
+# only, so a tag question keeps working: "you have docker installed, right?" opens declaratively and is
+# a claim being put to Sali, while "is docker installed?" is a request to go and look.
+_QUESTION_OPENERS = frozenset({
+    "what", "which", "who", "whom", "whose", "where", "when", "why", "how", "is", "are", "was",
+    "were", "do", "does", "did", "can", "could", "will", "would", "should", "has", "have", "had",
+    "am", "may", "might", "shall", "any",
+})
+
+_NEG = r"(?:not\s+|n['’]t\s+|no\s+longer\s+)"
+# Two characters is a real lower bound, not a defensive one: sh, go, vi, hx, jq are all programs
+# someone says they use, and requiring three silently skipped every one of them.
+_NAME = r"[A-Za-z][\w.+\- ]{0,28}[\w.+\-]"
+
+# INSTALLED / AVAILABLE. Both directions matter: "X is installed" and "X isn't installed" are equally
+# checkable, and Sali agreeing with a false negative is the same failure as agreeing with a false
+# positive.
+_INSTALLED_RE = re.compile(
+    rf"\b(?P<name>{_NAME})\s+(?:is|are|was|'s)\s+(?P<neg>{_NEG})?(?:already\s+)?installed\b"
+    rf"|\byou\s+(?P<neg2>do{_NEG}|don['’]t\s+)?have\s+(?P<name2>{_NAME})\s+installed\b"
+    rf"|\b(?:i|we)\s+(?:use|run)\s+(?P<name3>{_NAME}?)\s+(?:as\s+(?:my|the|our)|for\s+(?:my|our))\b"
+    rf"|\bmy\s+(?:editor|browser|shell|terminal|ide|database|db|player)\s+is\s+(?P<name4>{_NAME})\b",
+    re.IGNORECASE,
+)
+
+# A SERVICE, by systemd unit name. "the sali service is running", "nginx is not active".
+_SERVICE_RE = re.compile(
+    rf"\b(?:the\s+)?(?P<unit>[\w@.\-]{{2,40}})(?:\.service)?\s+(?:service\s+|daemon\s+)?"
+    rf"(?:is|are|'s)\s+(?P<neg>{_NEG})?(?:running|active|up|started)\b",
+    re.IGNORECASE,
+)
+
+# A LISTENING PORT.
+_PORT_RE = re.compile(
+    rf"\bport\s+(?P<port>\d{{2,5}})\s+(?:is|'s)\s+(?P<neg>{_NEG})?"
+    rf"(?:open|listening|bound|in\s+use)\b",
+    re.IGNORECASE,
+)
+
+# A PATH. Absolute or ~-relative only — a bare relative path cannot be resolved from here, and the
+# probe declines it anyway.
+_PATH_RE = re.compile(
+    rf"(?P<path>(?:/|~/)[\w./@+\-]{{2,120}})\s+(?:is\s+)?(?P<neg>{_NEG})?"
+    rf"(?:exists?|is\s+there|is\s+present|is\s+missing|is\s+gone)\b"
+    rf"|\bthere\s+(?:is|'s)\s+(?:a\s+|the\s+)?(?:file|folder|directory|script)\s+(?:at|in)\s+"
+    rf"(?P<path2>(?:/|~/)[\w./@+\-]{{2,120}})",
+    re.IGNORECASE,
+)
+
+# "is missing" / "is gone" assert ABSENCE even though they carry no negation word.
+_ABSENCE_WORDS = re.compile(r"\bis\s+(?:missing|gone)\b", re.IGNORECASE)
+
+
+@dataclass(slots=True, frozen=True)
+class ClaimCheck:
+    """One thing Almir said, and what the machine actually said about it."""
+
+    claim: str            # his words, quoted back, so a disagreement lands on the actual claim
+    asserted: bool | None  # the polarity he asserted; None when he ASKED rather than claimed
+    observed: bool        # what the probe found
+    detail: str           # the probe's own words: "code is on PATH"
+
+    @property
+    def is_question(self) -> bool:
+        return self.asserted is None
+
+    @property
+    def agrees(self) -> bool:
+        """A question is never contradicted — there was nothing to contradict."""
+        return self.asserted is None or self.asserted == self.observed
+
+
+def _clean(name: str) -> str:
+    return re.sub(r"\s+", " ", name).strip(" .,;:'\"").lower()
+
+
+def _binary_for(name: str) -> str | None:
+    """The thing to look for on PATH, or None when this is not worth probing."""
+    cleaned = _clean(name)
+    if cleaned in _BINARY_ALIAS:
+        return _BINARY_ALIAS[cleaned]
+    if cleaned in _NOT_A_PROGRAM or len(cleaned) < 2:
+        return None
+    if " " in cleaned:                 # an unaliased multi-word name is a product, not a command
+        return None
+    return cleaned
+
+
+async def _check_program(name: str, asserted: bool | None, claim: str) -> ClaimCheck | None:
+    binary = _binary_for(name)
+    if binary is None:
+        return None
+    result = await binary_available(binary)
+    if result is not None and result.success:
+        return ClaimCheck(claim, asserted, True, result.detail)
+    # Not on PATH is not the same as not installed — a package can be present without a command of
+    # that name — so ask the package database before reporting an absence.
+    package = await package_installed(binary)
+    if package is not None and package.success:
+        return ClaimCheck(claim, asserted, True, package.detail)
+    if result is None:
+        return None
+    return ClaimCheck(claim, asserted, False, result.detail)
+
+
+def _sentences(text: str) -> list[tuple[str, bool]]:
+    """(sentence, is_question) — questions are worth probing too, they just aren't claims."""
+    out: list[tuple[str, bool]] = []
+    for raw in re.split(r"(?<=[.!?\n])\s+", text):
+        sentence = raw.strip()
+        if not sentence:
+            continue
+        first = re.sub(r"^\W+", "", sentence).split(" ", 1)[0].strip(",.?!'\"").lower()
+        out.append((sentence, first in _QUESTION_OPENERS))
+    return out
+
+
+def _extract(text: str) -> list[tuple[str, bool | None, str, str]]:
+    """(kind, asserted_polarity, subject, quoted) for everything in this turn the machine can settle.
+
+    `asserted` is None for a question: Almir asked rather than claimed, so there is no polarity to
+    agree or disagree with — but going to look is still strictly better than guessing (§11: never make
+    the model guess something the environment can answer directly)."""
+    found: list[tuple[str, bool | None, str, str]] = []
+
+    for sentence, question in _sentences(text):
+        found.extend(_extract_one(sentence, question))
+    return found[:_MAX_CLAIMS]
+
+
+# A checkable QUESTION arrives with the copula fronted ("is docker installed?", "is port 8080 open?"),
+# which the declarative-shaped probes above cannot match — so the question extracted NOTHING and Sali
+# guessed instead of looking. Rewrite the fronted copula to declarative ("docker is installed") so the
+# SAME probes fire; polarity stays None (a question is never struck) — it only informs the answer before
+# the first token. This is the dormant "check-then-assert" path the module's docstring already promised.
+_Q_REWRITE_RE = re.compile(
+    r"^\s*(?:is|are|was|were|'s)\s+(?P<subj>.+?)\s+"
+    r"(?P<pred>installed|running|active|up|started|open|listening|bound|in\s+use|"
+    r"there|present|missing|gone|exists?)\b",
+    re.IGNORECASE)
+
+
+def _dequestion(text: str) -> str:
+    """Turn a leading copula-question into the declarative shape the probes match; else unchanged."""
+    m = _Q_REWRITE_RE.match(text)
+    return f"{m.group('subj')} is {m.group('pred')}" if m else text
+
+
+def _extract_one(text: str, question: bool) -> list[tuple[str, bool | None, str, str]]:
+    if question:
+        text = _dequestion(text)  # "is docker installed?" -> "docker is installed" so the probes fire
+    found: list[tuple[str, bool | None, str, str]] = []
+
+    def quote(match: re.Match[str]) -> str:
+        return re.sub(r"\s+", " ", match.group(0)).strip()
+
+    def polarity(negated: bool) -> bool | None:
+        return None if question else not negated
+
+    for match in _INSTALLED_RE.finditer(text):
+        name = match.group("name") or match.group("name2") or match.group("name3") or match.group("name4")
+        if not name:
+            continue
+        found.append(("program", polarity(bool(match.group("neg") or match.group("neg2"))),
+                      name, quote(match)))
+
+    for match in _SERVICE_RE.finditer(text):
+        unit = match.group("unit")
+        if _clean(unit) in _NOT_A_PROGRAM or _clean(unit) in _GENERIC_SUBJECT:
+            continue
+        found.append(("service", polarity(bool(match.group("neg"))), unit, quote(match)))
+
+    for match in _PORT_RE.finditer(text):
+        found.append(("port", polarity(bool(match.group("neg"))), match.group("port"), quote(match)))
+
+    for match in _PATH_RE.finditer(text):
+        path = match.group("path") or match.group("path2")
+        if not path:
+            continue
+        negated = bool(match.group("neg")) or bool(_ABSENCE_WORDS.search(match.group(0)))
+        found.append(("path", polarity(negated), path, quote(match)))
+
+    return found
+
+
+async def check_claims(text: str) -> list[ClaimCheck]:
+    """Every assertion in this turn that the machine can settle, settled. Never raises."""
+    if not text or len(text) > 4000:
+        return []
+    candidates = _extract(text)
+    if not candidates:
+        return []
+
+    async def one(kind: str, asserted: bool | None, subject: str, claim: str) -> ClaimCheck | None:
+        if kind == "program":
+            return await _check_program(subject, asserted, claim)
+        if kind == "service":
+            unit = subject if "." in subject else f"{subject}.service"
+            # No opinion on a unit systemd has never heard of: that means the SUBJECT was misread, and
+            # reporting "inactive" would contradict a statement that was probably right.
+            if await service_loaded(unit) is not True:
+                return None
+            result = await service_active(unit)
+            return None if result is None else ClaimCheck(claim, asserted, result.success, result.detail)
+        if kind == "port":
+            result = await port_listening(int(subject))
+            return None if result is None else ClaimCheck(claim, asserted, result.success, result.detail)
+        result = path_exists(subject)
+        return None if result is None else ClaimCheck(claim, asserted, result.success, result.detail)
+
+    try:
+        settled = await asyncio.wait_for(
+            asyncio.gather(*(one(*c) for c in candidates), return_exceptions=True),
+            timeout=_DEADLINE_SECONDS,
+        )
+    except TimeoutError:
+        return []
+    except Exception:
+        return []
+    return [c for c in settled if isinstance(c, ClaimCheck)]
+
+
+def render(checks: list[ClaimCheck]) -> str | None:
+    """The observation, as evidence rather than instruction.
+
+    It deliberately does NOT tell Sali to disagree. It puts what he saw in front of him and lets him
+    speak from it, which is how every other section of this context works — and it quotes Almir's own
+    words back so that a disagreement lands on the actual claim instead of a paraphrase of it."""
+    if not checks:
+        return None
+    lines = ["You looked at this machine yourself, just now, before answering:"]
+    for check in checks:
+        if check.is_question:
+            lines.append(f"- {check.detail}.")
+        elif check.agrees:
+            lines.append(f"- {check.detail} — which is what Almir said.")
+        else:
+            lines.append(f'- {check.detail}. Almir said "{check.claim}".')
+    return "\n".join(lines)
+
+
+__all__ = ["ClaimCheck", "check_claims", "render"]

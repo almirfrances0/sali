@@ -31,10 +31,16 @@ async def test_explicit_cancellation_is_cancelled(live_pool: Any) -> None:
     assert transition.action == TaskAction.CANCELLED
     assert transition.previous_task is not None and transition.previous_task.id == task_a.id
 
-    updated_a = await store.get(task_a.id)
+    # Turn 2: authority.CANCELLED now routes through revoke_intent → durable tombstone,
+    # dependent-work propagation, archive, and status='abandoned'. include_archived=True to
+    # inspect the row that was preserved (Turn 1) with archived_at stamped.
+    from sali.tasks.revocation import RevocationStore
+    updated_a = await store.get(task_a.id, include_archived=True)
     assert updated_a is not None
-    assert updated_a.status == "cancelled"  # NOT 'abandoned'
+    assert updated_a.status == "abandoned"
+    assert updated_a.archived_at is not None
     assert updated_a.is_primary is False
+    assert await RevocationStore(live_pool).is_revoked(task_a.id)
 
     active = await authority.current_active()
     assert active is None
@@ -51,8 +57,10 @@ async def test_cancel_forget_old_task(live_pool: Any) -> None:
     transition = await authority.handle_new_turn("forget the old task")
     assert transition.action == TaskAction.CANCELLED
 
-    updated_a = await store.get(task_a.id)
-    assert updated_a is not None and updated_a.status == "cancelled"
+    from sali.tasks.revocation import RevocationStore
+    updated_a = await store.get(task_a.id, include_archived=True)
+    assert updated_a is not None and updated_a.status == "abandoned"
+    assert await RevocationStore(live_pool).is_revoked(task_a.id)
 
 
 async def test_cancel_drop_previous(live_pool: Any) -> None:
@@ -78,9 +86,10 @@ async def test_cancel_preserves_step_progress(live_pool: Any) -> None:
 
     await authority.handle_new_turn("stop that")
 
-    updated_a = await store.get(task_a.id)
+    # Turn 2: revoke_intent archives; step progress still preserved (Turn 1's child preservation).
+    updated_a = await store.get(task_a.id, include_archived=True)
     assert updated_a is not None
-    assert updated_a.status == "cancelled"
+    assert updated_a.status == "abandoned"
     assert updated_a.steps[0].status == "done"  # step progress preserved
 
 
@@ -229,8 +238,8 @@ async def test_forget_that_now_help_me_fix(live_pool: Any) -> None:
     transition = await authority.handle_new_turn("Forget that, now help me fix Laravel")
 
     assert transition.action == TaskAction.CANCELLED
-    updated_a = await store.get(task_a.id)
-    assert updated_a is not None and updated_a.status == "cancelled"
+    updated_a = await store.get(task_a.id, include_archived=True)
+    assert updated_a is not None and updated_a.status == "abandoned"
 
 
 async def test_instead_supersedes(live_pool: Any) -> None:
@@ -391,9 +400,11 @@ async def test_new_task_supersedes_old(live_pool: Any) -> None:
     assert transition.action == TaskAction.SUPERSEDED
     assert transition.previous_task is not None and transition.previous_task.id == task_a.id
 
+    # Turn 2: SUPERSEDED branch now flips status to 'superseded' too, so the recovery
+    # adopt-orphan scan can't silently resurrect the explicitly-replaced task.
     updated_a = await store.get(task_a.id)
-    assert updated_a is not None and updated_a.status == "running"  # status preserved, not cancelled
-    assert updated_a.is_primary is False  # but no longer primary
+    assert updated_a is not None and updated_a.status == "superseded"
+    assert updated_a.is_primary is False
 
     active = await authority.current_active()
     assert active is None
@@ -552,10 +563,11 @@ async def test_cancellation_patterns(live_pool: Any) -> None:
         transition = await authority.handle_new_turn(pattern)
         assert transition.action == TaskAction.CANCELLED, f"Pattern not detected: {pattern!r}"
 
-        updated = await store.get(task.id)
+        # Turn 2: cancel → revoke_intent → archived + status='abandoned' + tombstone
+        updated = await store.get(task.id, include_archived=True)
         assert updated is not None
-        assert updated.status == "cancelled", (
-            f"Status should be 'cancelled' for pattern: {pattern!r}, got: {updated.status!r}")
+        assert updated.status == "abandoned", (
+            f"Status should be 'abandoned' after revoke for pattern: {pattern!r}, got: {updated.status!r}")
 
 
 async def test_resume_patterns(live_pool: Any) -> None:

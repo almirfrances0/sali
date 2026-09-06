@@ -10,7 +10,19 @@ truthful, static description of Sali's own architecture (§71), so "how do you w
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
+
+
+def _is_fresh(at: Any, *, seconds: int = 3600) -> bool:
+    """Whether a state timestamp is recent. Guards current_focus: an interrupted turn (CancelledError)
+    never calls record_outcome, so mode can stay 'working' with a stale focus — freshness catches that."""
+    if at is None:
+        return False
+    try:
+        return (datetime.now(timezone.utc) - at).total_seconds() < seconds
+    except Exception:  # noqa: BLE001 - can't compute age -> don't suppress a genuinely-working focus
+        return True
 
 # The INVARIANT part of Sali's architecture (no machine/model mention — those are read from the graph
 # so a hardware/model swap updates the self-model automatically, no drift — §71/§10).
@@ -25,15 +37,10 @@ _REST_NARRATIVE = (
 )
 _GENERIC_BRAIN = (" My reasoning brain is a local model served through Ollama and kept warm; it's only "
                   "the part of me that thinks.")
-# Stock description (fallback when the graph has no agent facts yet); assemble() prefers the grounded one.
-SELF_KNOWLEDGE = ("I'm Sali, a local-first intelligence living on Almir's machine — it's my home, not a "
-                  "job." + _GENERIC_BRAIN + _REST_NARRATIVE)
-
-
 def _compose_self_knowledge(env: dict[str, Any]) -> str:
     """Build the self-description from live graph facts (machine + model) + the invariant narrative, so
     it never disagrees with reality the way a hardcoded string would."""
-    machine = env.get("machine") or "Almir's machine"
+    machine = env.get("machine") or "this machine"
     os_name = env.get("os")
     model = env.get("model")
     # Only add the OS in parens when it says something the machine name doesn't already.
@@ -43,9 +50,24 @@ def _compose_self_knowledge(env: dict[str, Any]) -> str:
     return f"I'm Sali, a local-first intelligence {where} — it's my home, not a job.{brain}{_REST_NARRATIVE}"
 
 
+# Stock description (fallback when the graph has no agent facts yet); assemble() prefers the grounded
+# one. DERIVED from the composer rather than written out beside it: the two were duplicate prose that
+# had to stay byte-identical, and editing one of them was all it took to make Sali's fallback
+# self-description disagree with his grounded one.
+SELF_KNOWLEDGE = _compose_self_knowledge({})
+
+
 class SelfStateStore:
     """Read/update the singleton self-state and assemble the full self-view. Owns a pool; each method
-    is self-contained (acquires its own connection)."""
+    is self-contained (acquires its own connection).
+
+    EVERY WRITE UPSERTS, and that is not defensive style — it is a repair. The singleton is created by
+    migration 0014, but `sali_state` carries foreign keys to `task`, so a `TRUNCATE task CASCADE`
+    (exactly what a "delete everything from testing" sweep runs) deletes the row. The writes were plain
+    `UPDATE ... WHERE id`, which then matched nothing and reported success, so Sali silently stopped
+    recording what he was doing, how the last turn went, and how many turns he had served — while the
+    presence events, being separate INSERTs, kept firing and made it look alive. Measured on the live
+    database: 0 rows in `sali_state` against 161 presence events. An upsert cannot fail that way."""
 
     def __init__(self, pool: Any) -> None:
         self._pool = pool
@@ -60,8 +82,10 @@ class SelfStateStore:
         focus = (focus or "").strip()[:280]
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "UPDATE sali_state SET mode='working', current_focus=$1, turn_count=turn_count+1, "
-                "updated_at=now() WHERE id", focus or None)
+                "INSERT INTO sali_state (id, mode, current_focus, turn_count, updated_at) "
+                "VALUES (true, 'working', $1, 1, now()) "
+                "ON CONFLICT (id) DO UPDATE SET mode='working', current_focus=EXCLUDED.current_focus, "
+                "  turn_count = sali_state.turn_count + 1, updated_at=now()", focus or None)
             await self._emit_presence(conn, "working")
 
     @staticmethod
@@ -76,8 +100,9 @@ class SelfStateStore:
     async def set_operation(self, operation: str | None) -> None:
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "UPDATE sali_state SET active_operation=$1, updated_at=now() WHERE id",
-                (operation or "").strip()[:280] or None)
+                "INSERT INTO sali_state (id, active_operation, updated_at) VALUES (true, $1, now()) "
+                "ON CONFLICT (id) DO UPDATE SET active_operation=EXCLUDED.active_operation, "
+                "  updated_at=now()", (operation or "").strip()[:280] or None)
 
     async def record_outcome(self, *, success: bool, summary: str) -> None:
         """Record how the last turn/operation fared, and return to idle."""
@@ -85,8 +110,10 @@ class SelfStateStore:
         col = "last_success" if success else "last_failure"
         async with self._pool.acquire() as conn:
             await conn.execute(
-                f"UPDATE sali_state SET {col}=$1, {col}_at=now(), active_operation=NULL, "
-                "mode='idle', updated_at=now() WHERE id", summary or None)
+                f"INSERT INTO sali_state (id, mode, {col}, {col}_at, updated_at) "
+                f"VALUES (true, 'idle', $1, now(), now()) "
+                f"ON CONFLICT (id) DO UPDATE SET {col}=EXCLUDED.{col}, {col}_at=now(), "
+                "  active_operation=NULL, mode='idle', updated_at=now()", summary or None)
             await self._emit_presence(conn, "idle")
 
     async def assemble(self) -> dict[str, Any]:
@@ -106,17 +133,35 @@ class SelfStateStore:
                 "ORDER BY priority, created_at LIMIT 5")]
             env = await self._environment(conn)  # machine/model/workspace/source from the graph (§1/§10)
         s = dict(state) if state else {}
+        _working_fresh = s.get("mode") == "working" and _is_fresh(s.get("updated_at"))
         return {
-            "identity": "Sali",
+            "identity": env.get("name") or "Sali",   # from state (the agent node), no longer a literal
+            "presentation": env.get("presentation"),  # §2/§3 — male / he-him, owner, preferred address,
+            "pronouns": env.get("pronouns"),          # all from the graph so a claim about them is grounded
+            "role": env.get("role"),
+            "owner": env.get("owner"),
+            "preferred_address": env.get("preferred_address"),
             "self_knowledge": _compose_self_knowledge(env),  # grounded in graph facts, no drift
             "environment": env,
             "mode": s.get("mode", "idle"),
-            "current_focus": s.get("current_focus"),
-            "active_operation": s.get("active_operation"),
+            # current_focus is written at turn START and never cleared at turn END, so surfacing it
+            # present-tense on an IDLE Sali reports a stale focus as a live fact (measured: idle, yet
+            # focus="great, send me that file" from 65 min ago). An old state presented as current is its
+            # own hallucination — the same discipline _self_note already applies to last_failure. Gate to
+            # the working state; record_outcome returns to idle, so an idle Sali honestly reports no live
+            # focus. Both readers (the self_state tool and the /current-state snapshot) go through here.
+            # working AND fresh — an interrupted turn can leave mode='working' with an hour-old focus.
+            "current_focus": s.get("current_focus") if _working_fresh else None,
+            "active_operation": s.get("active_operation") if _working_fresh else None,
+            "focus_at": s.get("updated_at"),  # so a snapshot can age/stale-flag the focus (§ temporal)
             "current_task": task,
             "turns_served": int(s.get("turn_count", 0) or 0),
             "last_success": s.get("last_success"),
             "last_failure": s.get("last_failure"),
+            # The timestamps come with them so a reader can tell "this just went wrong" from "this went
+            # wrong last week". Without them the only honest thing to do with a failure is ignore it.
+            "last_success_at": s.get("last_success_at"),
+            "last_failure_at": s.get("last_failure_at"),
             "uncertainty_count": int(unc_count or 0),
             "uncertainties": uncertainties,
             "learning_queue": learning_queue,
@@ -146,4 +191,19 @@ class SelfStateStore:
                 env["workspace"] = props.get("path")
             elif r["rel_type"] == "source_at":
                 env["source"] = props.get("path")
+        # Sali's OWN identity facts, from the agent:sali NODE props (not its edges) — structured state,
+        # not prose, so "who are you / are you male / who is your owner / how should you address me" all
+        # answer from the graph (§2/§3). Absent props just leave the fields unset (the caller falls back).
+        try:
+            arow = await conn.fetchrow(
+                "SELECT name, props FROM graph_node "
+                "WHERE canonical_key='agent:sali' AND valid_until IS NULL")
+            if arow is not None:
+                env["name"] = arow["name"]
+                _p = arow["props"] or {}
+                for _k in ("presentation", "pronouns", "role", "owner", "preferred_address"):
+                    if _p.get(_k):
+                        env[_k] = _p.get(_k)
+        except Exception:  # noqa: BLE001 - identity is best-effort; never break the self-view
+            pass
         return env

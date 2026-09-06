@@ -135,23 +135,29 @@ class PerceptionEngine:
         # 100%-CPU busy-spin on an idle desktop (the daemon's steady state).
         tick = max(0.05, min(self._agg.window_s, 1.0))
         while not stop.is_set():
-            event: DesktopEvent | None = None
-            with contextlib.suppress(asyncio.TimeoutError):
-                event = await asyncio.wait_for(self._queue.get(), timeout=tick)
-            if event is not None:
-                self.ingest(event)
-            await self.drain(datetime.now(UTC))
+            try:
+                event: DesktopEvent | None = None
+                with contextlib.suppress(asyncio.TimeoutError):
+                    event = await asyncio.wait_for(self._queue.get(), timeout=tick)
+                if event is not None:
+                    self.ingest(event)
+                await self.drain(datetime.now(UTC))
+            except Exception as exc:  # noqa: BLE001 - one bad tick must not silently kill perception
+                log.warning("perception_consume_tick_failed", error=str(exc)[:200])
 
     async def _window_loop(self, stop: asyncio.Event) -> None:
         assert self._snapshot is not None
         while not stop.is_set():
-            snap: dict[str, Any] | None = None
             try:
-                snap = await self._snapshot()
-            except Exception as exc:  # noqa: BLE001 - a perception hiccup never kills the loop
-                log.warning("window snapshot failed: %s", exc)
-            event = self.window_event(snap, datetime.now(UTC))
-            if event is not None:
-                self._emit(event)
+                snap: dict[str, Any] | None = None
+                try:
+                    snap = await self._snapshot()
+                except Exception as exc:  # noqa: BLE001 - a perception hiccup never kills the loop
+                    log.warning("window snapshot failed: %s", exc)
+                event = self.window_event(snap, datetime.now(UTC))
+                if event is not None:
+                    self._emit(event)
+            except Exception as exc:  # noqa: BLE001 - window_event/emit crash must not kill loop
+                log.warning("perception_window_tick_failed", error=str(exc)[:200])
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=self._window_poll_s)

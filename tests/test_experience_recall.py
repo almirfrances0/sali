@@ -48,7 +48,7 @@ async def test_procedure_and_incident_surface_on_a_task_turn(live_pool: Any) -> 
 
     engine = ContextEngine(FakeModelProvider(), ctx_tokens=4096)
     result = engine.assemble(q, bundle, [])
-    system = result.messages[0].content
+    system = "\n".join(m.content for m in result.messages)  # experience renders into the user message
     assert "experience" in result.included
     assert "build → ship → verify" in system            # the procedure steps, surfaced pre-act
     assert "port 3000 was busy" in system                # the past incident, surfaced pre-act

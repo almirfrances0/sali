@@ -1,8 +1,16 @@
-"""The `sali` command-line interface.
+"""The `sali` command-line interface — one Sali, many windows.
 
-Phase 0 ships ``version``, ``init`` (apply migrations), and ``doctor`` (health check).
-``chat`` is a minimal Phase-1 preview REPL — it is NOT yet the full agent loop, and it
-persists nothing.
+Every command here is exactly one of three things, and it says which:
+
+* **THE MIND** — ``sali daemon`` (and ``sali serve``, its API-only sibling). Takes machine-wide
+  ownership via :mod:`sali.core.mind` and owns the one Kernel, AgentRuntime, AgentLoop, coordinator
+  and inference path. A second one fails safely instead of starting.
+* **A WINDOW** — ``sali agent``. If Sali is already alive it *attaches* to him over the local API
+  discovered from the mind lock and loads no model at all. Only when nobody is alive does it become
+  the mind itself, which keeps the invariant true rather than merely convenient.
+* **A UTILITY** — migrations, backups, inspection, enrolment codes. Datastore work; no runtime, and
+  no cognition while the mind lives (:mod:`sali.provider.authority` enforces that at the model
+  boundary, and ``_refuse_if_mind_alive`` says so early, in words, rather than mid-run).
 """
 
 from __future__ import annotations
@@ -20,11 +28,36 @@ from rich.table import Table
 from sali import __version__
 from sali.config.settings import Settings, load_settings
 from sali.context.engine import IDENTITY
+from sali.core.mind import ProcessRole, describe_holder, live_holder, set_current_role
 from sali.obs.log import configure_logging
 from sali.runtime.session import background_session_id
 
 app = typer.Typer(add_completion=False, help="Sali — a local-first personal AI agent.")
 console = Console()
+
+
+# ── One Sali: the CLI's side of the invariant ─────────────────────────────────────────────────────
+def _refuse_if_mind_alive(what: str, *, suggest: str = "sali agent") -> None:
+    """Stop a command that would duplicate a faculty of the living Sali.
+
+    These commands (`learn`, `scheduler`, `observe`, `chat`, …) each drive the model or run a loop
+    that the daemon already runs as part of Sali's life. Running one alongside him is not a second
+    opinion, it is a second mind. The inference authority would refuse them anyway at the model
+    boundary; refusing here turns an obscure mid-run ProviderError into a sentence.
+    """
+    holder = live_holder()
+    if holder is None:
+        return
+    console.print(f"[yellow]Sali is already alive — `{what}` belongs to him, not beside him.[/]")
+    console.print(f"[dim]{describe_holder(holder)}[/]")
+    console.print(f"[dim]Talk to him with [bold]{suggest}[/], or stop him first: "
+                  "sudo systemctl stop sali[/]")
+    raise typer.Exit(1)
+
+
+def _as_utility() -> None:
+    """Mark this process a utility: datastore work, never a mind."""
+    set_current_role(ProcessRole.UTILITY)
 
 secrets_cli = typer.Typer(help="Manage Sali's secrets — never stored in the database.")
 app.add_typer(secrets_cli, name="secrets")
@@ -42,6 +75,7 @@ def memory_eval() -> None:
     temporal / provenance / contradiction / scope accuracy. Runs rolled-back — never touches real data."""
     settings = load_settings()
     configure_logging("ERROR")
+    _refuse_if_mind_alive("memory eval", suggest="sali agent  # ask him to check his own recall")
     asyncio.run(_memory_eval(settings))
 
 
@@ -252,6 +286,7 @@ def tools_classify(name: str) -> None:
     never lower it. Records an escalation; the safe default always stands."""
     settings = load_settings()
     configure_logging("ERROR")
+    _refuse_if_mind_alive("tools classify")
     asyncio.run(_tools_classify(settings, name))
 
 
@@ -287,12 +322,28 @@ async def _tools_classify(settings: Settings, name: str) -> None:
 
 
 @secrets_cli.command("set")
-def secrets_set(ref: str) -> None:
-    """Store a secret (e.g. 'mail.personal.password'), ENCRYPTED at rest in ~/.config/sali/vault.json."""
+def secrets_set(
+    ref: str,
+    from_file: str = typer.Option(
+        "", "--from-file",
+        help="Read the value from this file instead of prompting (for multi-line keys like an APNs .p8)."),
+) -> None:
+    """Store a secret (e.g. 'mail.personal.password'), ENCRYPTED at rest in ~/.config/sali/vault.json.
+
+    The hidden prompt reads ONE line, which a PEM private key is not — `--from-file` is how a
+    multi-line credential gets in without ever being echoed or landing in shell history."""
     from sali.config.secrets import SecretStore
     from sali.config.vault import VaultError
 
-    value = typer.prompt(f"value for {ref}", hide_input=True)
+    if from_file:
+        source = Path(from_file).expanduser()
+        if not source.is_file():
+            raise typer.BadParameter(f"no readable file at {source}")
+        value = source.read_text()
+        if not value.strip():
+            raise typer.BadParameter(f"{source} is empty — nothing to store")
+    else:
+        value = typer.prompt(f"value for {ref}", hide_input=True)
     try:
         SecretStore().set(ref, value)
     except VaultError as exc:
@@ -460,10 +511,35 @@ async def _seed_core(settings: Settings) -> None:
             conn, node_type="agent", name="Sali", canonical_key="agent:sali",
             source=MemorySource.USER_EXPLICIT,
         )
+        # Structured identity facts on the agent node (§2/§3) — presentation, pronouns, role, owner, and
+        # how Sali addresses Almir. Merged with `||` so it never clobbers aliases the linker adds; the
+        # self-view reads these instead of a hardcoded literal, so identity answers come from state.
+        # Pass the DICT, not json.dumps(dict): this connection has an asyncpg jsonb codec whose encoder is
+        # json.dumps, so a pre-dumped STRING gets encoded AGAIN into a jsonb string scalar and `||` then
+        # makes an ARRAY, corrupting the props (measured). A dict encodes cleanly to a jsonb object.
+        await conn.execute(
+            "UPDATE graph_node SET props = coalesce(props,'{}'::jsonb) || $1::jsonb "
+            "WHERE id=$2 AND valid_until IS NULL",
+            {"presentation": "male", "pronouns": "he/him",
+             "role": "Almir personal AI companion and assistant",
+             "preferred_address": "Almir", "owner": "Almir"},
+            sali.id,
+        )
         await graph_writer.relate(
             conn, src_id=almir.id, dst_id=sali.id, rel_type="uses",
             source=MemorySource.USER_EXPLICIT,
         )
+        # The reciprocal: Sali SERVES Almir (§ Phase 5). This gives Almir's relationships — his people,
+        # his projects — a real person:almir node + edge to attach to, instead of "Almir" living only as
+        # a string prop on the agent node. No behaviour changes until those edges exist; it's an enabler.
+        await graph_writer.relate(
+            conn, src_id=sali.id, dst_id=almir.id, rel_type="serves",
+            source=MemorySource.USER_EXPLICIT,
+        )
+        await conn.execute(
+            "UPDATE graph_node SET props = coalesce(props,'{}'::jsonb) || $1::jsonb "
+            "WHERE id=$2 AND valid_until IS NULL",
+            {"pronouns": "he/him", "role": "owner"}, almir.id)
         await memory_writer.remember(
             conn, layer=MemoryLayer.IDENTITY,
             content=(
@@ -543,14 +619,122 @@ async def _doctor(settings: Settings) -> None:
     except Exception as exc:  # noqa: BLE001
         table.add_row("ollama", "[red]FAIL[/]", str(exc))
 
+    holder = live_holder()
+    table.add_row("one mind", "[green]ok[/]" if holder is None else "[cyan]alive[/]",
+                  describe_holder(holder))
+
     console.print(table)
+    if holder is not None:
+        console.print("[dim]Run [bold]sali status[/] for the full single-mind picture "
+                      "(ownership, model residency, cognition slot).[/]")
+
+
+@app.command()
+def status() -> None:
+    """Prove the invariant: who is THE Sali, what holds ownership, and what the GPU is really running.
+
+    Everything here is *observed*, not asserted — the flock, PostgreSQL's own lock table, and
+    `ollama ps` — so it can contradict the code if the code is wrong. That is the point.
+    """
+    settings = load_settings()
+    configure_logging("ERROR")
+    _as_utility()
+    asyncio.run(_status(settings))
+
+
+async def _status(settings: Settings) -> None:
+    from sali.core.mind import default_lock_path
+    from sali.db.mind_lock import current_db_mind
+    from sali.db.pool import create_pool
+    from sali.provider import authority
+    from sali.provider.registry import build_provider
+
+    t = Table(title="Sali — one machine, one mind", show_lines=False)
+    t.add_column("what", style="bold")
+    t.add_column("state")
+    t.add_column("detail", overflow="fold")
+
+    # 1. Machine-wide ownership (the flock). The authority on "is he alive".
+    holder = live_holder()
+    t.add_row("mind (file lock)", "[cyan]held[/]" if holder else "[dim]free[/]",
+              f"{default_lock_path()} · {describe_holder(holder)}")
+
+    # 2. The datastore's independent opinion, read from pg_locks — not from any process's self-report.
+    try:
+        pool = await create_pool(settings)
+    except Exception as exc:  # noqa: BLE001 - status must work with the DB down
+        pool = None
+        t.add_row("mind (datastore)", "[yellow]unknown[/]", f"postgres unreachable: {str(exc)[:80]}")
+    if pool is not None:
+        db_mind = await current_db_mind(pool)
+        t.add_row("mind (pg advisory)", "[cyan]held[/]" if db_mind else "[dim]free[/]",
+                  (f"backend pid {db_mind['pid']} since "
+                   f"{db_mind['backend_start']:%H:%M:%S}") if db_mind else "no holder")
+
+        # 3. The foreground turn lease — a different thing: one TURN at a time, not one MIND.
+        from sali.runtime.lease import ExecutionLease
+        cur = await ExecutionLease(pool).get_current()
+        t.add_row("foreground turn", "[cyan]busy[/]" if cur else "[green]idle[/]",
+                  (f"{cur['owner_id']} · origin={cur['origin']}") if cur else "no turn running")
+        await pool.close()
+
+    # 4. What ollama is ACTUALLY holding — asked of the server, not inferred from Sali's own state.
+    #    A 35B MoE at ~16GB already fills ~91% of a 12GB card; a second copy is a host emergency.
+    from sali.provider.residency import server_envelope, survey
+    provider = build_provider(settings)
+    res = await survey(getattr(provider, "_client", None), settings.model.chat_model)
+    if getattr(provider, "_client", None) is None:
+        t.add_row("model residency", "[dim]n/a[/]", "no ollama client (fake provider)")
+    else:
+        state = "[green]ok[/]" if res.ok else "[red]DUPLICATE[/]"
+        detail = (f"{res.chat_runners}× {settings.model.chat_model}"
+                  f" · {res.vram_gb:.1f} GB VRAM across {len(res.runners)} runner(s)")
+        if res.reason:
+            detail += f" · {res.reason}"
+        if not res.runners:
+            detail = "nothing loaded"
+        split = [r for r in res.runners if r.offloaded]
+        if split:
+            detail += " · SPLIT GPU/CPU (prefill drives every core)"
+        t.add_row("model residency", state, detail)
+
+    # 5. Ollama's own limits, read from systemd — a drop-in lost to a package upgrade is a hazard
+    #    Sali's locks cannot see, because the concurrency would happen inside the server.
+    srv = await server_envelope()
+    t.add_row("ollama limits", "[green]ok[/]" if srv["ok"] else "[yellow]hazard[/]",
+              "; ".join(srv["problems"]) if srv["problems"]
+              else f"NUM_PARALLEL={srv['env'].get('OLLAMA_NUM_PARALLEL')} "
+                   f"MAX_LOADED_MODELS={srv['env'].get('OLLAMA_MAX_LOADED_MODELS')}")
+
+    # 6. The power envelope. This is the one that ended in a power cut when it was missing.
+    from sali.runtime.envelope import read_envelope
+    env = read_envelope()
+    t.add_row("power envelope", "[green]ok[/]" if env.ok else "[red]UNSAFE[/]",
+              env.summary + (" · " + "; ".join(env.problems) if env.problems
+                             else f" (chip rated {env.cpu_rated_w}W, card max {env.gpu_max_w:.0f}W)"))
+
+    # 7. What THIS process may do — the inference authority's own answer.
+    exp = authority.explain()
+    t.add_row("this process", str(exp["process_role"]),
+              f"cognition allowed here: {exp['cognition_allowed_here']} · "
+              f"embeddings: {exp['embeddings_allowed_here']}")
+
+    console.print(t)
+    if holder is None:
+        console.print("[dim]No Sali is running. [bold]sudo systemctl start sali[/] gives him a "
+                      "permanent life; [bold]sali agent[/] alone makes the terminal the one Sali.[/]")
 
 
 @app.command()
 def agent(
     message: str | None = typer.Argument(None, help="A one-shot question; omit for a REPL."),
 ) -> None:
-    """Run the full journaled agent loop (memory → plan → verified tools → respond)."""
+    """Talk to Sali.
+
+    A WINDOW, not a Sali. If he is already alive (the systemd `sali` service, or another terminal),
+    this attaches to him over his local API and loads no model. Only if nobody is alive does this
+    terminal become the one Sali for as long as it runs.
+    """
     settings = load_settings()
     configure_logging("WARNING")
     asyncio.run(_agent(settings, message))
@@ -559,17 +743,59 @@ def agent(
 @app.command()
 def serve(
     port: int = typer.Option(8080, help="Port to listen on."),
-    host: str = typer.Option("0.0.0.0", help="Host to bind to."),
+    host: str = typer.Option("127.0.0.1", help="Host to bind to (loopback; the tunnel is the ingress)."),
 ) -> None:
-    """Start the API server for mobile clients (iOS app, etc.)."""
-    import uvicorn
+    """Run Sali as an API-only mind (no background life). Normally you want `sali daemon` instead,
+    which is the same one mind WITH his faculties and the same API.
+
+    Like every authoritative entry point this takes machine-wide ownership first, so it can never
+    become a second Sali beside the daemon — whatever port you give it.
+    """
+    from sali.api.app import create_app
+    from sali.core.mind import SecondMindError
+    from sali.kernel import Kernel
+
     settings = load_settings()
     configure_logging("WARNING")
-    from sali.api.app import create_app
-    from sali.kernel import Kernel
-    kernel = Kernel.create(settings)
-    app = create_app(kernel)
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+
+    async def _run() -> None:
+        import uvicorn
+
+        from sali.security.confirm import AutoAllowConfirmer
+        try:
+            kernel = await Kernel.become_mind(settings, api_host=host, api_port=port)
+        except SecondMindError as exc:
+            console.print(f"[yellow]{exc}[/]")
+            raise typer.Exit(1) from None
+        try:
+            runtime = await kernel.runtime(confirmer=AutoAllowConfirmer(), ws_broadcaster=_ws_manager())
+            api = _api_app(kernel, runtime, await kernel.pool(), create_app)
+            kernel.publish_endpoint(host, port)
+            console.print(f"[dim]Sali is up (API only) on {host}:{port} — one mind, one model.[/]")
+            await uvicorn.Server(uvicorn.Config(
+                api, host=host, port=port, log_level="warning")).serve()
+        finally:
+            await kernel.close()
+
+    asyncio.run(_run())
+
+
+def _ws_manager() -> Any:
+    from sali.api.ws import manager
+    return manager
+
+
+def _api_app(kernel: Any, runtime: Any, pool: Any, create_app: Any) -> Any:
+    """The API wired as a WINDOW onto an existing mind: the runtime is injected, never built.
+
+    ``create_app(kernel=None)`` plus an injected ``app.state.runtime`` is the contract that keeps the
+    API from ever constructing a second AgentLoop — see ``sali.api.app.create_app``.
+    """
+    api = create_app(kernel=None)
+    api.state.kernel = kernel
+    api.state.pool = pool
+    api.state.runtime = runtime
+    return api
 
 
 @app.command("enroll-code")
@@ -603,6 +829,99 @@ def enroll_code(
             await kernel.close()
 
     asyncio.run(_mint())
+
+
+@app.command("change-password")
+def change_password(
+    new: str = typer.Argument(None, help="The new API login password (omit to be prompted securely)."),
+) -> None:
+    """Set or rotate the password the iPhone app logs in with (password auth).
+
+    The password is the DURABLE credential: the app re-authenticates with it whenever a token expires, so an
+    expired session can never lock you out while you're away from this machine. Rotating it REVOKES every
+    live session immediately — so this is also the "log everyone out" switch if a phone is lost. Stored
+    one-way (salted scrypt), never in plaintext. Run this on the machine where Sali lives."""
+    import asyncio
+
+    from sali.api.devices import DeviceStore
+    from sali.api.password import hash_password
+    from sali.kernel import Kernel
+
+    settings = load_settings()
+    configure_logging("WARNING")
+
+    if not new:
+        new = typer.prompt("New API password", hide_input=True, confirmation_prompt=True)
+    new = (new or "").strip()
+    if len(new) < 4:
+        raise typer.BadParameter("password must be at least 4 characters")
+
+    async def _set() -> None:
+        kernel = Kernel.create(settings)
+        try:
+            pool = await kernel.pool()
+            await DeviceStore(pool).set_password(hash_password(new))
+        finally:
+            await kernel.close()
+
+    asyncio.run(_set())
+    console.print("\n  [green]Password changed.[/] Every device is logged out — the app will ask for the "
+                  "new password next time it needs one.\n")
+
+
+@app.command("push-test")
+def push_test(
+    message: str = typer.Option("Test push from Sali.", help="What the banner should say."),
+    title: str = typer.Option("Sali", help="The banner's title."),
+) -> None:
+    """Send a REAL APNs push to every enrolled iPhone that has registered a token (§11).
+
+    The one honest way to answer "do banners actually arrive": it signs a provider token with the
+    configured .p8 and talks to Apple, then prints what Apple said. Unconfigured, it says which
+    piece is missing rather than reporting a success it cannot have had.
+    """
+    import asyncio
+
+    from sali.api.push import ApnsCredentials, ApnsSender, ApnsUnavailable
+    from sali.kernel import Kernel
+
+    settings = load_settings()
+    configure_logging("WARNING")
+
+    async def _send() -> int:
+        try:
+            creds = ApnsCredentials.resolve(settings)
+        except ApnsUnavailable as exc:
+            console.print(f"\n  [yellow]Push is not configured[/] — {exc}\n")
+            return 1
+
+        kernel = Kernel.create(settings)
+        try:
+            pool = await kernel.pool()
+            sender = ApnsSender(pool, creds)
+            try:
+                result = await sender.send(title=title, body=message)
+            except ApnsUnavailable as exc:
+                console.print(f"\n  [yellow]Push cannot be attempted[/] — {exc}\n")
+                return 1
+            finally:
+                await sender.aclose()
+        finally:
+            await kernel.close()
+
+        if result.sent == 0 and result.failed == 0:
+            console.print("\n  [yellow]No enrolled device has registered a push token.[/]")
+            console.print("  Open the app → Sali → Settings & security → Notifications → "
+                          "Allow notifications.\n")
+            return 1
+        console.print(f"\n  Delivered to Apple: [bold]{result.sent}[/]  ·  "
+                      f"failed: {result.failed}  ·  forgotten dead tokens: {result.pruned}")
+        if result.reasons:
+            console.print(f"  Apple said: {', '.join(sorted(set(result.reasons)))}")
+        console.print()
+        return 0 if result.sent else 1
+
+    raise typer.Exit(code=asyncio.run(_send()))
 
 
 def _fmt_tool(data: dict[str, Any]) -> str:
@@ -897,15 +1216,159 @@ async def _stream_turn_via_runtime(
         raise err
 
 
+async def _daemon_reachable(base: str, *, timeout: float = 10.0, attempts: int = 3) -> bool:
+    """Is a Sali API actually answering at this base URL?
+
+    Patient on purpose. The first version used a single 2s probe, and the machine proved why that is
+    wrong: while Sali is prefilling a long prompt, every core is busy and his event loop can take
+    seconds to answer a health check. A short probe reads that as "no Sali here" — which is the one
+    conclusion that must never be reached by guessing, since it is the doorway to a second mind.
+    """
+    import httpx
+    for i in range(attempts):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as c:
+                if (await c.get(f"{base}/healthz")).status_code == 200:
+                    return True
+        except Exception:  # noqa: BLE001 - a busy Sali looks exactly like an absent one; retry
+            pass
+        if i + 1 < attempts:
+            await asyncio.sleep(1.0)
+    return False
+
+
+async def _attach_to_living_sali(message: str | None) -> bool:
+    """If Sali is alive, become a window onto him and run the conversation there. True if attached.
+
+    The mind lock — not a port probe — is what decides whether he lives, and it carries the endpoint
+    he published when his API bound. A living mind with no API is a real state (a standalone
+    `sali agent` in another terminal): we refuse to become a second Sali and say where he is.
+    """
+    set_current_role(ProcessRole.CLIENT)
+    holder = live_holder()
+    if holder is None:
+        return False
+    base = holder.api_base
+    if base is None:
+        # He lives, but serves no door: a standalone `sali agent` in another terminal.
+        console.print("[yellow]Sali is already alive on this machine, and serves no API.[/]")
+        console.print(f"[dim]{describe_holder(holder)}[/]")
+        console.print("[dim]He is a standalone terminal session — talk to him in that window, or "
+                      "give him a permanent life every window can reach: "
+                      "[bold]sudo systemctl start sali[/].[/]")
+        raise typer.Exit(1)
+    if not await _daemon_reachable(base):
+        # He published a door that is not answering. Almost always: he is deep in a long prefill and
+        # his event loop is starved. Say what is true and stop — becoming a second mind here would
+        # put a second 16GB model on a 12GB card, which is how this machine powers itself off.
+        console.print(f"[yellow]Sali is alive but his API at {base} did not answer.[/]")
+        console.print(f"[dim]{describe_holder(holder)}[/]")
+        console.print("[dim]He is most likely mid-thought (a long prompt saturates every core). "
+                      "Try again in a moment, or watch him: [bold]journalctl -u sali -f[/]. "
+                      "Not starting a second Sali.[/]")
+        raise typer.Exit(1)
+    await _agent_via_daemon(base, message)
+    return True
+
+
+async def _agent_via_daemon(base: str, message: str | None) -> None:
+    """Thin client: talk to the ALREADY-RUNNING Sali daemon over its local API and stream the reply. This
+    process loads NO model — it is a window into the one running mind (Almir's rule: one Sali, one model)."""
+    import json
+
+    import httpx
+    import websockets
+
+    from sali.api.auth import get_or_create_token
+    token = get_or_create_token()  # host identity (owner) — the local break-glass credential
+    ws_url = base.replace("http://", "ws://").replace("https://", "wss://") + f"/ws?token={token}"
+    headers = {"Authorization": f"Bearer {token}"}
+
+    console.print("[dim]Attached to the running Sali (one mind, no second model). Ctrl-C to exit.[/]\n")
+
+    async def one_turn(text: str) -> None:
+        async with websockets.connect(ws_url, open_timeout=10, max_size=None) as ws:
+            # subscribe past the current tail so we stream only THIS turn's events (single owner, one turn)
+            await ws.send(json.dumps({"type": "subscribe", "after_seq": 2**62}))
+            async with httpx.AsyncClient(timeout=30.0) as c:
+                resp = await c.post(f"{base}/api/v1/conversation/message",
+                                    json={"content": text}, headers=headers)
+                if resp.status_code == 403:
+                    console.print("[red]This device is read-only.[/]")
+                    return
+                resp.raise_for_status()
+            console.print("[bold cyan]sali[/] ", end="")
+            streamed = False
+            while True:
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=600)
+                except (TimeoutError, websockets.ConnectionClosed):
+                    break
+                msg = json.loads(raw)
+                if msg.get("type") != "event":
+                    continue
+                et, data = msg.get("event_type", ""), (msg.get("data") or {})
+                if et == "agent.token":
+                    console.print(data.get("text", ""), end="", markup=False)
+                    streamed = True
+                elif et in ("agent.tool", "task.tool.started"):
+                    console.print(f"\n[dim]· {data.get('text') or data.get('tool') or 'working'}[/]")
+                elif et == "agent.final":
+                    if not streamed and data.get("text"):
+                        console.print(data.get("text", ""), end="", markup=False)
+                    break
+                elif et == "error":
+                    console.print(f"\n[red]{data.get('error', 'error')}[/]")
+                    break
+            console.print("\n")
+
+    if message:
+        await one_turn(message)
+        return
+    while True:
+        try:
+            text = console.input("[bold]you[/] ")
+        except (EOFError, KeyboardInterrupt):
+            console.print()
+            return
+        if not text.strip():
+            continue
+        try:
+            await one_turn(text)
+        except KeyboardInterrupt:
+            console.print("\n[dim]interrupted[/]")
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]{type(exc).__name__}: {str(exc)[:160]}[/]")
+
+
 async def _agent(settings: Settings, message: str | None) -> None:
     from sali.cli.renderer import C, S, TerminalRenderer
+    from sali.core.mind import SecondMindError
     from sali.db.bootstrap import init_database
     from sali.kernel import Kernel
     from sali.runtime.coordinator import ExecutionOrigin
     from sali.security.confirm import TerminalConfirmer
 
+    # ── Window first ─────────────────────────────────────────────────────────────────────────────
+    # Is Sali already alive on this machine? The mind lock is the authority — not a probe of a
+    # hardcoded port, which would miss a daemon on another port and quietly start a second Sali. The
+    # lock also tells us WHERE he listens, so discovery and exclusion are the same fact.
+    if await _attach_to_living_sali(message):
+        return
+
+    # ── Nobody home: become the one Sali for as long as this terminal runs ───────────────────────
     await init_database(settings)  # idempotent: apply any outstanding migrations
-    kernel = Kernel.create(settings)
+    try:
+        kernel = await Kernel.become_mind(settings)
+    except SecondMindError as exc:
+        # Lost a start-up race with a daemon or another terminal. Try once more to attach; if that
+        # mind serves no API, say so plainly rather than becoming a second one.
+        if await _attach_to_living_sali(message):
+            return
+        console.print(f"[yellow]{exc}[/]")
+        raise typer.Exit(1) from None
+    console.print("[dim](this terminal is the one Sali — no daemon was running. "
+                  "`sudo systemctl start sali` gives him a permanent life every window can reach.)[/]")
     runtime = await kernel.runtime(confirmer=TerminalConfirmer())
     renderer = TerminalRenderer(console)
 
@@ -940,7 +1403,8 @@ async def _agent(settings: Settings, message: str | None) -> None:
             except Exception as exc:
                 renderer.render_error(str(exc)[:200], context=type(exc).__name__)
     finally:
-        await runtime.aclose()
+        # kernel.close() tears the runtime down and releases machine-wide ownership LAST, so the
+        # next `sali agent` finds the lock free rather than a corpse.
         await kernel.close()
 
 
@@ -961,17 +1425,30 @@ def _live_reader(loop: Any) -> Any:
 
 @app.command()
 def recover() -> None:
-    """Resolve any agent runs interrupted by a crash (surfaces them; never silent-retries)."""
+    """Resolve any agent runs interrupted by a crash (surfaces them; never silent-retries).
+
+    Crash recovery is something the mind does to ITSELF at startup. Running it from outside a living
+    Sali would reclaim the runs he is in the middle of — the command reads as read-only and is not.
+    """
     settings = load_settings()
     configure_logging("WARNING")
+    # A live mind already recovered its own runs when it started, and is the only one entitled to
+    # judge which of its runs are stale. Reclaiming them from here would abort work in flight.
+    _refuse_if_mind_alive("recover", suggest="sali runs  # see the runs he already resolved")
     asyncio.run(_recover(settings))
 
 
 async def _recover(settings: Settings) -> None:
+    from sali.core.mind import SecondMindError
     from sali.kernel import Kernel
     from sali.security.confirm import AutoDenyConfirmer
 
-    kernel = Kernel.create(settings)
+    # Recovery drives the agent loop, so it is the mind for as long as it runs — never a second one.
+    try:
+        kernel = await Kernel.become_mind(settings)
+    except SecondMindError as exc:
+        console.print(f"[yellow]{exc}[/]")
+        raise typer.Exit(1) from None
     loop = await kernel.agent_loop(confirmer=AutoDenyConfirmer())
     try:
         resolved = await loop.recover()
@@ -1097,7 +1574,8 @@ async def _recall(settings: Settings, query: str) -> None:
 
     pool = await create_pool(settings)
     provider = build_provider(settings)
-    service = RetrievalService(pool, provider)
+    service = RetrievalService(pool, provider,
+                               owner_timezone=settings.temporal.owner_timezone)
     try:
         plan = classify(query)
         bundle = await service.gather(query, plan, k=6)
@@ -1127,6 +1605,7 @@ def learn(daily: bool = False) -> None:
     """
     settings = load_settings()
     configure_logging("WARNING")
+    _refuse_if_mind_alive("learn", suggest="sali agent  # his daily consolidation runs inside him")
     asyncio.run(_learn_daily(settings) if daily else _learn(settings))
 
 
@@ -1215,18 +1694,28 @@ def scheduler(
     """Run the scheduler: fire due schedules as unattended Sali turns (§44). Ctrl-C stops."""
     settings = load_settings()
     configure_logging("WARNING")
+    # The daemon already fires due schedules as one of Sali's faculties; a second scheduler process
+    # would be a second mind driving the same task graph.
+    _refuse_if_mind_alive("scheduler", suggest="sali schedules  # see what is due")
     asyncio.run(_scheduler(settings, interval))
 
 
 async def _scheduler(settings: Settings, interval: int) -> None:
+    from sali.core.mind import SecondMindError
     from sali.kernel import Kernel
     from sali.scheduler.daemon import SchedulerDaemon
     from sali.scheduler.store import ScheduleStore
     from sali.security.confirm import AutoDenyConfirmer
 
-    kernel = Kernel.create(settings)
-    # Use the shared runtime — scheduler goes through submit_background(),
-    # which uses the same AgentLoop but does NOT acquire the foreground lease.
+    # Running only the scheduler is running a Sali with one faculty — so it becomes THE mind, or it
+    # does not run. (`sali daemon` is the same organism with all of them; prefer it.)
+    try:
+        kernel = await Kernel.become_mind(settings)
+    except SecondMindError as exc:
+        console.print(f"[yellow]{exc}[/]")
+        raise typer.Exit(1) from None
+    # Scheduled work goes through submit_background() — the same one AgentLoop, arbitrated by the
+    # same coordinator, yielding to Almir the moment he speaks.
     runtime = await kernel.runtime(confirmer=AutoDenyConfirmer())
     pool = await kernel.pool()
     # Scheduled work uses the BACKGROUND session — never writes to Almir's conversation.
@@ -1244,8 +1733,7 @@ async def _scheduler(settings: Settings, interval: int) -> None:
     except (KeyboardInterrupt, asyncio.CancelledError):
         daemon.stop()
     finally:
-        await runtime.aclose()
-        await kernel.close()
+        await kernel.close()   # tears down the runtime AND releases machine-wide ownership
 
 
 @app.command()
@@ -1335,6 +1823,7 @@ def ingest(path: str) -> None:
     """Read a document into Sali's memory so it can recall and cite it (§44)."""
     settings = load_settings()
     configure_logging("WARNING")
+    _refuse_if_mind_alive("ingest", suggest="sali agent  # ask him to read the document")
     asyncio.run(_ingest(settings, path))
 
 
@@ -1392,17 +1881,24 @@ def twin(
     """
     settings = load_settings()
     configure_logging("WARNING")
+    if refresh:  # a refresh interprets observations with the model — that is the mind's work
+        _refuse_if_mind_alive("twin --refresh", suggest="sali twin  # read it without refreshing")
     asyncio.run(_twin(settings, refresh))
 
 
-def _twin_service(pool: Any, settings: Settings) -> Any:
+def _twin_service(pool: Any, settings: Settings, provider: Any = None) -> Any:
     """A TwinService wired with a memory service, so a refresh also records the machine as
-    retrievable system-env facts (grounding "what GPU / how much RAM / what's installed")."""
+    retrievable system-env facts (grounding "what GPU / how much RAM / what's installed").
+
+    `provider` lets the mind pass its OWN provider handle in, so the daemon's twin faculty shares the
+    one inference path instead of constructing a parallel one."""
     from sali.memory.service import MemoryService
-    from sali.provider.registry import build_provider
     from sali.twin.service import TwinService
 
-    return TwinService(pool, memory=MemoryService(pool, build_provider(settings)), settings=settings)
+    if provider is None:
+        from sali.provider.registry import build_provider
+        provider = build_provider(settings)
+    return TwinService(pool, memory=MemoryService(pool, provider), settings=settings)
 
 
 async def _twin(settings: Settings, refresh: bool) -> None:
@@ -1435,52 +1931,23 @@ def _unit_path() -> Path:
 
 
 def _install_observe_service(interval: int) -> None:
-    """Install + enable a systemd *user* service so `sali observe` runs in the background — no
-    root (Sali runs as Almir). Survives across sessions once linger is enabled."""
-    import shutil
-    import subprocess
-    import sys
+    """RETIRED. Installing this unit was how the machine ended up with two Salis.
 
-    sali_bin = Path(sys.executable).parent / "sali"
-    if not sali_bin.exists():
-        found = shutil.which("sali")
-        if not found:
-            console.print("[red]Can't find the `sali` executable — install with `make install` first.[/]")
-            raise typer.Exit(1)
-        sali_bin = Path(found)
-    workdir = Path.cwd()
-    unit = f"""[Unit]
-Description=Sali — desktop observation (keeps the digital twin current)
-After=network-online.target postgresql.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart={sali_bin} observe --interval {interval}
-WorkingDirectory={workdir}
-Restart=on-failure
-RestartSec=15
-
-[Install]
-WantedBy=default.target
-"""
-    path = _unit_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(unit, encoding="utf-8")
-    if shutil.which("systemctl") is None:
-        console.print(f"[yellow]Wrote {path}, but systemctl isn't available to enable it.[/]")
-        return
-    subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
-    result = subprocess.run(
-        ["systemctl", "--user", "enable", "--now", _SERVICE_NAME], capture_output=True, text=True
-    )
-    if result.returncode == 0:
-        console.print(f"[green]Sali is now watching in the background[/] (every {interval}s).")
-        console.print(f"[dim]  unit: {path}[/]")
-        console.print("[dim]  logs: journalctl --user -u sali-observe -f[/]")
-        console.print("[dim]  keep it running after logout: loginctl enable-linger[/]")
-    else:
-        console.print(f"[yellow]Wrote the unit but couldn't enable it:[/] {result.stderr.strip()}")
+    `sali-observe.service` ran a second OS process with its own pool, its own provider and its own
+    TwinDaemon + LearningService — a background presence beside the daemon's, driving the model
+    against the same database. Observation is not a separate program; it is one of the living Sali's
+    faculties, and `sali daemon` already runs it.
+    """
+    console.print("[yellow]`sali observe --install` is retired — it installed a SECOND Sali.[/]")
+    console.print("[dim]Keeping the twin current is one of the living Sali's faculties; the daemon "
+                  "runs it every 5 minutes (see the twin faculty in `sali daemon`).[/]\n")
+    console.print("  Give Sali his permanent life instead:\n"
+                  "    [bold]sudo cp systemd/sali.service /etc/systemd/system/[/]\n"
+                  "    [bold]sudo systemctl daemon-reload && sudo systemctl enable --now sali[/]\n")
+    if _unit_path().exists():
+        console.print("[yellow]An old sali-observe unit is still installed. Remove it:[/]\n"
+                      "    [bold]sali observe --uninstall[/]")
+    raise typer.Exit(1)
 
 
 def _uninstall_observe_service() -> None:
@@ -1515,6 +1982,8 @@ def observe(
         return
     settings = load_settings()
     configure_logging("WARNING")
+    # Desktop observation is a faculty of the living Sali (the daemon runs the twin loop already).
+    _refuse_if_mind_alive("observe", suggest="sali twin  # read what he already knows")
     asyncio.run(_observe(settings, interval))
 
 
@@ -1585,12 +2054,32 @@ async def _observe(settings: Settings, interval: int) -> None:
 
 
 @app.command()
-def daemon() -> None:
-    """Sali's background presence: keep the twin current, consolidate learning, and fire due
-    schedules (which can proactively notify Almir). This is what the systemd `sali` service runs."""
+def daemon(
+    serve: bool = typer.Option(
+        True, help="Also serve the REST+WebSocket API in THIS process (one runtime, one model) so the "
+                   "iPhone app and `sali agent` are windows into the same Sali."),
+    host: str | None = typer.Option(
+        None, help="API bind host. Default reads settings.api.bind_host ('0.0.0.0' → reachable on "
+                   "the LAN so the iPhone can find Sali via Bonjour). Pass '127.0.0.1' explicitly "
+                   "(or set SALI_API__BIND_HOST=127.0.0.1) to force loopback-only."),
+    port: int | None = typer.Option(None, help="API port. Default reads settings.api.bind_port (8080)."),
+) -> None:
+    """THE Sali. This is the one living organism: one Kernel, one AgentRuntime, one AgentLoop, one
+    cognitive coordinator, one inference path.
+
+    His faculties (scheduler, twin, perception, syswatch, proactive, investigate, learning) and his
+    windows (REST + WebSocket for the iPhone app and `sali agent`) all live in THIS process and share
+    THAT one runtime. Starting a second one fails safely. This is what `sudo systemctl start sali`
+    runs.
+    """
     settings = load_settings()
     configure_logging("WARNING")
-    asyncio.run(_daemon(settings))
+    # Typer flags win over Settings so a one-shot override (`sali daemon --host 127.0.0.1`) still
+    # works. Without a flag the Settings TOML/env chain decides — default bind is 0.0.0.0 so LAN
+    # discovery is useful out of the box; auth is IP-agnostic so this does not weaken security.
+    effective_host = host if host is not None else settings.api.bind_host
+    effective_port = port if port is not None else settings.api.bind_port
+    asyncio.run(_daemon(settings, serve_api=serve, api_host=effective_host, api_port=effective_port))
 
 
 @app.command()
@@ -1633,31 +2122,100 @@ async def _perceive(settings: Settings) -> None:
         stop.set()
 
 
-async def _daemon(settings: Settings) -> None:
+async def _daemon(settings: Settings, *, serve_api: bool = True,
+                  api_host: str = "127.0.0.1", api_port: int = 8080) -> None:
+    from sali.api.ws import manager as ws_manager
+    from sali.core.mind import SecondMindError
     from sali.kernel import Kernel
     from sali.learning.service import LearningService
-    from sali.provider.registry import build_provider
     from sali.scheduler.daemon import SchedulerDaemon
     from sali.scheduler.store import ScheduleStore
-    from sali.security.confirm import AutoDenyConfirmer
+    from sali.security.confirm import AutoAllowConfirmer
     from sali.twin.daemon import TwinDaemon
 
-    kernel = Kernel.create(settings)
-    # Use the shared runtime — daemon goes through submit_background(),
-    # which uses the same AgentLoop but does NOT acquire the foreground lease.
-    runtime = await kernel.runtime(confirmer=AutoDenyConfirmer())
+    # Apply any outstanding DB migrations at boot. The daemon path skipped this (only `sali init` and
+    # `sali agent` ran it), so new migrations never auto-applied and had to be run by hand. Idempotent +
+    # transactional; runs before the mind starts so the schema is always current.
+    from sali.db.bootstrap import init_database
+    await init_database(settings)
+
+    # Seed the default API login password on the FIRST boot only — NULL-guarded, so a `sali change-password`
+    # rotation is never clobbered by a restart. The iPhone app authenticates with this; the owner changes it
+    # with `sali change-password`. Best-effort: a seed failure must never stop the daemon from coming up.
+    try:
+        from sali.api.password import hash_password
+        from sali.db.pool import connect as _pw_connect
+
+        _pw_conn = await _pw_connect(settings)
+        try:
+            _pw_existing = await _pw_conn.fetchval(
+                "SELECT auth_password_hash FROM sali.sali_state WHERE id = true")
+            if _pw_existing is None:
+                await _pw_conn.execute(
+                    "UPDATE sali.sali_state SET auth_password_hash = $1, auth_password_set_at = now() "
+                    "WHERE id = true", hash_password("masaka"))
+                console.print("[yellow]Seeded default API password ('masaka') — change it with "
+                              "`sali change-password`.[/]")
+        finally:
+            await _pw_conn.close()
+    except Exception as _pw_exc:  # noqa: BLE001 - never block boot on the password seed
+        console.print(f"[yellow]password seed skipped: {_pw_exc}[/]")
+
+    # BECOME the one Sali — machine-wide, before a pool or a model exists. A second daemon (a stray
+    # `systemctl start`, a hand-run copy, a half-finished restart) stops here having changed nothing.
+    try:
+        kernel = await Kernel.become_mind(
+            settings, api_host=(api_host if serve_api else None),
+            api_port=(api_port if serve_api else None))
+    except SecondMindError as exc:
+        console.print(f"[yellow]{exc}[/]")
+        raise typer.Exit(1) from None
+
+    # THE ONE runtime for this machine. The daemon's own autonomous turns go through submit_background();
+    # the same single AgentLoop also serves the terminal `sali agent` and the iPhone API below — one mind,
+    # one model. ws_broadcaster wires live events to the WebSocket so those windows see what Sali does.
+    # AutoAllow: this is the owner's home machine and the owner drives it (Sali runs free); machine safety
+    # is enforced by the GPU lease + resource guards, not a y/n confirmer.
+    runtime = await kernel.runtime(confirmer=AutoAllowConfirmer(), ws_broadcaster=ws_manager)
     pool = await kernel.pool()
     # §14/§15: the daemon's autonomous turns run in a SEPARATE conversation.
     session = background_session_id()
+    # ONE provider for the whole organism — the kernel's. Faculties that need the model borrow this
+    # handle rather than calling build_provider() themselves: a second provider object is a second
+    # inference path, and inference paths are what "one mind" is about.
+    provider = kernel.provider
+    # MODEL SWITCHER: restore the owner's chosen chat model so a switch survives restarts. NULL = the
+    # configured default. Best-effort — a missing column or row just leaves the default in place.
+    import contextlib as _contextlib
+    with _contextlib.suppress(Exception):
+        async with pool.acquire() as _mc_conn:
+            _saved_model = await _mc_conn.fetchval(
+                "SELECT active_chat_model FROM sali.sali_state WHERE id = true")
+        if _saved_model and hasattr(provider, "set_active_model"):
+            provider.set_active_model(_saved_model)
+            # Evict anything ollama kept resident from before the restart (e.g. the previous model
+            # pinned by keep_alive=24h) so only the restored active model can occupy VRAM. BOUNDED:
+            # this is best-effort and runs during boot — a slow/stalled ollama once wedged startup for
+            # minutes here (mind_acquired logged, port never bound). ollama.py bounds each call; this
+            # outer ceiling guarantees the whole restore can never hold boot hostage. A timeout just
+            # skips eviction (the switch path + vram-janitor evict later).
+            _evicted = []
+            if hasattr(provider, "ensure_only_loaded"):
+                with _contextlib.suppress(Exception):
+                    _evicted = await asyncio.wait_for(
+                        provider.ensure_only_loaded(_saved_model), timeout=30.0)
+            from sali.obs.log import get_logger as _get_mlog
+            _get_mlog("sali.daemon").info("active_model_restored", model=_saved_model,
+                                          evicted=_evicted)
 
     class _LoopRunner:
         async def run(self, prompt: str) -> Any:
             return await runtime.submit_background(prompt, session_id=session)
 
     scheduler = SchedulerDaemon(ScheduleStore(pool), _LoopRunner(), pool=pool, poll_s=30.0)
-    twin = TwinDaemon(_twin_service(pool, settings), interval=300.0,
+    twin = TwinDaemon(_twin_service(pool, settings, provider), interval=300.0,
                       exclude_projects=tuple(settings.permissions.fs_deny))
-    learning = LearningService(pool, build_provider(settings))
+    learning = LearningService(pool, provider)
     stop = asyncio.Event()
 
     async def on_tick(cycle: int) -> None:
@@ -1670,12 +2228,12 @@ async def _daemon(settings: Settings) -> None:
         if cycle % _RESEARCH_EVERY == 0:  # §9: research a few pending learning gaps (internet-gated)
             from sali.learning.research import research_pass
 
-            await research_pass(pool, build_provider(settings))
+            await research_pass(pool, provider)
         if cycle % _CAP_INFER_EVERY == 0:  # §8: give a few unmapped tools capabilities via the model
             from sali.twin.capabilities import infer_unmapped
 
             async with pool.acquire() as conn:  # no outer txn — makes model + subprocess calls
-                await infer_unmapped(conn, build_provider(settings))
+                await infer_unmapped(conn, provider)
 
     # Each faculty runs under a supervisor: one crashing is logged and restarted (with backoff) rather
     # than cancelling its siblings — a hiccup in perception never takes the scheduler down with it.
@@ -1696,6 +2254,214 @@ async def _daemon(settings: Settings) -> None:
 
     syswatch = SystemWatch(DbObservationSink(pool), baseline=Baseline(pool))
     faculties.append(("syswatch", lambda: syswatch.run(stop)))
+
+    # Audit fix: QUEUE_FOR_LATER messages ("after you finish, do X") were durably persisted but never
+    # drained. This idle loop claims them once Sali has no active primary and the foreground is free.
+    async def _drain_queued_loop() -> None:
+        from sali.obs.log import get_logger as _get_dlog
+
+        dlog = _get_dlog("sali.daemon.drain")
+        while not stop.is_set():
+            try:
+                await runtime.drain_queued()
+            except Exception as exc:  # noqa: BLE001 - drain must never take a faculty down, but never silent
+                dlog.warning("drain_queued_tick_failed", error=str(exc)[:200])
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=20.0)
+            except TimeoutError:
+                pass
+
+    # LONG-HORIZON WORK (multi-day coding tasks). Two gaps closed here, both real:
+    #   1. `recover_tasks()` existed and was complete, but NOTHING in the daemon ever called it — only
+    #      the terminal path did (`sali agent`). So a restart, crash or reboot orphaned an in-progress
+    #      task FOREVER; two real tasks sat 'running' with no heartbeat for six hours and nothing
+    #      noticed. Recovery now runs once at startup, adopting whatever the last process left behind.
+    #   2. `_maybe_resume_primary` is reachable only from `handle_message`, so an unattended task
+    #      simply stopped between turns — a 2-day task could only advance when Almir happened to
+    #      speak. `continue_primary()` drives it, through the same coordinator and the same single
+    #      cognition slot, yielding the moment he does speak.
+    # Recovery is startup-ONLY on purpose: `recover_task` increments retry_count, so putting it on a
+    # timer would burn a task's retries every couple of minutes and fail it outright. Continuation
+    # keeps the heartbeat fresh, which is what stops a live task from ever looking orphaned.
+    async def _task_continuation_loop() -> None:
+        from sali.obs.log import get_logger  # `log` in _supervise is local to it, not to this scope
+
+        tlog = get_logger("sali.daemon.tasks")
+        try:
+            # BEFORE recovery, and before the first turn: `note_downtime` reads the last state write,
+            # and both of those overwrite it. This is the only moment the gap is still measurable.
+            gap = await runtime.note_downtime()
+            if gap.get("seconds", 0) > 60:
+                tlog.info("daemon_downtime", seconds=round(gap["seconds"]),
+                          missed=len(gap.get("missed_schedules") or []))
+        except Exception as exc:  # noqa: BLE001 - never fatal; an unknown gap is just an unknown gap
+            tlog.warning("daemon_downtime_failed", error=str(exc)[:200])
+        try:
+            recovered = await runtime.recover_tasks()
+            if recovered:
+                tlog.info("daemon_recovered_tasks", count=len(recovered))
+        except Exception as exc:  # noqa: BLE001 - recovery is best-effort, never fatal
+            tlog.warning("daemon_task_recovery_failed", error=str(exc)[:200])
+        # Continuation must never become a treadmill. If a task keeps burning turns without completing a
+        # STEP, driving it again is just spending GPU (and this host runs a tight power envelope). Track
+        # completed-step count per task; after `_STAGNANT_LIMIT` consecutive no-progress turns, stop
+        # driving that task and say so once. The task stays 'running' and visible — a human decision,
+        # not a silent stall, and any real progress resets the counter immediately.
+        _STAGNANT_LIMIT = 12
+        last_done: dict[str, int] = {}
+        stagnant: dict[str, int] = {}
+        while not stop.is_set():
+            try:
+                primary = await runtime.active_task_snapshot()
+                if primary is not None:
+                    tid, done = primary
+                    if last_done.get(tid) != done:
+                        last_done[tid], stagnant[tid] = done, 0
+                    if stagnant.get(tid, 0) < _STAGNANT_LIMIT:
+                        started = await runtime.continue_primary()
+                        if started:
+                            stagnant[tid] = stagnant.get(tid, 0) + 1
+                            if stagnant[tid] == _STAGNANT_LIMIT:
+                                tlog.warning("task_continuation_stalled", task_id=tid,
+                                             steps_done=done, turns=_STAGNANT_LIMIT)
+            except Exception as exc:  # noqa: BLE001 - bad cycle must not take faculty down, but never silent
+                tlog.warning("task_continuation_tick_failed", error=str(exc)[:200])
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=45.0)
+            except TimeoutError:
+                pass
+
+    faculties.append(("task-continuation", _task_continuation_loop))
+
+    # VRAM JANITOR. The KV cache grows across a session (measured 90.9% -> 96.7% of a 12 GB card in one
+    # afternoon) and nothing ever reclaimed it, so the card crept toward whatever ceiling was set until
+    # Sali stalled against its own residency. When Sali has been idle a while, drop the model so the
+    # cache resets; the next turn reloads it. Only ever fires with no foreground work, no active task and
+    # a free lease, so it can never interrupt Almir or a long-running task.
+    async def _vram_janitor_loop() -> None:
+        from sali.obs.log import get_logger as _get_vlog
+
+        vlog = _get_vlog("sali.daemon.vram")
+        idle_ticks = 0
+        while not stop.is_set():
+            try:
+                if await runtime.release_idle_model():
+                    idle_ticks = 0
+                else:
+                    idle_ticks += 1
+            except Exception as exc:  # noqa: BLE001 - housekeeping must not take faculty down, but never silent
+                vlog.warning("vram_janitor_tick_failed", error=str(exc)[:200])
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=600.0)  # 10 min between checks
+            except TimeoutError:
+                pass
+
+    from sali.obs.log import get_logger as _get_glogger
+
+    _glog = _get_glogger("sali.grounding")
+
+    async def _grounding_loop() -> None:
+        """Go and check the beliefs Sali has flagged as unverified.
+
+        `needs_grounding` marks a claim Sali could settle by looking — something installed, a service, a
+        path, hardware. Until now it was only ever WRITTEN. Nothing read it, so the flag was an honest
+        label on a belief that stayed unverified forever, and the label itself never reached anything that
+        could act. Told "I use Neovim" on a host where Neovim is not installed, Sali stored it, flagged it,
+        and went on believing it.
+
+        This closes the loop the cheap way: it does not run its own inference. It picks the most important
+        unverified claim and hands it to the SAME agent loop as a background turn, which yields to Almir
+        the moment he speaks, and lets Sali use its ordinary tools to look. The turn is expected to end in
+        `memory_verify` or `memory_forget` — both already exist and already write through the one canonical
+        writer (reground / forget), so nothing here is a second path into memory.
+
+        Deliberately slow and one-at-a-time: this is housekeeping competing for a single cognition slot,
+        not a batch job. Nothing is more important than Almir's next message.
+        """
+        while not stop.is_set():
+            try:
+                if not runtime.is_busy:   # a property, not a method
+                    async with pool.acquire() as conn:
+                        await conn.execute("SET search_path TO sali, public")
+                        row = await conn.fetchrow(
+                            "SELECT m.id, m.content, "
+                            # HOW MANY NEAR-IDENTICAL NOTES HE HAS ALREADY WRITTEN.
+                            #
+                            # Almir, watching the runaway: "sali supposed to understand that he did
+                            # that multiple times and he can remove it and not to fire tasks." He could
+                            # not: sixteen near-duplicate memories each carried evidence_count = 1, so
+                            # every one looked brand new and he dutifully checked it again. The prefix
+                            # match is deliberately blunt — they differ only in trailing wording, and an
+                            # exact content hash, which is all the writer dedupes on, sees them as
+                            # entirely distinct rows.
+                            "  (SELECT count(*) FROM memory d WHERE d.valid_until IS NULL "
+                            "     AND d.layer = m.layer AND d.id <> m.id "
+                            "     AND left(d.content, 60) = left(m.content, 60)) AS near_duplicates "
+                            "FROM memory m "
+                            "WHERE m.needs_grounding AND m.valid_until IS NULL "
+                            "  AND m.superseded_by IS NULL "
+                            "  AND m.source <> 'external_source'::memory_source "
+                            # An ALLOW-list, matching _GROUNDABLE_LAYERS in the writer: only a claim
+                            # about current observable state has an answer to "go and look". An
+                            # episodic memory is a past event — asking Sali to check one made him
+                            # RE-RUN the task it described, which wrote a new experience, which was
+                            # flagged, which woke this loop again. A procedure is verified by USE.
+                            "  AND m.layer::text IN ('semantic','system_env') "
+                            # Tool-usage aggregates (INFERENCE source, functional claim_key
+                            # like tool:echo) are computed statistics over history, not
+                            # observable claims. Belt-and-suspenders with the writer fix -
+                            # a stale row from before the fix must not fire either.
+                            "  AND NOT (m.source = 'inference' AND m.claim_key LIKE 'tool:%') "
+                            "  AND m.last_verified < now() - interval '10 minutes' "
+                            "ORDER BY m.importance DESC, m.last_verified ASC LIMIT 1"
+                        )
+                    if row is not None:
+                        # THE THIRD OPTION. Verify-or-forget assumed the belief was worth having; when
+                        # a dozen near-copies exist the honest answer is neither, but that his own
+                        # notes have piled up and want tidying. Without this he had two doors, and both
+                        # led back to checking the same thing again.
+                        crowded = int(row["near_duplicates"] or 0)
+                        crowd_note = (
+                            f" You have already written {crowded} near-identical notes to this one — "
+                            "a sign you have been round this loop before. Prefer memory_forget on the "
+                            "redundant copies over checking the same thing again."
+                            if crowded >= 2 else ""
+                        )
+                        await runtime.submit_background(
+                            "You wrote this down but never checked it: "
+                            f'"{row["content"]}".{crowd_note} Look on this machine now — a quick look, '
+                            "NOT a task: never call plan_task for your own housekeeping. Then you MUST "
+                            "finish by calling memory_verify (if it holds up) or memory_forget (if it "
+                            "does not, or if it is a redundant duplicate). Looking without recording "
+                            "the verdict leaves the belief exactly as unsure as before and wastes the "
+                            "check. Do not answer from memory. Say nothing to Almir; this is your own "
+                            "housekeeping.",
+                            priority="background",
+                        )
+                        # BACK OFF WHETHER OR NOT IT SETTLED. Observed on the first real run: Sali did go
+                        # and look (list_directory, verified) and then simply answered without calling
+                        # memory_verify — so the flag stayed set, last_verified stayed put, and the same
+                        # claim would have been re-picked every five minutes forever. Stamping the attempt
+                        # turns that into a bounded retry: still flagged, still honest that it is
+                        # unverified, but the next attempt is a staleness window away instead of
+                        # immediate. Only memory_verify/memory_forget can actually clear the flag.
+                        async with pool.acquire() as conn:
+                            await conn.execute("SET search_path TO sali, public")
+                            await conn.execute(
+                                "UPDATE memory SET last_verified = now() WHERE id = $1", row["id"])
+            except Exception as exc:  # noqa: BLE001 - never takes the faculty down, but never silent
+                # A swallowed exception here is indistinguishable from "nothing to ground", which is
+                # exactly the failure mode this faculty exists to fix. It stays non-fatal; it does not
+                # stay quiet.
+                _glog.warning("grounding_pass_failed", error=str(exc)[:300])
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=300.0)  # 5 min between checks
+            except TimeoutError:
+                pass
+
+    faculties.append(("grounding", _grounding_loop))
+    faculties.append(("vram-janitor", _vram_janitor_loop))
+    faculties.append(("inbox-drain", _drain_queued_loop))
     # §14 push bus: consumers are woken the instant an event commits (LISTEN), keeping their interval
     # only as a fallback heartbeat. Subscribe before start so the wakers are registered.
     from sali.events.bus import EventBus
@@ -1711,8 +2477,41 @@ async def _daemon(settings: Settings) -> None:
     investigate_wake = bus.subscribe()
     faculties.append(("investigate", lambda: investigate.run(stop, investigate_wake)))
 
+    # Cognitive-cycle driver: the missing periodic caller for InitiativeEngine.generate_candidates
+    # (audit found it dormant — all the components existed but nothing called them). Runs every
+    # 120s with a resource + next-wake gate. Does NOT decide to act — that's the coordinator's
+    # job; this just keeps the initiative queue fresh and observable. See src/sali/cognitive/.
+    from sali.cognitive.initiative_driver import InitiativeDriver
+
+    initiative_driver = InitiativeDriver(pool, publisher=runtime._publisher,
+                                          resource_monitor=getattr(runtime, "_resources", None),
+                                          runtime=runtime)
+    initiative_wake = bus.subscribe()
+    faculties.append(("initiative-driver",
+                      lambda: initiative_driver.run(stop, initiative_wake)))
+    # Publish the driver to the app state so /cognitive-metrics can read status().
+    kernel._initiative_driver = initiative_driver  # type: ignore[attr-defined]
+
+    # ONE mind, many windows: host the REST + WebSocket API IN THIS PROCESS, sharing the single runtime
+    # above. The iPhone app and the terminal `sali agent` connect here — they are windows into the same
+    # Sali, never a second model. (Almir's rule: Sali is one human doing one thing at a time.)
+    if serve_api:
+        import uvicorn
+
+        from sali.api.app import create_app
+        api_app = _api_app(kernel, runtime, pool, create_app)  # injected runtime → never a second loop
+        # Publish the bound port to app.state so the lifespan's mDNS advertiser knows what to
+        # announce; the bind_host is what uvicorn listens on but the ADVERTISED port must match.
+        api_app.state.api_port = api_port
+        api_app.state.api_bind_host = api_host
+        api_server = uvicorn.Server(uvicorn.Config(
+            api_app, host=api_host, port=api_port, log_level="warning"))
+        faculties.append(("api", lambda: api_server.serve()))
+        kernel.publish_endpoint(api_host, api_port)  # windows discover him here, from the mind lock
+
     await bus.start()
-    console.print("[dim]Sali is up — observing, learning, perceiving, and watching its schedules.[/]")
+    console.print("[dim]Sali is up — observing, learning, perceiving, watching schedules"
+                  + (f", and serving {api_host}:{api_port} (iPhone + terminal share this one mind)." if serve_api else ".") + "[/]")
     try:
         await asyncio.gather(*(_supervise(name, make, stop) for name, make in faculties))
     except (KeyboardInterrupt, asyncio.CancelledError):
@@ -1829,6 +2628,9 @@ def chat(think: bool = typer.Option(False, "--think", help="Show the model's rea
     """Direct model chat — a preview with no memory or tools (use `sali agent` for the full loop)."""
     settings = load_settings()
     configure_logging("WARNING")
+    # A raw model REPL beside a living Sali is the purest second mind: same model, no memory,
+    # no journal, no arbitration.
+    _refuse_if_mind_alive("chat")
     asyncio.run(_chat(settings, think))
 
 

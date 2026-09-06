@@ -35,6 +35,7 @@ class FakeModelProvider:
         tools: list[ToolSpec] | None = None,
         options: dict[str, Any] | None = None,
         think: bool = False,
+        preset: Any = None,   # Brain-audit Turn 6: accept preset kwarg (ignored, but keeps callers valid)
     ) -> ChatResult:
         self.calls.append({"messages": messages, "tools": tools, "options": options})
         if self._responses:
@@ -56,6 +57,7 @@ class FakeModelProvider:
         tools: list[ToolSpec] | None = None,
         options: dict[str, Any] | None = None,
         think: bool = False,
+        preset: Any = None,   # Brain-audit Turn 6: accept preset kwarg
     ) -> AsyncIterator[ChatChunk]:
         result = await self.chat(messages, tools=tools, options=options, think=think)
         for word in result.content.split(" "):

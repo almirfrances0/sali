@@ -54,8 +54,12 @@ class CapabilityAcquisitionStore:
                              {"acquisition_id": str(acquisition_id), "capability": row["capability_name"],
                               "status": status})
 
-    async def acquired(self, acquisition_id: UUID) -> None:
-        row = await self._settle(acquisition_id, "acquired")
+    async def acquired(self, acquisition_id: UUID, *, capability_name: str | None = None) -> None:
+        """Close the gap. `capability_name` renames the row as it settles: the gap is opened before the
+        work is done, when the reusable skill has no name yet, and only the finished work reveals what
+        the skill actually was. Renaming and settling in ONE statement keeps the live-acquisition unique
+        index satisfied — a settled row is outside that partial index."""
+        row = await self._settle(acquisition_id, "acquired", rename=capability_name)
         if row is not None:
             await self._emit("capability.verified", row["task_id"],
                              {"acquisition_id": str(acquisition_id), "capability": row["capability_name"]})
@@ -82,6 +86,17 @@ class CapabilityAcquisitionStore:
                 capability_name, scope, scope_ref)
         return dict(row) if row else None
 
+    async def for_task(self, task_id: UUID) -> dict[str, Any] | None:
+        """The live acquisition this task is working through, found by TASK rather than by name. The
+        name is not a stable handle across the arc — it is provisional until the work succeeds — but the
+        task id is, so every transition (acquiring → verifying → acquired/failed) resolves through here."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, capability_name, status FROM capability_acquisition "
+                "WHERE task_id=$1 AND status NOT IN ('acquired','failed') "
+                "ORDER BY created_at DESC LIMIT 1", task_id)
+        return dict(row) if row else None
+
     async def get(self, acquisition_id: UUID) -> dict[str, Any] | None:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -106,13 +121,15 @@ class CapabilityAcquisitionStore:
         in_progress = sum(v for k, v in by.items() if k not in ("acquired", "failed"))
         return {"in_progress": in_progress, "acquired": by.get("acquired", 0), "by_status": by}
 
-    async def _settle(self, acquisition_id: UUID, status: str, *, error: str | None = None) -> Any:
+    async def _settle(self, acquisition_id: UUID, status: str, *, error: str | None = None,
+                      rename: str | None = None) -> Any:
         async with self._pool.acquire() as conn:
             return await conn.fetchrow(
                 "UPDATE capability_acquisition SET status=$2, error=coalesce($3, error), "
+                "  capability_name=coalesce($4, capability_name), "
                 "  completed_at=now(), updated_at=now() "
                 "WHERE id=$1 AND status NOT IN ('acquired','failed') RETURNING task_id, capability_name",
-                acquisition_id, status, error)
+                acquisition_id, status, error, rename)
 
     async def _emit(self, event_type: str, task_id: UUID | None, data: dict[str, Any]) -> None:
         if self._publisher is None:

@@ -54,17 +54,43 @@ class ProactiveLoop:
             self._watermark = int(await conn.fetchval("SELECT COALESCE(max(seq), 0) FROM event") or 0)
 
     async def tick(self, *, deliver: bool = True) -> list[str]:
-        """Announce any new notify/investigate observations. Returns the bodies delivered."""
+        """Announce any new notify/investigate observations. Every candidate flows through the
+        CommunicationDecisionEngine BEFORE delivery — suppressed candidates stay silent (with
+        an audit-trail row explaining why). Returns the bodies actually delivered."""
+        # Local import — CommunicationDecisionEngine lives in the same module tree; keeping the
+        # import lazy avoids a circular-import risk in tests that don't need the gate.
+        from sali.events.communication_decision import CommunicationDecisionEngine
+
         async with self._pool.acquire() as conn:
             await self._ensure_watermark(conn)
             rows = await conn.fetch(
                 "SELECT seq, payload FROM event WHERE event_type='desktop.observed' AND seq > $1 "
                 "AND payload->>'action' = ANY($2) ORDER BY seq LIMIT $3",
                 self._watermark, list(_ACTIONS), self._max)
+
+        gate = CommunicationDecisionEngine(self._pool)
         delivered: list[str] = []
         env = _desktop_env()
         for r in rows:
             title, body = compose(r["payload"])
+            payload = r["payload"] or {}
+            # Map attention action → decision kind so learning can aggregate over meaningful
+            # groupings (a 'notify' from a service_failed vs a 'notify' from disk_pressure are
+            # different KINDS as far as the audit trail is concerned; both are still 'concern').
+            kind_map = {"service_failed": "concern", "disk_pressure": "concern",
+                        "port_opened": "observation"}
+            kind = kind_map.get(str(payload.get("kind", "")), "observation")
+            subject_ref = str(payload.get("detail", {}).get("sample") or payload.get("kind", ""))
+
+            decision = await gate.evaluate(
+                kind=kind, subject_ref=subject_ref, message=body,
+                relevance=0.7,  # attention-flagged events are already high-relevance signals
+                user_focused=False)   # attention runs even when Almir is offline; not fg-aware
+            # Advance the watermark regardless of the decision — a suppressed observation
+            # has already been NOTICED; not re-considering it is the whole point of the gate.
+            self._watermark = max(self._watermark, int(r["seq"]))
+            if not decision.send:
+                continue
             if deliver:
                 with contextlib.suppress(Exception):  # delivery is best-effort, never crashes the loop
                     _notify_send(title, body, env)
@@ -72,7 +98,6 @@ class ProactiveLoop:
                 await conn.execute(
                     "INSERT INTO event (event_type, subject_type, payload) "
                     "VALUES ('sali.proactive','desktop',$1)", {"source_seq": r["seq"], "message": body})
-            self._watermark = max(self._watermark, int(r["seq"]))
             delivered.append(body)
         if delivered:
             log.info("proactive", count=len(delivered))

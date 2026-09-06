@@ -9,15 +9,166 @@ finishes on its own when every step is done, or Sali closes it with finish_task.
 from __future__ import annotations
 
 import contextlib
+import os
+import re
 from typing import Any
 from uuid import UUID
 
 from sali.core.enums import Capability, RiskLevel
+from sali.runtime.research_intent import is_research_objective
 from sali.tools.base import Tool, ToolResult
 from sali.tools.context import ToolContext
 from sali.tools.registry import ToolRegistry
 
 _STEP_STATES = ["done", "failed", "running", "skipped"]
+
+# ── Dead-work guard (autonomy) ───────────────────────────────────────────────────────────────────
+# An autonomy/continuation turn must never resurrect an objective Almir recently abandoned/revoked, or
+# one that is already completed. This closes the 6h tanzhost re-spawn: a task Almir explicitly killed
+# ("leave it"/"stop it") was re-created unprompted 5h later by the continuation loop and churned for
+# hours. Enforced structurally (the model ignores prompts). A LIVE user request is exempt — only
+# autonomous re-creation is refused; Almir asking again is always honoured.
+_OBJ_STOP = frozenset({
+    "the", "a", "an", "and", "or", "to", "of", "for", "in", "on", "at", "by", "with", "from",
+    "find", "get", "check", "about", "info", "information", "s", "his", "her", "their", "then", "tell",
+})
+
+
+def _norm_obj(text: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).split())
+
+
+def _stem(w: str) -> str:
+    """Light plural fold (no stemming library): 'owners' -> 'owner' so a singular/plural rewording of
+    a dead objective still matches. Only trims a trailing 's' on tokens longer than 3 chars."""
+    return w[:-1] if len(w) > 3 and w.endswith("s") else w
+
+
+def _obj_tokens(text: str) -> set[str]:
+    return {_stem(w) for w in _norm_obj(text).split() if w not in _OBJ_STOP and len(w) > 2}
+
+
+async def _recently_dead_objective(pool: Any, objective: str, *, window_hours: int = 48) -> str | None:
+    """Return a short label (the status/reason) if a task with a matching objective was recently
+    abandoned/revoked/cancelled/superseded/completed/failed, else None. Match is normalized-exact OR
+    high content-token overlap (Jaccard/containment on plural-folded non-stopword tokens, requiring at
+    least two shared content tokens), so a paraphrase of dead work is still caught while a single shared
+    word from a one-word objective no longer blanket-blocks. Reads sali.task (covers current rows) and
+    revoked_intent (tombstones that survive archival). Best-effort and read-only — any error → None."""
+    norm = _norm_obj(objective)
+    toks = _obj_tokens(objective)
+    if not norm or pool is None:
+        return None
+
+    def _matches(other: str) -> bool:
+        on = _norm_obj(other)
+        if not on:
+            return False
+        if on == norm:
+            return True
+        ot = {_stem(w) for w in on.split() if w not in _OBJ_STOP and len(w) > 2}
+        if not toks or not ot:
+            return False
+        inter = len(toks & ot)
+        # A fuzzy (non-exact) match needs at least TWO shared content tokens. This closes the one-word
+        # blanket-block: a recently-DONE one-word objective (dead tokens {nginx}) used to score
+        # containment 1/1 = 1.0 against ANY new objective that merely mentioned that word ("restart the
+        # nginx service now"), refusing it for 48h. An identical restatement is still caught above by the
+        # normalized-exact check, so a genuine re-spawn of even a one-word objective is unaffected.
+        if inter < 2:
+            return False
+        # Symmetric Jaccard OR asymmetric CONTAINMENT in either direction, so both an EXPANDED
+        # restatement (dead fully contained in a bigger new objective — Jaccard drops on the larger
+        # union while containment stays high: "scrape tanzhost owners" -> "scrape all the owners and
+        # directors from the tanzhost site into a spreadsheet") and a TRIMMED/reworded one (new
+        # contained in dead: "scrape tanzhost owners into spreadsheet" -> "get me the tanzhost owner
+        # list") are still refused. Plural-folding above lets 'owners'/'owner' count as shared.
+        return (inter / len(toks | ot) >= 0.6
+                or inter / len(ot) >= 0.8
+                or inter / len(toks) >= 0.6)
+
+    with contextlib.suppress(Exception):
+        rows = await pool.fetch(
+            "SELECT objective, status FROM sali.task "
+            "WHERE status IN ('abandoned','cancelled','revoked','superseded','done','failed') "
+            "AND updated_at > now() - ($1 * interval '1 hour') "
+            "ORDER BY updated_at DESC LIMIT 60",
+            window_hours,
+        )
+        for r in rows:
+            if _matches(r["objective"] or ""):
+                return str(r["status"])
+    with contextlib.suppress(Exception):
+        rows = await pool.fetch(
+            "SELECT objective, reason FROM sali.revoked_intent "
+            "WHERE revoked_at > now() - ($1 * interval '1 hour') ORDER BY revoked_at DESC LIMIT 60",
+            window_hours,
+        )
+        for r in rows:
+            if _matches(r["objective"] or ""):
+                return str(r["reason"] or "revoked")
+    return None
+
+# Step-discipline: verify a step's definition_of_done before accepting advance_task('done').
+# The check is deliberately CONSERVATIVE — it only ever BLOCKS when it can concretely prove a named
+# file is still missing. If the DoD names no checkable file path, it falls back to trust (the prior
+# behaviour), so a legitimate non-file step is never wrongly blocked. This is what makes "Step 6 is
+# done!" with nothing on disk structurally impossible: the DoD names the files, and if they aren't
+# there, 'done' is refused with the exact missing path.
+_PATH_TOKEN = re.compile(
+    r"""[`"']?                              # optional opening quote/backtick
+    (                                        # a path-ish token:
+      (?:[\w.\-/]+/)?[\w.\-]+                 #   optional dir segments + a filename
+      \.(?:py|php|blade\.php|ts|tsx|js|jsx|vue|sql|json|ya?ml|md|txt|html|css|scss|
+          go|rs|java|rb|c|cpp|h|hpp|sh|toml|ini|cfg|env|xml|kt|swift|dart|ex|exs)
+    )
+    [`"']?""",
+    re.VERBOSE | re.IGNORECASE,
+)
+
+
+def _extract_paths(text: str) -> list[str]:
+    """Pull file-path-looking tokens out of a definition_of_done / description. Bounded + de-duped."""
+    if not text:
+        return []
+    seen: list[str] = []
+    for m in _PATH_TOKEN.finditer(text):
+        p = m.group(1).strip().strip("`\"'")
+        if p and p not in seen and 3 <= len(p) <= 300:
+            seen.append(p)
+        if len(seen) >= 12:
+            break
+    return seen
+
+
+def _verify_definition_of_done(task: Any, step_seq: int) -> tuple[bool, str]:
+    """Return (ok, reason). ok=False ONLY when the step's DoD names files and at least one does not
+    exist on disk yet. Absent DoD or no extractable path → (True, "") (trust, as before)."""
+    step = next((s for s in (getattr(task, "steps", None) or [])
+                 if getattr(s, "seq", None) == step_seq), None)
+    if step is None:
+        return True, ""
+    dod = (getattr(step, "definition_of_done", None) or "").strip()
+    if not dod:
+        return True, ""
+    paths = _extract_paths(dod)
+    if not paths:
+        return True, ""  # nothing structurally checkable — fall back to trust
+    root = getattr(task, "workspace_root", None)
+    roots = [root] if root else []
+    roots += list(getattr(task, "allowed_write_roots", None) or [])
+    missing: list[str] = []
+    for p in paths:
+        candidates = [p] if os.path.isabs(p) else [
+            os.path.join(r, p) for r in roots if r
+        ] or [p]
+        if not any(os.path.exists(c) for c in candidates):
+            missing.append(p)
+    if missing:
+        return False, ("not done yet — the definition of done names files that do not exist on disk: "
+                       + ", ".join(missing[:6])
+                       + ". Create them with real tool calls, then mark the step done.")
+    return True, ""
 
 
 
@@ -32,12 +183,94 @@ async def _folder(ctx: ToolContext, method: str, *args: Any, **kwargs: Any) -> A
         return await fn(*args, **kwargs)
     return None
 
+_STEP_LINE = re.compile(r"^\s*(?:step\s*)?(?:\(?\d+[.):]|[-*•])\s*(.+)$", re.IGNORECASE)
+
+
+def _parse_prose_steps(text: str) -> list[str]:
+    """Pull ordered steps out of a prose / numbered string. Handles three shapes: one step per line
+    ("1. do X\\n2. do Y" or "- a\\n- b"), several numbered steps INLINE on one line
+    ("1. a 2. b 3. c"), and plain multi-line prose. Empty when it can't find ≥2 real steps."""
+    if not text:
+        return []
+    norm = text.replace("\\n", "\n")
+    lines = [ln.strip() for ln in norm.splitlines() if ln.strip()]
+    numbered: list[str] = []
+    for ln in lines:
+        m = _STEP_LINE.match(ln)
+        if m and m.group(1).strip():
+            numbered.append(m.group(1).strip())
+    if len(numbered) >= 2:
+        return numbered
+    # Several numbered steps crammed onto ONE line: split on the "N." / "N)" markers.
+    inline = [p.strip() for p in re.split(r"(?:^|\s)\(?\d+[.):]\s*", norm) if p.strip()]
+    if len(inline) >= 2:
+        return inline
+    if numbered:
+        return numbered
+    return lines if len(lines) >= 2 else []
+
+
+def _derive_steps(raw: Any, objective: str) -> list[Any]:
+    """Turn whatever the model passed for `steps` into a clean ordered list. Accepts a proper array
+    (strings or {description, substeps, definition_of_done, …} dicts), a prose/numbered STRING, or —
+    last resort — a "Steps:" section folded into the objective. A weak model that can't build the
+    structured array still gets a real, watchable task instead of a hard schema rejection."""
+    if isinstance(raw, list):
+        out = [
+            s if isinstance(s, dict) else str(s).strip()
+            for s in raw
+            if (isinstance(s, dict) and (s.get("description") or s.get("step")))
+            or (not isinstance(s, dict) and str(s).strip())
+        ]
+        if out:
+            return out
+    if isinstance(raw, str) and raw.strip():
+        parsed = _parse_prose_steps(raw)
+        if parsed:
+            return parsed
+    m = re.search(r"\bsteps?\s*:\s*(.+)$", objective, re.IGNORECASE | re.DOTALL)
+    if m:
+        parsed = _parse_prose_steps(m.group(1))
+        if parsed:
+            return parsed
+    return []
+
+
+def _enrich_steps(steps: list[Any]) -> list[Any]:
+    """When the model omits definition_of_done, derive a checkable one from any file paths the step's
+    description names ("create app.py" → "app.py exists"), and set scope_excludes to the file targets
+    of LATER steps — so the engine's DoD-verification + scope guard have teeth even on a plan the weak
+    model left thin. Steps that name no files are left exactly as-is (nothing invented). Preserves
+    substeps/depends_on/etc."""
+    norm: list[dict[str, Any]] = [dict(s) if isinstance(s, dict) else {"description": str(s)}
+                                  for s in steps]
+    own = [_extract_paths(f"{d.get('description', '')} {d.get('definition_of_done', '') or ''}")
+           for d in norm]
+    for i, d in enumerate(norm):
+        if not d.get("definition_of_done") and own[i]:
+            d["definition_of_done"] = "these files exist: " + ", ".join(own[i][:6])
+        if not d.get("scope_excludes"):
+            later = sorted({p for j in range(i + 1, len(norm)) for p in own[j] if p not in own[i]})
+            if later:
+                d["scope_excludes"] = "files for later steps: " + ", ".join(later[:10])
+    return norm
+
+
 class PlanTask(Tool):
     name = "plan_task"
     description = (
         "Start a persistent, multi-step task so you can carry it across turns (and restarts) without "
-        "losing your place. Give the objective and the ordered steps. Use this for real multi-step "
-        "work — an investigation, a build-and-deploy — not for a one-shot answer. "
+        "losing your place. Give the objective and the ordered steps.\n"
+        "USE THIS whenever the request needs more than one real action — anything you would naturally "
+        "do in several steps: building or changing a project, an investigation, research plus a "
+        "write-up, setting something up and verifying it. If you catch yourself about to do three or "
+        "four things in one reply, plan it instead.\n"
+        "WHY it matters, not just bookkeeping: a planned task runs in the BACKGROUND, so Almir keeps a "
+        "responsive chat and can talk to you about anything else while it proceeds; he can watch the "
+        "steps tick over on his Tasks screen; and the work survives a restart because it is stored "
+        "durably. Doing multi-step work inline instead blocks his chat behind a spinner and leaves him "
+        "with no visibility.\n"
+        "Do NOT use it for a genuine one-shot answer (a question, a single small edit, a lookup).\n"
         "For filesystem/project work, pass workspace_root to declare the project folder — "
         "all file operations will be confined to that folder."
     )
@@ -45,13 +278,73 @@ class PlanTask(Tool):
         "type": "object",
         "properties": {
             "objective": {"type": "string", "description": "What the whole task is for, in one line."},
-            "steps": {"type": "array", "items": {"type": "string"},
-                      "description": "The ordered steps to do it."},
+            "steps": {
+                # Accept an ARRAY (ideal) OR a plain STRING of prose/numbered steps — a weaker model
+                # reliably writes "1. … 2. …" as text but often fails to build the structured array,
+                # and a hard schema rejection there just made it give up and build inline (the exact
+                # thing tasks exist to prevent). run() parses a string into steps; `items` constrains
+                # the array case only.
+                "type": ["array", "string"],
+                "description": (
+                    "The ordered steps, as an array — or, if that's easier, a single string with one "
+                    "step per line / numbered '1. … 2. …' (it will be parsed). Each step should have a "
+                    "definition_of_done (how the engine will KNOW this step is complete — e.g. the "
+                    "exact files that must exist, or the command that must succeed), and, when it "
+                    "genuinely breaks into smaller pieces, substeps. Add scope_excludes to name what "
+                    "this step must NOT touch — the work that belongs to LATER steps — so you cannot "
+                    "run ahead. A plain string is still accepted for a trivial step, but a real "
+                    "build/investigation step should carry its definition_of_done: you will be handed "
+                    "ONE step at a time and it is not accepted as done until its definition_of_done is "
+                    "met, so vague steps stall. substeps appear indented under their parent on Almir's "
+                    "Tasks screen and are each driven on their own turn."
+                ),
+                "items": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "description": {"type": "string"},
+                                "definition_of_done": {
+                                    "type": "string",
+                                    "description": "Concrete, checkable: what must be true/exist for "
+                                    "this step to count as done.",
+                                },
+                                "scope_excludes": {
+                                    "type": "string",
+                                    "description": "What this step must NOT do — later steps' work.",
+                                },
+                                "substeps": {
+                                    "type": "array",
+                                    "items": {
+                                        "anyOf": [
+                                            {"type": "string"},
+                                            {
+                                                "type": "object",
+                                                "properties": {
+                                                    "description": {"type": "string"},
+                                                    "definition_of_done": {"type": "string"},
+                                                    "scope_excludes": {"type": "string"},
+                                                },
+                                                "required": ["description"],
+                                            },
+                                        ]
+                                    },
+                                },
+                            },
+                            "required": ["description"],
+                        },
+                    ]
+                },
+            },
             "workspace_root": {"type": "string",
                                "description": "Optional: the project folder for this task. "
                                "All file writes will be confined to this folder."},
         },
-        "required": ["objective", "steps"],
+        # Only the objective is strictly required. steps may be an array, a prose string, or even
+        # be folded into the objective ("Build X. Steps: 1. …") — run() derives them robustly and
+        # only errors (never a bare schema rejection) if it truly can't find any.
+        "required": ["objective"],
     }
     risk_level = RiskLevel.R1
     capabilities = frozenset({Capability.WRITE})
@@ -59,10 +352,80 @@ class PlanTask(Tool):
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         objective = str(args.get("objective", "")).strip()
-        steps = [str(s).strip() for s in (args.get("steps") or []) if str(s).strip()]
+        # RESEARCH IS NOT A TASK. A research/explanation request must be answered in the CHAT — a summary
+        # there + a downloadable full report — never turned into a hidden multi-step background task that
+        # produces no chat output and can drag on for hours (Almir: "just research not a website task …
+        # he must write in the chat and a file to download"; caught live as the 3-step GEA/GEO task).
+        # Deterministic classifier (Q2_K ignores prompts); build requests (website/app/script) still plan
+        # normally. Refusing steers Sali to look it up inline and reply with a concise summary.
+        if objective and is_research_objective(objective):
+            return ToolResult(
+                ok=False, display="answer in chat",
+                error=("This is a question / information request, not a build task — do NOT plan a task "
+                       "for it (Almir: normally we just chat, no research task). Answer it directly in "
+                       "your reply. If you need current facts, look them up with web_search / web_fetch "
+                       "first, then reply concisely in the chat."))
+        # A step may legitimately be a STRING or an object carrying substeps/depends_on — the store's
+        # `_insert` reads `spec["description"]` and `spec["substeps"]` for exactly that. Coercing
+        # everything with str() first meant a structured step arrived as the TEXT of a Python dict, and
+        # the substep support could never receive one. Live evidence:
+        #   step 1 description = {'description': 'Write tar_archive.py in /home/almir/Desktop/tar-test'}
+        # — unreadable on the Tasks screen and unreadable to Sali on the next continuation turn.
+        # Derive steps from an array, a prose string, or a "Steps:" section folded into the objective
+        # — a weak model that writes "1. … 2. …" as text still gets a real task (see _derive_steps) —
+        # then enrich each with a checkable definition_of_done + scope_excludes derived from the files
+        # it names, so the engine can verify/advance/scope-guard even a thin plan (see _enrich_steps).
+        steps = _enrich_steps(_derive_steps(args.get("steps"), objective))
+        # NEVER re-plan work that is already planned. A background continuation turn is handed its
+        # task's objective; if the model answers by calling plan_task instead of working the step, the
+        # new task becomes primary and the next continuation re-plans it again — three identical
+        # "Build a Flask web app…" tasks appeared in three minutes with nothing external asking for
+        # them. Refusing an exact duplicate stops the loop at its source while leaving a genuinely new
+        # objective (or an explicit replacement) untouched.
+        if ctx.tasks is not None and objective:
+            with contextlib.suppress(Exception):
+                _cur = await ctx.tasks.current()
+                if _cur is not None and (getattr(_cur, "objective", "") or "").strip() == objective:
+                    return ToolResult(
+                        ok=False, display="already planned",
+                        error=("that task already exists and is active — work its next unfinished step "
+                               "with advance_task instead of planning it again"))
+                # And not just an identical objective. Planning ANYTHING while a task is mid-flight
+                # supersedes it: `TaskAuthority.activate_task` calls `supersede(current, new)` whenever a
+                # current active task exists. Observed live — Sali, one step into its own task, planned a
+                # near-identical second one and killed the first, which was left "running" with nobody
+                # working it. The prompt-level fix stops the usual trigger; this is the structural one,
+                # because a plan must never be able to abandon work that is still moving.
+                if _cur is not None and getattr(_cur, "status", "") == "running":
+                    _unfinished = [
+                        st for st in (getattr(_cur, "steps", None) or [])
+                        if getattr(st, "status", "") in ("pending", "running", "waiting", "blocked")
+                    ]
+                    if _unfinished:
+                        _next = _unfinished[0]
+                        return ToolResult(
+                            ok=False, display="a task is already running",
+                            error=("you are already working a task — "
+                                   f"\"{(getattr(_cur, 'objective', '') or '')[:80]}\" — and step "
+                                   f"{getattr(_next, 'seq', '?')} is still unfinished. Planning now would "
+                                   "abandon it. Work that step with advance_task; if this really is a "
+                                   "different job, finish or ask Almir about the current one first."))
+        # Dead-work guard (autonomy): a continuation/internal turn must NOT resurrect an objective Almir
+        # recently abandoned/revoked or that is already completed — the source of the 6h tanzhost
+        # re-spawn (a killed task re-created unprompted 5h later). A LIVE user request is exempt: Almir
+        # asking again is always honoured. Structural, because the model ignores a prompt telling it not to.
+        if getattr(ctx, "internal", False) and objective and ctx.pool is not None:
+            _dead = await _recently_dead_objective(ctx.pool, objective)
+            if _dead:
+                return ToolResult(
+                    ok=False, display="already handled",
+                    error=(f"not re-creating this on my own — the same objective was '{_dead}' recently. "
+                           "If it needs doing again, it waits for Almir to ask."))
         if not objective or not steps:
-            return ToolResult(ok=False, display="need objective + steps",
-                              error="an objective and at least one step are required")
+            return ToolResult(
+                ok=False, display="need objective + steps",
+                error=("give an objective and at least one step — pass steps as an array, or as a "
+                       "single string with one step per line / numbered '1. … 2. …'"))
         if ctx.is_subagent:
             return ToolResult(ok=False, display="not for a subagent",
                               error="a subagent cannot manage tasks — report findings to the primary (§16)")
@@ -93,11 +456,22 @@ class PlanTask(Tool):
             await _folder(ctx, "log_event", task.id, "task_created",
                          {"objective": objective, "steps": len(steps),
                           "workspace_root": ws_root})
+        # HAND OFF instead of executing inline. Before this, the foreground turn planned the task and
+        # then did ALL the work in the same turn, holding the one cognition slot — a real request blocked
+        # Almir's chat for ~4 minutes behind a spinner. The daemon's task-continuation faculty picks a
+        # planned task up within ~45s and works it step by step, yielding the moment Almir speaks. So the
+        # right move here is to stop, tell him it is underway, and let the background do it: progress
+        # shows on the Tasks screen, and TaskStore.finish announces completion back into the chat.
         return ToolResult(
             ok=True,
             output={"objective": objective, "steps": steps, "count": len(steps),
-                    "workspace_root": ws_root},
-            display=f"planned '{objective}' ({len(steps)} steps)"
+                    "workspace_root": ws_root,
+                    "next": ("STOP HERE — do NOT execute these steps in this turn. A background worker "
+                             "picks this task up within a minute and works it step by step, which is "
+                             "what keeps Almir's chat responsive. Reply to him now in one or two "
+                             "sentences: you're starting it, name the objective, and say you'll report "
+                             "when it's done.")},
+            display=f"planned '{objective}' ({len(steps)} steps) — background worker takes it from here"
             + (f" in {ws_root}" if ws_root else ""),
         )
 
@@ -137,6 +511,33 @@ class AdvanceTask(Tool):
         status = str(args.get("status", "")).strip()
         if status not in _STEP_STATES:
             return ToolResult(ok=False, display="bad status", error=f"status must be one of {_STEP_STATES}")
+        # IN ORDER, NOTHING SKIPPED. Almir's standing rule: "sali must follow the task steps never skip
+        # and each mark it!" Marking step 4 while step 2 is still pending leaves a plan that reads as
+        # progress but has holes in it, and the holes are invisible on the Tasks screen — the step count
+        # goes up while the work did not happen. So a step can only be advanced when every earlier step
+        # is settled. A step genuinely not needed is still marked explicitly, as 'skipped', in its turn.
+        _unfinished = [
+            st for st in (getattr(task, "steps", None) or [])
+            if getattr(st, "seq", 0) < step
+            and getattr(st, "status", "") in ("pending", "running", "waiting", "blocked")
+        ]
+        if _unfinished and status in ("done", "skipped"):
+            _first = _unfinished[0]
+            return ToolResult(
+                ok=False, display=f"step {getattr(_first, 'seq', '?')} comes first",
+                error=(f"step {getattr(_first, 'seq', '?')} is still "
+                       f"{getattr(_first, 'status', 'unfinished')} — "
+                       f"\"{(getattr(_first, 'description', '') or '')[:70]}\". Work and mark that one "
+                       f"before step {step}; steps are done in order and every one gets marked."))
+        # STEP-DISCIPLINE: verify the step's definition_of_done before accepting 'done'. If the DoD
+        # names files that are not on disk, the mark is REFUSED — this is what makes a false "Step 6 is
+        # done!" (with nothing written) structurally impossible, rather than trusting the model's word.
+        # Only ever blocks on concretely-missing named files; a DoD with no checkable path falls back
+        # to trust, so a legitimate non-file step is never wrongly held open.
+        if status == "done":
+            _dod_ok, _dod_reason = _verify_definition_of_done(task, step)
+            if not _dod_ok:
+                return ToolResult(ok=False, display=f"step {step} not done yet", error=_dod_reason)
         note = str(args.get("note", "")).strip() or None
         # §5: persist in-step progress so a long step resumes mid-way after a restart, not from scratch.
         checkpoint = args.get("checkpoint")
@@ -349,6 +750,18 @@ class ConfirmTask(Tool):
         )
 
 
+# Turn 6: publish task.modified on the bus (not just folder-log). Every ModifyTask action calls
+# this so iOS + WS replay see the change. Kept beside the folder-log as a durable breadcrumb.
+async def _emit_task_modified(conn: Any, ctx: Any, task_id: Any, payload: dict) -> None:
+    """Emit task.modified on the SAME conn as the row change (Turn 6 hardening: fix #9).
+    Both commit atomically - no observer sees the frame before the durable state.
+    Best-effort: a broken publisher never blocks the mutation."""
+    with contextlib.suppress(Exception):
+        from sali.tasks.store import _emit_task
+        pub = getattr(getattr(ctx, "tasks", None), "_publisher", None)
+        await _emit_task(conn, "task.modified", task_id, payload, publisher=pub)
+
+
 class ModifyTask(Tool):
     name = "modify_task"
     description = (
@@ -360,13 +773,18 @@ class ModifyTask(Tool):
     parameters = {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["add", "remove", "replace", "reset"],
-                       "description": "What to do: add a new step, remove a step, "
-                       "replace a step's description, or reset a step to pending."},
+            "action": {"type": "string",
+                       "enum": ["add", "remove", "replace", "reset", "edit_step", "change_objective"],
+                       "description": "add: new step at end or after_step; remove: delete a step; "
+                       "replace: change description AND reset execution state (destructive); "
+                       "edit_step: change description ONLY, keep status/attempts/checkpoint "
+                       "(Turn 6, non-destructive - use this for small wording tweaks); "
+                       "reset: mark a step pending again; change_objective: rename the task."},
             "step": {"type": "integer",
-                     "description": "The step number (1-based). Required for remove/replace/reset."},
+                     "description": "The step number (1-based). Required for remove/replace/reset/edit_step."},
             "description": {"type": "string",
-                            "description": "New step description. Required for add/replace."},
+                            "description": "New step description. Required for add/replace/edit_step. "
+                            "For change_objective: the new task title."},
             "after_step": {"type": "integer",
                            "description": "For 'add': insert after this step number. "
                            "Omit to append at the end."},
@@ -393,7 +811,6 @@ class ModifyTask(Tool):
         step_num = args.get("step")
         desc = str(args.get("description", "")).strip() or None
         after_step = args.get("after_step")
-
         async with ctx.pool.acquire() as conn, conn.transaction():
             if action == "add":
                 if not desc:
@@ -424,6 +841,7 @@ class ModifyTask(Tool):
                 with contextlib.suppress(Exception):
                     await _folder(ctx, "log_event", task.id, "task_modified",
                                  {"action": "add", "step": new_seq, "description": desc})
+                await _emit_task_modified(conn, ctx, task.id, {"action": "add", "step": new_seq, "description": desc})
                 return ToolResult(
                     ok=True,
                     output={"action": "add", "step": new_seq, "description": desc},
@@ -444,6 +862,7 @@ class ModifyTask(Tool):
                 with contextlib.suppress(Exception):
                     await _folder(ctx, "log_event", task.id, "task_modified",
                                  {"action": "remove", "step": step_num})
+                await _emit_task_modified(conn, ctx, task.id, {"action": "remove", "step": step_num})
                 return ToolResult(
                     ok=True,
                     output={"action": "remove", "step": step_num},
@@ -463,6 +882,7 @@ class ModifyTask(Tool):
                 with contextlib.suppress(Exception):
                     await _folder(ctx, "log_event", task.id, "task_modified",
                                  {"action": "replace", "step": step_num, "description": desc})
+                await _emit_task_modified(conn, ctx, task.id, {"action": "replace", "step": step_num, "description": desc})
                 return ToolResult(
                     ok=True,
                     output={"action": "replace", "step": step_num, "description": desc},
@@ -482,14 +902,50 @@ class ModifyTask(Tool):
                 with contextlib.suppress(Exception):
                     await _folder(ctx, "log_event", task.id, "task_modified",
                                  {"action": "reset", "step": step_num})
+                await _emit_task_modified(conn, ctx, task.id, {"action": "reset", "step": step_num})
                 return ToolResult(
                     ok=True,
                     output={"action": "reset", "step": step_num},
                     display=f"reset step {step_num} to pending")
 
+            elif action == "edit_step":
+                if step_num is None or not desc:
+                    return ToolResult(ok=False, display="need step + description",
+                                      error="step and description are required for edit_step")
+                step_num = int(step_num)
+                res = await conn.execute(
+                    "UPDATE task_step SET description = $3 "
+                    "WHERE task_id = $1 AND seq = $2",
+                    task.id, step_num, desc)
+                if res == "UPDATE 0":
+                    return ToolResult(ok=False, display=f"no step {step_num}",
+                                      error=f"step {step_num} does not exist on this task")
+                with contextlib.suppress(Exception):
+                    await _folder(ctx, "log_event", task.id, "task_modified",
+                                 {"action": "edit_step", "step": step_num,
+                                  "description": desc})
+                await _emit_task_modified(conn, ctx, task.id, {"action": "edit_step", "step": step_num, "description": desc})
+                return ToolResult(
+                    ok=True,
+                    output={"action": "edit_step", "step": step_num, "description": desc},
+                    display=f"edited step {step_num}: {desc}")
+
+            elif action == "change_objective":
+                if not desc:
+                    return ToolResult(ok=False, display="need new objective",
+                                      error="description is required for change_objective (the new title)")
+                pass   # nothing to do inside this txn - change_objective runs outside
             else:
                 return ToolResult(ok=False, display="bad action",
-                                  error=f"unknown action '{action}' — use add/remove/replace/reset")
+                                  error=f"unknown action '{action}' — use add/remove/replace/reset/edit_step/change_objective")
+        # change_objective runs OUTSIDE the step-txn above because store.rename_objective takes
+        # its own connection (and would deadlock on the task row).
+        if action == "change_objective":
+            await ctx.tasks.rename_objective(task.id, desc)
+            return ToolResult(
+                ok=True,
+                output={"action": "change_objective", "objective": desc},
+                display=f"renamed task to: {desc}")
 
 
 def register_builtins(registry: ToolRegistry) -> None:

@@ -132,8 +132,10 @@ async def test_digital_life_capstone(live_pool: Any, tmp_path: Path) -> None:
     assert any("Onboard the project onto the new service" in r["content"] for r in await exp.recent())
     # no duplicate task was created by compaction/restart/interruption
     async with live_pool.acquire() as c:
-        assert await c.fetchval("SELECT count(*) FROM task WHERE objective=$1",
-                                "Onboard the project onto the new service") == 0  # the one task was archived
+        # Turn 1: exactly ONE archived row (no duplicate created by compaction/restart).
+        n = await c.fetchval("SELECT count(*) FROM task WHERE objective=$1 AND archived_at IS NOT NULL",
+                             "Onboard the project onto the new service")
+        assert n == 1
 
 
 async def test_later_task_benefits_from_earlier_experience(live_pool: Any) -> None:

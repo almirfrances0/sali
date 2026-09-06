@@ -34,10 +34,12 @@ class ReviewStatus(StrEnum):
     FAILED = "failed"  # reserved: an internal reviewer error, not a task verdict
 
 
-# Requirement grades that need no rework. A step done with no tool executions ("attempted") is treated
-# as passing — there is nothing to verify — while a step whose executions must be verified is only
-# 'verified' once task_step.verified is set (the advance() evidence gate guarantees that upstream).
-_PASSING = frozenset({"passed", "verified", "attempted", "skipped"})
+# Turn 3 tightening: 'attempted' (a step marked done with no tool executions) NO LONGER counts as
+# passing. A pure-planning step that legitimately has nothing to verify can still be marked
+# 'skipped'; but a task cannot auto-pass a review just because the model called advance(done) on
+# steps that produced no evidence. Under §14 completion must be evidence-based - the vacuous-pass
+# hole was exactly this frozenset. 'passed' stays for external verifiers that emit their own grade.
+_PASSING = frozenset({"passed", "verified", "skipped"})
 
 
 def step_evidence(status: str | None, verified: bool | None) -> str:
@@ -50,7 +52,10 @@ def step_evidence(status: str | None, verified: bool | None) -> str:
     if status in ("pending", "waiting", "blocked", "running"):
         return "pending"
     if status == "skipped":
-        return "verified"
+        # Turn 3 hardening: 'skipped' is NOT evidence of verified work - it means the step was
+        # explicitly not attempted. Grading it as 'verified' let a model auto-complete any task
+        # by marking every step skipped, since 'verified' passes the task-level evidence check.
+        return "skipped"
     return "unknown"
 
 
@@ -238,7 +243,7 @@ class TaskReviewer:
 
         passed = sum(1 for r in requirements if r["status"] in _PASSING)
         failed = sum(1 for r in requirements if r["status"] == "failed")
-        unknown = sum(1 for r in requirements if r["status"] in ("pending", "unknown", "blocked"))
+        unknown = sum(1 for r in requirements if r["status"] in ("pending", "unknown", "blocked", "attempted"))
 
         if blocked:
             status = ReviewStatus.BLOCKED
@@ -249,6 +254,18 @@ class TaskReviewer:
             status = ReviewStatus.NEEDS_REWORK
         elif failed > 0 or any(r["status"] == "pending" for r in requirements):
             status = ReviewStatus.NEEDS_REWORK
+        elif not (any(r.get("kind") == "step" and r["status"] == "verified" for r in requirements)
+                  or any(r.get("kind") == "artifact" and r["status"] == "passed" for r in requirements)):
+            # Turn 3 (review-hardening): the task has nothing failed/pending, but ALSO no real
+            # verified evidence - every step is 'attempted' (done without tool executions) or
+            # 'skipped', and no artifact was independently probed. That is exactly the
+            # vacuous-pass hole. A pure-planning step is legitimate as ONE step in a
+            # multi-step task, but a task consisting only of pure-planning or skipped steps
+            # has produced no verifiable evidence and must not auto-complete.
+            status = ReviewStatus.NEEDS_REWORK
+            recommendations.append({"requirement": "verified evidence",
+                                    "action": "no step was verified by a tool execution and no\n                                              artifact could be probed; complete real work before\n                                              marking the task done",
+                                    "evidence": ""})
         else:
             status = ReviewStatus.PASSED
         summary = (f"{passed} passed, {failed} failed, {unknown} unresolved "

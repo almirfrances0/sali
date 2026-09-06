@@ -7,15 +7,18 @@ which serializes execution and prevents concurrent agent loops.
 from __future__ import annotations
 
 from typing import Any
+import contextlib
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from sali.api.auth import Identity, require_controller, require_identity
+from fastapi import HTTPException
 from sali.api.models import (
     ConversationMessage,
     ConversationState,
     HealthResponse,
+    MessageAttachment,
     ScheduleResponse,
     SendMessageRequest,
     SendMessageResponse,
@@ -83,10 +86,14 @@ async def status(request: Request) -> SystemStatus:
     store = TaskStore(pool)
     active = await store.active_task()
 
+    task_count = None
     try:
         async with pool.acquire() as conn:
             mem_count = await conn.fetchval(
                 "SELECT count(*) FROM memory WHERE valid_until IS NULL")
+            task_count = await conn.fetchval(
+                "SELECT count(*) FROM task WHERE status IN "
+                "('open','running','waiting','blocked','paused','waiting_for_user')")
     except Exception:
         mem_count = None
 
@@ -95,11 +102,18 @@ async def status(request: Request) -> SystemStatus:
         model=kernel.settings.model.chat_model,
         session_id=str(persistent_session_id()),
         active_task_id=active.id if active else None,
+        uptime_s=__import__("time").time() - _API_STARTED,
         memory_count=mem_count,
+        task_count=task_count,
     )
 
 
 # ── Conversation ──────────────────────────────────────────────────────────────
+
+from sali.api.models import RememberRequest, ScheduleCreateRequest
+
+_API_STARTED = __import__("time").time()
+
 
 @router.get("/conversation", response_model=ConversationState)
 async def get_conversation(request: Request, limit: int = 50) -> ConversationState:
@@ -113,19 +127,29 @@ async def get_conversation(request: Request, limit: int = 50) -> ConversationSta
         conv = await conn.fetchrow(
             "SELECT summary, last_active FROM conversation WHERE id = $1", session_id)
         rows = await conn.fetch(
-            "SELECT conversation_id, seq, role, content, model, created_at "
+            "SELECT id, conversation_id, seq, role, content, model, created_at, attachment "
             "FROM message WHERE conversation_id = $1 ORDER BY seq DESC LIMIT $2",
             session_id, limit)
 
+    import json as _json
+
+    def _att(raw: Any) -> MessageAttachment | None:
+        # A file Sali sent, carried ON its reply message (one durable message; renders as a download
+        # card inline and survives a reload). asyncpg returns jsonb as a str by default.
+        if not raw:
+            return None
+        d = raw if isinstance(raw, dict) else _json.loads(raw)
+        if not d.get("filename") or not d.get("download_url"):
+            return None
+        return MessageAttachment(
+            artifact_id=str(d.get("artifact_id") or ""), filename=d["filename"],
+            size=d.get("size"), download_url=d["download_url"], kind=d.get("kind"))
+
     messages = [
         ConversationMessage(
-            id=session_id,
-            session_id=r["conversation_id"],
-            seq=r["seq"],
-            role=r["role"],
-            content=r["content"],
-            model=r["model"],
-            created_at=r["created_at"],
+            id=r["id"], session_id=r["conversation_id"], seq=r["seq"], role=r["role"],
+            content=r["content"], model=r["model"], created_at=r["created_at"],
+            attachment=_att(r["attachment"]),
         )
         for r in reversed(rows)
     ]
@@ -140,7 +164,8 @@ async def get_conversation(request: Request, limit: int = 50) -> ConversationSta
 
 @router.post("/conversation/message", response_model=SendMessageResponse)
 async def send_message(
-    body: SendMessageRequest, request: Request, _: Identity = Depends(require_controller),
+    body: SendMessageRequest, request: Request,
+    identity: Identity = Depends(require_controller),
 ) -> SendMessageResponse:
     """Send a message to Sali. Serialized through the runtime.
 
@@ -149,8 +174,27 @@ async def send_message(
     """
     runtime = _runtime(request)
 
-    if not body.content.strip():
+    if not body.content.strip() and not (body.image_ref or body.image_b64):
         raise HTTPException(status_code=400, detail="Message cannot be empty")
+    if runtime is None:
+        raise HTTPException(status_code=503, detail="Sali's runtime is not attached to this API")
+
+    # Resolve an attached image to bytes (bounded to the conversation workspace) so the runtime can fold a
+    # description into the turn. Bytes are never persisted — only the derived text (see handle_message).
+    import base64
+    import contextlib
+    from pathlib import Path
+    image_bytes: bytes | None = None
+    if body.image_ref:
+        works = Path(_kernel(request).settings.permissions.workspace).expanduser()
+        root = (works / "conversations").resolve()
+        candidate = Path(body.image_ref).resolve()
+        if root in candidate.parents and candidate.is_file():
+            with contextlib.suppress(Exception):
+                image_bytes = candidate.read_bytes()
+    elif body.image_b64:
+        with contextlib.suppress(Exception):
+            image_bytes = base64.b64decode(body.image_b64)
 
     import asyncio
 
@@ -161,15 +205,69 @@ async def send_message(
             # publishes (which replays on reconnect); we no longer emit a redundant, non-durable,
             # sequence-less `message.completed` broadcast that the recovery contract couldn't replay
             # (Final audit §29/§31).
-            await runtime.handle_message(body.content, origin="api")
+            content = body.content
+            if image_bytes is not None:
+                # Vision fold in the background task (the 202 already returned). Reuse the local vision model
+                # via the runtime's provider; describe_image shares the COGNITION lease with generation, so
+                # the one cognition slot is preserved. Never let vision break the turn.
+                import contextlib as _ctx
+                with _ctx.suppress(Exception):
+                    _desc = await runtime._loop.provider.describe_image(
+                        "Describe this image faithfully. Focus on the SCENE and the MOMENT — where it "
+                        "is, what is happening, the overall mood — and for an object or screen its make, "
+                        "model, text and distinguishing marks. For people, note ONLY what the scene "
+                        "shows (roughly who is present and what they're doing), NOT a catalogue of "
+                        "anyone's features or looks. State only what you can actually SEE. Do not guess "
+                        "at anyone's identity, name or relationship.",
+                        image_bytes)
+                    if _desc and _desc.strip():
+                        # The description is Sali's OWN observation, and it must not be mistaken for
+                        # ground truth about WHO someone is. Almir knows his own people; a vision model
+                        # does not. Sali telling him a photo of his wife "isn't her" (which happened) is
+                        # the exact hallucination he objects to — so the fold says plainly whose claim
+                        # outranks whose, and asks him rather than contradicting him.
+                        content = (content + "\n\n" if content.strip() else "") \
+                            + (f"[You looked at an image Almir shared. What you can see: "
+                               f"{_desc.strip()}\n"
+                               f"That is your own observation of the scene only — it is NOT knowledge "
+                               f"of who anyone is. If Almir tells you who or what this is, he is right "
+                               f"and you remember it. Never contradict him about the identity of his "
+                               f"own people or things; if you are unsure, ask. If this is personal — "
+                               f"his family, his home, a moment he's sharing — meet it warmly and speak "
+                               f"to HIM about it; don't appraise how his people look.]")
+            await runtime.handle_message(content, origin="api")
         except Exception as exc:
             from sali.api.ws import manager as ws_manager
             await ws_manager.broadcast_event("error", {"error": str(exc)[:200]})
+        finally:
+            _IN_FLIGHT.discard(asyncio.current_task())
 
-    asyncio.create_task(_submit())
+    # Record HOW Almir is connected for this turn — the channel (iPhone vs terminal) and local-vs-remote,
+    # from the real transport — so Sali's self-state knows he's on his phone (a local path won't reach
+    # him; send files with send_file), not at this machine (§17-28). Best-effort; never blocks the turn.
+    with contextlib.suppress(Exception):
+        from sali.net.connection import classify as _classify_conn
+        _platform = None
+        _did = getattr(identity, "device_id", None)
+        if _did is not None:
+            _pool = await _kernel(request).pool()
+            async with _pool.acquire() as _c:
+                _platform = await _c.fetchval("SELECT platform FROM sali.api_device WHERE id = $1", _did)
+        runtime.note_connection(_classify_conn(identity, request, platform=_platform))
 
-    from sali.core.ids import new_id
-    return SendMessageResponse(run_id=new_id(), status="accepted")
+    # The reply streams over the WebSocket, so the HTTP request returns immediately — but the task
+    # must be ANCHORED. asyncio keeps only a weak reference to a bare create_task(), so under GC
+    # pressure a turn could vanish mid-thought with the client already told "accepted".
+    task = asyncio.create_task(_submit())
+    _IN_FLIGHT.add(task)
+
+    # Deliberately no run_id: the runtime creates the real one after this returns (see the model).
+    return SendMessageResponse(status="accepted")
+
+
+# Strong references to in-flight message handlers (see send_message). Concurrency between them is
+# arbitrated by the runtime's attention model and the one cognition slot, not here.
+_IN_FLIGHT: set[Any] = set()
 
 
 @router.post("/conversation/cancel")
@@ -193,10 +291,65 @@ async def list_tasks(request: Request) -> TaskListResponse:
     tasks = await store.open_tasks(limit=20)
     active = await store.active_task()
 
+    responses = []
+    for t in tasks:
+        resp = _task_to_response(t)
+        # Live activity only for what is actually moving — a settled task has nothing to say, and this
+        # costs two small queries per running task rather than per row.
+        if t.status == "running":
+            with contextlib.suppress(Exception):
+                live = await store.live_activity(t.id)
+                resp.working = bool(live.get("working"))
+                resp.current_step = live.get("current_step")
+                resp.last_tool = live.get("last_tool")
+                resp.last_tool_status = live.get("last_tool_status")
+                resp.last_detail = live.get("last_detail")
+                resp.last_activity_at = live.get("last_activity_at")
+        responses.append(resp)
+
     return TaskListResponse(
-        tasks=[_task_to_response(t) for t in tasks],
+        tasks=responses,
         active_task_id=active.id if active else None,
     )
+
+
+@router.get("/tasks/history")
+async def task_history(request: Request, limit: int = 30) -> list[dict[str, Any]]:
+    """Finished/failed/cancelled tasks from the durable sali-works archive (audit: the DB rows are
+    archived + deleted on completion, so finished work vanished from the app the moment it was done)."""
+    import contextlib
+    import json as _json
+    from pathlib import Path
+
+    base = Path.home() / "Desktop" / "sali-works" / "tasks"
+    items: list[dict[str, Any]] = []
+    if base.is_dir():
+        for d in base.iterdir():
+            f = d / "meta.json"
+            if not f.is_file():
+                continue
+            with contextlib.suppress(Exception):
+                m = _json.loads(f.read_text(encoding="utf-8"))
+                if m.get("status") in ("done", "failed", "abandoned", "cancelled", "superseded"):
+                    def _iso(v: Any) -> str | None:
+                        """meta.json stores str(datetime) — "2026-09-02 22:00:34.833226+00:00", with a
+                        SPACE. ISO8601DateFormatter (what the iOS client uses) requires the 'T', so every
+                        history row failed to decode and the whole screen rendered empty. Normalise here,
+                        at the contract boundary, rather than making each client tolerant."""
+                        if not v:
+                            return None
+                        t = str(v).strip().replace(" ", "T", 1)
+                        return t if t.endswith("Z") or "+" in t[10:] or "-" in t[10:] else t + "Z"
+
+                    items.append({
+                        "id": m.get("task_id"), "objective": m.get("objective", ""),
+                        "status": m.get("status"), "result": m.get("result"),
+                        "created_at": _iso(m.get("created_at")),
+                        "updated_at": _iso(m.get("updated_at")),
+                        "workspace_root": m.get("workspace_root"),
+                    })
+    items.sort(key=lambda x: str(x.get("updated_at") or ""), reverse=True)
+    return items[:limit]
 
 
 @router.get("/tasks/{task_id}", response_model=TaskResponse)
@@ -241,6 +394,34 @@ async def get_task_artifacts(task_id: UUID, request: Request) -> list[dict[str, 
             "created_at": a["created_at"].isoformat() if a["created_at"] else None,
             "download_url": f"/api/v1/tasks/{task_id}/artifacts/{a['id']}/download",
         })
+    if not out:
+        # Completed tasks are archived out of the DB — serve the durable archive copies instead
+        # (audit: artifacts 404'd the moment a task finished).
+        import contextlib
+        import json as _json
+        adir = Path.home() / "Desktop" / "sali-works" / "tasks" / str(task_id)
+        f = adir / "artifacts.json"
+        if f.is_file():
+            with contextlib.suppress(Exception):
+                for a in _json.loads(f.read_text(encoding="utf-8")):
+                    aid = str(a.get("id") or "")
+                    name = a.get("archived_name")
+                    p = (adir / "artifacts" / name) if name else None
+                    available = bool(p is not None and p.is_file())
+                    if not aid:
+                        continue
+                    out.append({
+                        "id": aid,
+                        "filename": a.get("filename") or (name.split("_", 1)[1] if name and "_" in name
+                                                          else name) or "artifact",
+                        "artifact_type": a.get("artifact_type"),
+                        "tool_name": a.get("tool_name"),
+                        "size": (p.stat().st_size if available else a.get("size")),
+                        "available": available,
+                        "content_type": guess_content_type(p) if available else "application/octet-stream",
+                        "created_at": a.get("created_at"),
+                        "download_url": f"/api/v1/tasks/{task_id}/artifacts/{aid}/download",
+                    })
     return out
 
 
@@ -258,6 +439,14 @@ async def download_artifact(task_id: UUID, artifact_id: UUID, request: Request) 
     pool = await _kernel(request).pool()
     task = await TaskStore(pool).get(task_id)
     if task is None:
+        # Completed tasks live in the archive — serve the durable copy, confined to the archive dir.
+        base = (Path.home() / "Desktop" / "sali-works" / "tasks" / str(task_id) / "artifacts").resolve()
+        if base.is_dir():
+            for f in sorted(base.glob(f"{artifact_id}_*")):
+                p = f.resolve()
+                if is_within(p, base) and p.is_file():
+                    nice = p.name.split("_", 1)[1] if "_" in p.name else p.name
+                    return FileResponse(str(p), filename=nice, media_type=guess_content_type(p))
         raise HTTPException(status_code=404, detail="task not found")
     async with pool.acquire() as conn:
         path_str = await conn.fetchval(
@@ -274,6 +463,63 @@ async def download_artifact(task_id: UUID, artifact_id: UUID, request: Request) 
     if not path.is_file():
         raise HTTPException(status_code=410, detail="artifact no longer available")
     return FileResponse(str(path), filename=path.name, media_type=guess_content_type(path))
+
+
+@router.get("/research")
+async def list_research_reports(request: Request) -> list[dict[str, Any]]:
+    """Recent downloadable research reports (Almir §): the SUMMARIES live in the chat; the FULL write-ups
+    are here to download ('summarise then for more i download the file')."""
+    from sali.runtime.reports import ResearchReportStore
+
+    pool = await _kernel(request).pool()
+    return await ResearchReportStore(pool).list(limit=50)
+
+
+@router.get("/research/{report_id}/download")
+async def download_research_report(report_id: UUID, request: Request) -> Any:
+    """Stream one research report's markdown, confined to the sali-works/research directory (a stored
+    path that escapes it — stale row, tampering — is refused, never served)."""
+    from pathlib import Path
+
+    from starlette.responses import FileResponse
+
+    from sali.api.files import is_within
+    from sali.runtime.reports import ResearchReportStore
+
+    pool = await _kernel(request).pool()
+    report = await ResearchReportStore(pool).get(report_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="report not found")
+    path = Path(report["path"])
+    base = (Path.home() / "Desktop" / "sali-works" / "research").resolve()
+    if not is_within(path, base):
+        raise HTTPException(status_code=403, detail="report is outside the research directory")
+    if not path.is_file():
+        raise HTTPException(status_code=410, detail="report file no longer available")
+    return FileResponse(str(path), filename=path.name, media_type="text/markdown; charset=utf-8")
+
+
+@router.get("/files/sent/{file_id}/download")
+async def download_sent_file(file_id: UUID, request: Request) -> Any:
+    """Stream a file Sali SENT to Almir (send_file tool), confined to the sali-works/sends directory."""
+    from pathlib import Path
+
+    from starlette.responses import FileResponse
+
+    from sali.api.files import guess_content_type, is_within
+    from sali.runtime.sent_files import SentFileStore
+
+    pool = await _kernel(request).pool()
+    rec = await SentFileStore(pool).get(file_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="file not found")
+    path = Path(rec["path"])
+    base = (Path.home() / "Desktop" / "sali-works" / "sends").resolve()
+    if not is_within(path, base):
+        raise HTTPException(status_code=403, detail="file is outside the sends directory")
+    if not path.is_file():
+        raise HTTPException(status_code=410, detail="file no longer available")
+    return FileResponse(str(path), filename=rec["filename"], media_type=guess_content_type(path))
 
 
 @router.post("/tasks/{task_id}/files")
@@ -312,8 +558,53 @@ async def upload_task_file(
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / name
     dest.write_bytes(data)
-    await TaskStore(pool).record_artifact(task_id, str(dest), "created", tool_name="upload")
+    await TaskStore(pool, _publisher(request)).record_artifact(
+        task_id, str(dest), "created", tool_name="upload")
     return {"task_id": str(task_id), "filename": name, "size": len(data), "status": "stored"}
+
+
+@router.post("/files")
+async def upload_chat_file(
+    request: Request, filename: str = "", _: Identity = Depends(require_controller),
+) -> dict[str, Any]:
+    """Attach a file to the ONGOING conversation with NO task (§9/§33) — "here, look at this" in plain chat.
+    Raw body; name from ?filename= (or the X-Filename header). Written under
+    <workspace>/conversations/<session_id>/uploads/ with a SANITIZED name; traversal + oversize rejected.
+    Emits a `desktop.observed` perception so Sali passively becomes aware of the file next turn — no new
+    tool, no new cognition. Returns {filename, size, ref}; `ref` is what conversation/message's image_ref
+    references for a vision fold."""
+    import contextlib
+    from pathlib import Path
+
+    from sali.api.files import MAX_UPLOAD_BYTES, safe_filename
+    from sali.runtime.session import persistent_session_id
+
+    name = safe_filename(filename or request.headers.get("x-filename", ""))
+    if name is None:
+        raise HTTPException(status_code=400, detail="a valid ?filename= (or X-Filename header) is required")
+    data = await request.body()
+    if not data:
+        raise HTTPException(status_code=400, detail="empty upload")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="file too large")
+
+    session_id = persistent_session_id()
+    works = Path(_kernel(request).settings.permissions.workspace).expanduser()
+    dest_dir = (works / "conversations" / str(session_id) / "uploads").resolve()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / name
+    dest.write_bytes(data)
+
+    pub = _publisher(request)
+    if pub is not None:
+        with contextlib.suppress(Exception):
+            await pub.emit(
+                "desktop.observed", origin="user", session_id=session_id,
+                data={"kind": "file_uploaded",
+                      "summary": f"Almir attached {name} to the conversation",
+                      "path": str(dest)})
+
+    return {"filename": name, "size": len(data), "ref": str(dest)}
 
 
 # ── Task control (§14/§34) — real backend authority, never a UI-only button ─────────────────────────
@@ -330,6 +621,23 @@ async def pause_task(
     if t is None:
         raise HTTPException(status_code=404, detail="task not found or not pausable")
     return {"task_id": str(task_id), "status": t.status}
+
+
+@router.post("/tasks/{task_id}/cancel")
+async def cancel_task(
+    task_id: UUID, request: Request, ident: Identity = Depends(require_controller),
+) -> dict[str, Any]:
+    """Cancel a task via the same intent-revocation path /abandon uses (Turn 2). Was: bare
+    store.cancel() which left the row 'cancelled' and revive-able through /resume, with no
+    tombstone written to `revoked_intent` and no dependent-work propagation. Now: tombstone +
+    propagation + archive - a cancelled task is dead. The mobile app posts here without having
+    to know the difference between soft cancel and abandon."""
+    from sali.runtime.revocation import revoke_intent
+
+    pool = await _kernel(request).pool()
+    result = await revoke_intent(pool, task_id, reason="user_cancelled",
+                                 by=ident.name, publisher=_publisher(request))
+    return {"task_id": str(task_id), "status": "cancelled", **result}
 
 
 @router.post("/tasks/{task_id}/resume")
@@ -434,7 +742,9 @@ async def get_task_workspace(task_id: UUID, request: Request) -> dict[str, Any]:
 
 @router.get("/tasks/{task_id}/skills")
 async def get_task_skills(task_id: UUID, request: Request) -> dict[str, Any]:
-    """The skills selected (as durable snapshots) for a task (Prompt 5 §27). Content omitted for size."""
+    """The skills selected (as durable snapshots) for a task (Prompt 5 §27) + composer metadata
+    (kind/reason/detected_version) so a diagnostics UI can show WHY each skill was picked. Content
+    body omitted here for size — the /skills/{name} endpoint returns full detail."""
     kernel = _kernel(request)
     pool = await kernel.pool()
     from sali.skills.store import SkillStore
@@ -442,7 +752,64 @@ async def get_task_skills(task_id: UUID, request: Request) -> dict[str, Any]:
     rows = await SkillStore(pool).for_task(task_id)
     return {"task_id": str(task_id), "skills": [
         {"name": r["name"], "path": r["path"], "content_hash": r["content_hash"],
-         "score": r["score"]} for r in rows]}
+         "score": r["score"], "kind": r.get("kind"), "reason": r.get("reason"),
+         "detected_version": r.get("detected_version")} for r in rows]}
+
+
+@router.get("/skills")
+async def list_skills(request: Request) -> dict[str, Any]:
+    """Every skill available on this Sali, with live proficiency + version hint. Bodies OMITTED —
+    call /skills/{name} for the full frontmatter + sections + text."""
+    from pathlib import Path as _Path
+    from sali.config.settings import load_settings
+    from sali.skills.discovery import discover_skills
+    from sali.skills.proficiency import compute_all
+
+    kernel = _kernel(request)
+    pool = await kernel.pool()
+    root = _Path(load_settings().permissions.skills_root)
+    skills = discover_skills(root)
+    proficiency = {p.name: p.to_dict() for p in await compute_all(pool)}
+    return {"skills": [
+        {"name": s.name, "title": s.title, "tags": s.tags, "summary": s.summary,
+         "sections": list(s.sections.keys()), "dependencies": s.dependencies,
+         "conflicts": s.conflicts, "version_hint": s.version_hint,
+         "project_detect": s.project_detect,
+         "proficiency": proficiency.get(s.name)}
+        for s in skills]}
+
+
+@router.get("/skills-proficiency")
+async def skills_proficiency(request: Request) -> dict[str, Any]:
+    """Evidence-based per-skill proficiency (success/failure aggregated from task reviews)."""
+    from sali.skills.proficiency import compute_all
+
+    kernel = _kernel(request)
+    pool = await kernel.pool()
+    return {"skills": [p.to_dict() for p in await compute_all(pool)]}
+
+
+@router.get("/skills/{name}")
+async def get_skill(name: str, request: Request) -> dict[str, Any]:
+    """Full detail for one skill — parsed frontmatter + summary + section bodies + proficiency."""
+    from pathlib import Path as _Path
+    from sali.config.settings import load_settings
+    from sali.skills.discovery import discover_skills
+    from sali.skills.proficiency import compute_for
+
+    kernel = _kernel(request)
+    pool = await kernel.pool()
+    root = _Path(load_settings().permissions.skills_root)
+    skills = {s.name: s for s in discover_skills(root)}
+    s = skills.get(name.lower())
+    if s is None:
+        raise HTTPException(status_code=404, detail=f"skill {name!r} not found")
+    prof = await compute_for(pool, s.name)
+    return {"name": s.name, "title": s.title, "tags": s.tags, "content_hash": s.content_hash,
+            "summary": s.summary, "sections": s.sections, "content": s.content,
+            "dependencies": s.dependencies, "conflicts": s.conflicts,
+            "version_hint": s.version_hint, "project_detect": s.project_detect,
+            "proficiency": prof.to_dict()}
 
 
 @router.get("/tasks/{task_id}/research")
@@ -505,6 +872,32 @@ async def get_learning_contradictions(request: Request, status: str | None = Non
     from sali.learning.candidates import LearningCandidateStore
 
     return {"contradictions": await LearningCandidateStore(pool).contradictions(status=status)}
+
+
+@router.get("/current-state")
+async def get_current_state(request: Request) -> dict[str, Any]:
+    """§36-38: ONE authoritative read of what's true right now — identity, environment, how Almir is
+    connected, mode + current task, last outcome, open commitments, and grounding health — with every
+    fact TAGGED by the authority tier it came from (observed > state > recall > belief) and the
+    precedence Sali uses when sources disagree. Composes existing stores; writes nothing."""
+    pool = await _kernel(request).pool()
+    from sali.runtime.current_state import CurrentState
+
+    conn = getattr(getattr(_runtime(request), "_loop", None), "_connection", None)
+    return await CurrentState(pool, connection=conn).snapshot()
+
+
+@router.get("/grounding")
+async def get_grounding(request: Request, limit: int = 20) -> dict[str, Any]:
+    """Sali's grounding sink (§45): how often his OWN over-claims were caught and struck before reaching
+    Almir — lifetime, last 24h, and by family (action_done/state/capability/file_send) — plus the most
+    recent struck sentences for review (§32/§44). Low and trending-down is the health signal: a
+    self-caught contradiction is a limit Sali is holding to, recorded so it can be learned from."""
+    pool = await _kernel(request).pool()
+    from sali.runtime.grounding_log import GroundingLog
+
+    log = GroundingLog(pool)
+    return {"metrics": await log.metrics(), "recent": await log.recent(limit=limit)}
 
 
 @router.get("/behavior/proposals")
@@ -589,6 +982,119 @@ async def get_memory_conflicts(request: Request) -> dict[str, Any]:
     return {"conflicts": await ExperienceStore(pool).conflicts()}
 
 
+@router.get("/memory/list")
+async def list_memory(
+    request: Request,
+    layer: str | None = None, source: str | None = None, kind: str | None = None,
+    scope: str | None = None, q: str | None = None, state: str = "current",
+    needs_grounding: bool | None = None, min_confidence: float | None = None,
+    limit: int = 50, cursor_created_at: str | None = None, cursor_id: UUID | None = None,
+) -> dict[str, Any]:
+    """Browse memory. Keyset paginated — no offset, no total (a total is unbounded; see /memory/stats)."""
+    from datetime import datetime
+
+    from sali.memory import admin
+
+    cur = datetime.fromisoformat(cursor_created_at) if cursor_created_at else None
+    pool = await _kernel(request).pool()
+    async with pool.acquire() as conn:
+        return await admin.list_memories(
+            conn, layer=layer, source=source, kind=kind, scope=scope, q=q, state=state,
+            needs_grounding=needs_grounding, min_confidence=min_confidence, limit=limit,
+            cursor_created_at=cur, cursor_id=cursor_id)
+
+
+@router.get("/memory/stats")
+async def memory_stats(request: Request) -> dict[str, Any]:
+    """Counts for the memory overview — by layer, by source, and the review queues. Never content."""
+    from sali.memory import admin
+
+    pool = await _kernel(request).pool()
+    async with pool.acquire() as conn:
+        return await admin.stats(conn)
+
+
+@router.post("/memory/{memory_id}/invalidate")
+async def invalidate_memory(
+    memory_id: UUID, request: Request, reason: str = "",
+    _: Identity = Depends(require_controller),
+) -> dict[str, Any]:
+    """Retire a belief from current knowledge. REVERSIBLE — the row and its history stay."""
+    from sali.memory import writer
+
+    if not reason.strip():
+        raise HTTPException(status_code=400, detail="reason cannot be empty")
+    pool = await _kernel(request).pool()
+    async with pool.acquire() as conn:
+        closed = await writer.forget(conn, memory_id, reason=reason.strip())
+    if not closed:
+        raise HTTPException(status_code=404, detail="memory not found or already retired")
+    return {"invalidated": True, "memory_id": str(memory_id)}
+
+
+@router.post("/memory/{memory_id}/restore")
+async def restore_memory(
+    memory_id: UUID, request: Request, _: Identity = Depends(require_controller),
+) -> dict[str, Any]:
+    """Bring a retired memory back. Refused for a SUPERSEDED row — see memory/admin.restore."""
+    from sali.memory import admin
+
+    pool = await _kernel(request).pool()
+    async with pool.acquire() as conn:
+        out = await admin.restore(conn, memory_id)
+    if not out["restored"]:
+        code = 404 if out["reason"] == "not_found" else 409
+        raise HTTPException(status_code=code, detail=out["reason"])
+    return out
+
+
+@router.post("/memory/{memory_id}/revise")
+async def revise_memory(
+    memory_id: UUID, request: Request, content: str = "", reason: str = "",
+    _: Identity = Depends(require_controller),
+) -> dict[str, Any]:
+    """Correct what a memory says. Retires the old row and writes the replacement, linked."""
+    from sali.memory import admin
+
+    if not content.strip():
+        raise HTTPException(status_code=400, detail="content cannot be empty")
+    pool = await _kernel(request).pool()
+    async with pool.acquire() as conn:
+        out = await admin.revise(conn, memory_id, content=content.strip(),
+                                 reason=reason.strip() or "corrected by Almir")
+    if not out["revised"]:
+        raise HTTPException(status_code=404 if out["reason"] == "not_found" else 409,
+                            detail=out["reason"])
+    return out
+
+
+@router.delete("/memory/{memory_id}")
+async def delete_memory(
+    memory_id: UUID, request: Request, reason: str = "", confirm: bool = False,
+    identity: Identity = Depends(require_controller),
+) -> dict[str, Any]:
+    """Erase a memory outright. IRREVERSIBLE — for a privacy request, not a correction.
+
+    Owner only, and `confirm=true` is required: a slip of the thumb must not erase something. The auth
+    layer ranks owner above controller but only exposes `require_controller`, so the owner check is made
+    here against the identity that dependency already resolved.
+    """
+    from sali.memory import admin
+
+    if identity.role != "owner":
+        raise HTTPException(status_code=403, detail="owner authority required")
+    if not confirm:
+        raise HTTPException(status_code=400, detail="confirm=true is required to delete a memory")
+    if not reason.strip():
+        raise HTTPException(status_code=400, detail="reason cannot be empty")
+    pool = await _kernel(request).pool()
+    async with pool.acquire() as conn:
+        out = await admin.hard_delete(conn, memory_id, reason=reason.strip())
+    if not out["deleted"]:
+        raise HTTPException(status_code=404, detail="memory not found")
+    return out
+
+
 @router.get("/memory/{memory_id}")
 async def get_memory_provenance(memory_id: UUID, request: Request) -> dict[str, Any]:
     """Why Sali believes a memory (§11): its source, the task/run it came from, and its evidence."""
@@ -602,6 +1108,28 @@ async def get_memory_provenance(memory_id: UUID, request: Request) -> dict[str, 
 
 
 # ── Persistent agency: activities, capabilities, side effects, cleanup (§58/§59) ────────────────────
+
+@router.get("/agenda")
+async def get_agenda(request: Request) -> dict[str, Any]:
+    """The synthesised cross-store view of what matters now / today / upcoming / blocked - drawn
+    from live task, commitment, schedule, goal, initiative rows. Read-only, bounded (default 5 per
+    section), timezone-correct against the owner's calendar day. This is what the iPhone Agenda
+    screen reads and what the chat path 'what is on my agenda' should answer from.
+
+    Never invents structure: an empty store means an empty section, not a placeholder. The same
+    reader is called from the loop's context assembly, so chat and app can never disagree about
+    what is on the agenda - they read the same synthesiser at the same moment."""
+    kernel = _kernel(request)
+    pool = await kernel.pool()
+    from sali.core.temporal import TemporalService
+    from sali.tasks.agenda import AgendaSynthesiser
+
+    view = await AgendaSynthesiser(
+        pool,
+        TemporalService(owner_timezone=kernel.settings.temporal.owner_timezone)
+    ).synthesise()
+    return view.to_json()
+
 
 @router.get("/activities")
 async def get_activities(request: Request) -> dict[str, Any]:
@@ -632,6 +1160,30 @@ async def get_capability_overview(request: Request) -> dict[str, Any]:
     from sali.tools.registry import default_registry
 
     return await cognitive.capability_overview(pool, default_registry())
+
+
+@router.get("/capabilities/detail")
+async def get_capability_detail(
+    request: Request, name: str, scope: str = "environment", scope_ref: str | None = None,
+) -> dict[str, Any]:
+    """One capability with the evidence behind it: whether it is usable RIGHT NOW, and the real record
+    of it being used (§12/§13). `availability` is the honest answer to "can Sali do this today" —
+    'available' only when it is both usable and recently verified, 'stale' when it has not been proven
+    in a while, 'degraded' when it has been failing. The usage log is what separates a competence from
+    a claim: a capability with no uses has never actually been exercised."""
+    pool = await _kernel(request).pool()
+    from sali.learning.capability import CapabilityStore
+
+    store = CapabilityStore(pool)
+    cap = await store.get(name=name, scope=scope, scope_ref=scope_ref)
+    if cap is None:
+        raise HTTPException(status_code=404, detail="capability not found")
+    return {
+        "capability": cap,
+        "availability": await store.check_availability(name=name, scope=scope, scope_ref=scope_ref),
+        "usable_now": await store.is_usable(name=name, scope_ref=scope_ref),
+        "usage": await store.usage_history(name=name, scope=scope, scope_ref=scope_ref, limit=20),
+    }
 
 
 @router.get("/capability-acquisitions")
@@ -725,6 +1277,230 @@ async def get_initiatives(request: Request) -> dict[str, Any]:
     return {"open": await store.open(), "counts": await store.counts()}
 
 
+@router.get("/open-loops")
+async def get_open_loops(request: Request) -> dict[str, Any]:
+    """Unresolved matters Sali is holding mental space for (persistent-organism §6). Distinct
+    from initiatives (action candidates), goals (aspirations), commitments (promised). Sorted
+    by priority desc, then last_touched desc. Iterable as 'what's on Sali's mind' in the app."""
+    pool = await _kernel(request).pool()
+    from sali.tasks.open_loops import OpenLoopStore
+
+    loops = await OpenLoopStore(pool).open_loops(limit=50)
+    return {"open_loops": [{
+        "id": str(r["id"]), "title": r["title"], "description": r.get("description") or "",
+        "kind": r["kind"], "source": r["source"], "priority": r["priority"],
+        "status": r["status"],
+        "last_touched_at": r["last_touched_at"].isoformat() if r["last_touched_at"] else None,
+        "expires_at": r["expires_at"].isoformat() if r["expires_at"] else None,
+    } for r in loops]}
+
+
+@router.get("/curiosities")
+async def get_curiosities(request: Request) -> dict[str, Any]:
+    """Currently-open knowledge gaps (§5). Sorted by priority + volume; a high-priority
+    curiosity is a legitimate reason for idle-time background research."""
+    pool = await _kernel(request).pool()
+    from sali.learning.curiosity import CuriosityStore
+
+    rows = await CuriosityStore(pool).open_curiosities(limit=50)
+    return {"curiosities": [{
+        "id": str(r["id"]), "subject": r["subject"], "statement": r["statement"],
+        "why_it_matters": r["why_it_matters"],
+        "current_understanding": r["current_understanding"],
+        "priority": r["priority"], "times_encountered": r["times_encountered"],
+        "last_encountered_at": (r["last_encountered_at"].isoformat()
+                                 if r["last_encountered_at"] else None),
+        "status": r["status"], "remaining_interesting": r["remaining_interesting"],
+        "discoveries": r["discoveries"] or [],
+    } for r in rows]}
+
+
+@router.get("/proactive-decisions")
+async def get_proactive_decisions(request: Request, limit: int = 100) -> dict[str, Any]:
+    """Audit trail of proactive communication — every decision (sent AND suppressed) with
+    reason codes. Feeds §46 'learn when NOT to speak': aggregate to identify categories that
+    get no engagement and rate them down for future decisions."""
+    pool = await _kernel(request).pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, kind, subject_ref, decision, reason_codes, message, "
+            "engagement, engagement_at, decided_at FROM sali.proactive_decision "
+            "ORDER BY decided_at DESC LIMIT $1",
+            min(max(1, limit), 500))
+    return {"decisions": [{
+        "id": str(r["id"]), "kind": r["kind"], "subject_ref": r["subject_ref"],
+        "decision": r["decision"], "reason_codes": r["reason_codes"],
+        "message": r["message"], "engagement": r["engagement"],
+        "engagement_at": (r["engagement_at"].isoformat() if r["engagement_at"] else None),
+        "decided_at": (r["decided_at"].isoformat() if r["decided_at"] else None),
+    } for r in rows]}
+
+
+@router.get("/cognitive-metrics")
+async def get_cognitive_metrics(request: Request, hours: int = 24) -> dict[str, Any]:
+    """Observability for the cognitive-cycle driver (§36) — is Sali actually thinking?
+
+    Reports: driver last-cycle timestamp + count, decision-trace rollup by mode/outcome,
+    initiative row count, proactive-decision row count. All from cheap aggregate queries.
+    Use `hours` to window the trace rollup (default 24h)."""
+    from datetime import UTC, datetime, timedelta
+
+    from sali.cognitive.decision_trace import DecisionTraceStore
+
+    kernel = _kernel(request)
+    pool = await kernel.pool()
+
+    driver_status: dict[str, Any] = {"last_cycle_at": None, "last_cycle_count": 0}
+    driver = getattr(kernel, "_initiative_driver", None)
+    if driver is not None:
+        try:
+            driver_status = await driver.status()
+        except Exception:  # noqa: BLE001
+            pass
+
+    trace = DecisionTraceStore(pool)
+    since = datetime.now(UTC) - timedelta(hours=max(1, min(hours, 168)))
+    rollup = await trace.rollup(since=since)
+
+    async with pool.acquire() as conn:
+        init_count = await conn.fetchval(
+            "SELECT count(*) FROM sali.initiative WHERE created_at >= $1", since)
+        proactive_count = await conn.fetchval(
+            "SELECT count(*) FROM sali.proactive_decision WHERE decided_at >= $1", since)
+        open_loops = await conn.fetchval(
+            "SELECT count(*) FROM sali.open_loop WHERE status = 'open'")
+        open_curiosities = await conn.fetchval(
+            "SELECT count(*) FROM sali.curiosity WHERE status = 'open'")
+
+    return {
+        "window_hours": hours,
+        "driver": driver_status,
+        "decisions": rollup,
+        "initiatives_touched": int(init_count or 0),
+        "proactive_decisions": int(proactive_count or 0),
+        "open_loops": int(open_loops or 0),
+        "open_curiosities": int(open_curiosities or 0),
+    }
+
+
+@router.get("/decision-trace")
+async def get_decision_trace(request: Request, limit: int = 100) -> dict[str, Any]:
+    """The compact per-decision metadata the cognitive layer records (§29/§44). NOT
+    chain-of-thought — structured reason codes + evidence keys only."""
+    from sali.cognitive.decision_trace import DecisionTraceStore
+
+    pool = await _kernel(request).pool()
+    trace = DecisionTraceStore(pool)
+    rows = await trace.recent(limit=limit)
+    return {"traces": [{
+        "id": str(r["id"]), "mode": r["mode"], "subject_ref": r["subject_ref"],
+        "origin": r["origin"], "reason_codes": r["reason_codes"],
+        "confidence": r["confidence"], "evidence": r["evidence"],
+        "expected_outcome": r["expected_outcome"],
+        "actual_outcome": r["actual_outcome"],
+        "outcome_at": (r["outcome_at"].isoformat() if r["outcome_at"] else None),
+        "policy_result": r["policy_result"],
+        "learning_id": (str(r["learning_id"]) if r["learning_id"] else None),
+        "decided_at": (r["decided_at"].isoformat() if r["decided_at"] else None),
+    } for r in rows]}
+
+
+@router.get("/models")
+async def list_models(request: Request) -> dict[str, Any]:
+    """Installed models the owner can switch Sali to, each with its capabilities (vision/tools) and
+    the active one flagged. Powers the in-app model switcher (Settings). Reads Ollama's /api/tags for
+    the list and /api/show for per-model capabilities — the authoritative source, so 'vision' here is
+    exactly what makes the chat image button appear or disappear."""
+    import httpx
+
+    kernel = _kernel(request)
+    host = kernel.settings.model.host
+    embed = (kernel.settings.model.embed_model or "").lower()
+    active = getattr(kernel.provider, "chat_model", None) or kernel.settings.model.chat_model
+    models: list[dict[str, Any]] = []
+    try:
+        async with httpx.AsyncClient(base_url=host, timeout=15.0) as cx:
+            tags = (await cx.get("/api/tags")).json().get("models", []) or []
+            for m in tags:
+                name = m.get("name") or m.get("model") or ""
+                if not name or "embed" in name.lower() or name.lower() == embed:
+                    continue  # the embedder is not a chat model — never offer it
+                caps: list[str] = []
+                with contextlib.suppress(Exception):
+                    info = (await cx.post("/api/show", json={"model": name})).json()
+                    caps = info.get("capabilities") or []
+                det = m.get("details", {}) or {}
+                models.append({
+                    "name": name, "size": m.get("size"),
+                    "family": det.get("family"),
+                    "parameter_size": det.get("parameter_size"),
+                    "quantization": det.get("quantization_level"),
+                    "vision": "vision" in caps, "tools": "tools" in caps,
+                    "active": name == active,
+                })
+    except Exception as exc:  # noqa: BLE001 — never 500 the switcher; report what we can
+        raise HTTPException(status_code=502, detail=f"could not reach the model host: {exc}")
+    return {"models": models, "active": active}
+
+
+@router.post("/model")
+async def set_model(request: Request, payload: dict[str, Any],
+                    _: Identity = Depends(require_controller)) -> dict[str, Any]:
+    """Switch Sali's active chat model (owner-only). Validates it is installed + tool-capable, points
+    the provider at it, persists the choice (survives restart), and broadcasts model.changed over the
+    WebSocket so the app reacts live — in particular the chat image button appears/disappears with the
+    new model's vision capability. Refused while Sali is busy (a swap reloads VRAM)."""
+    import httpx
+
+    kernel = _kernel(request)
+    runtime = _runtime(request)
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="model name required")
+    # Never swap mid-work — reloading the model into VRAM would disrupt a running turn/task.
+    if runtime is not None and getattr(runtime, "_coordinator", None) is not None:
+        with contextlib.suppress(Exception):
+            if runtime._coordinator.is_busy:
+                raise HTTPException(status_code=409,
+                                   detail="Sali is busy right now — switch when idle")
+    # Validate against the model host + read real capabilities.
+    host = kernel.settings.model.host
+    try:
+        async with httpx.AsyncClient(base_url=host, timeout=20.0) as cx:
+            r = await cx.post("/api/show", json={"model": name})
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"could not reach the model host: {exc}")
+    if r.status_code != 200:
+        raise HTTPException(status_code=404, detail=f"model '{name}' is not installed")
+    caps = r.json().get("capabilities") or []
+    vision, tools = "vision" in caps, "tools" in caps
+    if not tools:
+        raise HTTPException(
+            status_code=422,
+            detail=f"'{name}' has no tool-calling — Sali needs tools to work, so it can't be used")
+    # Point the provider at it + persist the choice.
+    with contextlib.suppress(Exception):
+        kernel.provider.set_active_model(name)
+    # CRITICAL on a 12GB card: evict the model we just switched AWAY from (and any stray) so two 30B
+    # MoEs never sit in VRAM together. Ollama holds up to 2 models and Sali pins keep_alive=24h, so
+    # without this the old model lingers. The new one loads on the next turn into the freed VRAM.
+    unloaded: list[str] = []
+    with contextlib.suppress(Exception):
+        if hasattr(kernel.provider, "ensure_only_loaded"):
+            unloaded = await kernel.provider.ensure_only_loaded(name)
+    pool = await kernel.pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE sali.sali_state SET active_chat_model = $1 WHERE id = true", name)
+    # Broadcast live so the app updates the active model + shows/hides the image button immediately.
+    if runtime is not None:
+        with contextlib.suppress(Exception):
+            await runtime._publisher.emit(
+                event_type="model.changed", subject_type="model", origin="system",
+                data={"name": name, "vision": vision, "tools": tools})
+    return {"active": name, "vision": vision, "tools": tools, "unloaded": unloaded}
+
+
 @router.get("/routines")
 async def get_routines(request: Request) -> dict[str, Any]:
     """Recurring activities Sali maintains, with their next fire time + failure history (§8)."""
@@ -733,6 +1509,111 @@ async def get_routines(request: Request) -> dict[str, Any]:
 
     store = RoutineStore(pool)
     return {"routines": await store.list(), "counts": await store.counts()}
+
+
+@router.post("/routines")
+async def create_routine(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
+    """Create (or refresh) a recurring activity. Body: {name, when, purpose?, conditions?}
+    where `when` is an interval spec like '30m' / '2h' / '1d'. Deduped by name — a repeat
+    call with the same name updates purpose/schedule instead of creating a duplicate.
+    Previously RoutineStore.create had no external caller; the routine table stayed empty."""
+    pool = await _kernel(request).pool()
+    from sali.tasks.routines import RoutineStore
+
+    name = str(payload.get("name") or "").strip()
+    when = str(payload.get("when") or "").strip()
+    if not name or not when:
+        raise HTTPException(status_code=400, detail="name and when are required")
+    store = RoutineStore(pool)
+    try:
+        rid = await store.create(
+            name=name[:120], when=when,
+            purpose=(str(payload["purpose"])[:400] if payload.get("purpose") else None),
+            conditions=payload.get("conditions") or {})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"routine_id": str(rid), "name": name}
+
+
+@router.get("/skill-proposals")
+async def list_skill_proposals(request: Request, limit: int = 50) -> dict[str, Any]:
+    """Proposed improvements to a skill's guidance, awaiting human review (Prompt 7 §14/§15).
+    Previously the SkillProposalStore had zero API surface; nothing outside the class file
+    called propose/accept/reject."""
+    pool = await _kernel(request).pool()
+    from sali.learning.skill_evolution import SkillProposalStore
+
+    store = SkillProposalStore(pool)
+    return {"proposals": await store.pending(limit=min(max(1, limit), 200))}
+
+
+@router.post("/skill-proposals")
+async def create_skill_proposal(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
+    """Propose an improvement to a skill's guidance. Body: {skill_name, proposed_change,
+    current_guidance?, reason?, times_successful?, times_failed?, confidence?}.
+    Deduped per (skill_name, LOWER(proposed_change))."""
+    pool = await _kernel(request).pool()
+    from sali.learning.skill_evolution import SkillProposalStore
+
+    skill_name = str(payload.get("skill_name") or "").strip()
+    proposed = str(payload.get("proposed_change") or "").strip()
+    if not skill_name or not proposed:
+        raise HTTPException(status_code=400, detail="skill_name and proposed_change are required")
+    store = SkillProposalStore(pool)
+    pid = await store.propose(
+        skill_name=skill_name[:120], proposed_change=proposed[:2000],
+        current_guidance=(str(payload["current_guidance"])[:4000]
+                          if payload.get("current_guidance") else None),
+        reason=(str(payload["reason"])[:1000] if payload.get("reason") else None),
+        evidence=payload.get("evidence") or {},
+        times_successful=int(payload.get("times_successful") or 0),
+        times_failed=int(payload.get("times_failed") or 0),
+        confidence=float(payload.get("confidence") or 0.4))
+    return {"proposal_id": str(pid), "skill_name": skill_name}
+
+
+@router.post("/skill-proposals/{proposal_id}/accept")
+async def accept_skill_proposal(request: Request, proposal_id: str,
+                                  payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    from uuid import UUID as _UUID
+    from sali.learning.skill_evolution import SkillProposalStore
+
+    pool = await _kernel(request).pool()
+    by = str((payload or {}).get("by") or "user")
+    ok = await SkillProposalStore(pool).accept(_UUID(proposal_id), by=by)
+    return {"accepted": bool(ok)}
+
+
+@router.post("/skill-proposals/{proposal_id}/reject")
+async def reject_skill_proposal(request: Request, proposal_id: str,
+                                  payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    from uuid import UUID as _UUID
+    from sali.learning.skill_evolution import SkillProposalStore
+
+    pool = await _kernel(request).pool()
+    body = payload or {}
+    ok = await SkillProposalStore(pool).reject(
+        _UUID(proposal_id), by=str(body.get("by") or "user"),
+        reason=str(body.get("reason") or "")[:500])
+    return {"rejected": bool(ok)}
+
+
+@router.post("/proactive-decisions/{decision_id}/engagement")
+async def record_engagement(request: Request, decision_id: str,
+                              payload: dict[str, Any]) -> dict[str, Any]:
+    """Score a proactive decision — Almir tapped, read, replied, or ignored it. Feeds the
+    §46 learn-when-not-to-speak gate. Previously CommunicationDecisionEngine.record_engagement
+    was defined but had ZERO callers; the engagement column stayed null forever."""
+    from sali.events.communication_decision import CommunicationDecisionEngine
+
+    engagement = str(payload.get("engagement") or "").strip().lower()
+    if engagement not in ("none", "read", "replied", "acted"):
+        raise HTTPException(status_code=400,
+                            detail="engagement must be one of: none, read, replied, acted")
+    pool = await _kernel(request).pool()
+    engine = CommunicationDecisionEngine(pool)
+    await engine.record_engagement(decision_id, engagement=engagement)
+    return {"decision_id": decision_id, "engagement": engagement}
 
 
 @router.get("/relationships")
@@ -932,6 +1813,28 @@ async def get_task_question(task_id: UUID, request: Request) -> dict[str, Any]:
     return {"task_id": str(task_id), "pending": await QuestionStore(pool).pending(task_id)}
 
 
+@router.post("/tasks/{task_id}/question/answer")
+async def answer_task_question(
+    task_id: UUID, request: Request, _: Identity = Depends(require_controller),
+) -> dict[str, Any]:
+    """Answer a task's clarification question, putting the SAME task back to 'running' (§44).
+
+    Distinct from /pending-questions/answer, which serves the person-directed `pending_question`
+    table: a task clarification lives in `task_question` (QuestionStore) and had no HTTP route at
+    all, so answering one from the app always came back 'no_pending_question'."""
+    from sali.tasks.coordination import QuestionStore
+
+    pool = await _kernel(request).pool()
+    body = await request.json()
+    answer = str(body.get("answer", "") or "").strip()
+    if not answer:
+        raise HTTPException(status_code=400, detail="answer cannot be empty")
+    answered = await QuestionStore(pool, _publisher(request)).answer(task_id, answer)
+    if not answered:
+        raise HTTPException(status_code=404, detail="no pending question for this task")
+    return {"status": "answered", "task_id": str(task_id)}
+
+
 @router.get("/tasks/{task_id}/decisions")
 async def get_task_decisions(task_id: UUID, request: Request) -> dict[str, Any]:
     """The active decision ledger for a task (Prompt 6 §30)."""
@@ -1038,6 +1941,118 @@ async def list_schedules(request: Request) -> list[ScheduleResponse]:
     ]
 
 
+@router.post("/schedules", response_model=ScheduleResponse)
+async def create_schedule(
+    body: ScheduleCreateRequest, request: Request, _: Identity = Depends(require_controller),
+) -> ScheduleResponse:
+    """Create a schedule (terminal parity: the store always supported it; only the route was missing)."""
+    from sali.scheduler.store import ScheduleStore
+
+    pool = await _kernel(request).pool()
+    try:
+        s = await ScheduleStore(pool).create(body.name, body.when, body.prompt)
+    except Exception as exc:  # noqa: BLE001 - a bad spec is a client error, never a 500
+        raise HTTPException(status_code=400, detail=str(exc)[:200]) from None
+    return ScheduleResponse(
+        id=s.id, name=s.name, kind=s.kind, spec=s.spec, prompt=s.prompt,
+        enabled=s.enabled, next_run_at=s.next_run_at, last_run_at=s.last_run_at,
+        last_status=s.last_status)
+
+
+@router.post("/schedules/{name}/enable")
+async def enable_schedule(
+    name: str, request: Request, _: Identity = Depends(require_controller),
+) -> dict[str, Any]:
+    from sali.scheduler.store import ScheduleStore
+
+    pool = await _kernel(request).pool()
+    n = await ScheduleStore(pool).set_enabled(name, True)
+    if n == 0:
+        raise HTTPException(status_code=404, detail="schedule not found")
+    return {"name": name, "enabled": True}
+
+
+@router.post("/schedules/{name}/disable")
+async def disable_schedule(
+    name: str, request: Request, _: Identity = Depends(require_controller),
+) -> dict[str, Any]:
+    from sali.scheduler.store import ScheduleStore
+
+    pool = await _kernel(request).pool()
+    n = await ScheduleStore(pool).set_enabled(name, False)
+    if n == 0:
+        raise HTTPException(status_code=404, detail="schedule not found")
+    return {"name": name, "enabled": False}
+
+
+@router.delete("/schedules/{name}")
+async def delete_schedule(
+    name: str, request: Request, _: Identity = Depends(require_controller),
+) -> dict[str, Any]:
+    from sali.scheduler.store import ScheduleStore
+
+    pool = await _kernel(request).pool()
+    n = await ScheduleStore(pool).delete(name)
+    if n == 0:
+        raise HTTPException(status_code=404, detail="schedule not found")
+    return {"name": name, "deleted": True}
+
+
+# ── Memory (terminal parity: `sali remember` / `sali recall`) ─────────────────
+
+@router.post("/memory")
+async def remember_fact(
+    body: RememberRequest, request: Request, _: Identity = Depends(require_controller),
+) -> dict[str, Any]:
+    """Teach Sali a fact from the app — persisted with provenance user_explicit and embedded."""
+    import contextlib
+
+    from sali.core.enums import MemoryLayer, MemorySource
+    from sali.memory.service import MemoryService
+
+    kernel = _kernel(request)
+    pool = await kernel.pool()
+    try:
+        layer = MemoryLayer(body.layer)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"unknown layer '{body.layer}'") from None
+    if not body.content.strip():
+        raise HTTPException(status_code=400, detail="content cannot be empty")
+    service = MemoryService(pool, kernel.provider)
+    memory = await service.remember(layer=layer, content=body.content.strip(),
+                                    source=MemorySource.USER_EXPLICIT)
+    with contextlib.suppress(Exception):
+        await service.embed_pending()
+    return {"id": str(getattr(memory, "id", "")), "layer": body.layer,
+            "confidence": float(getattr(memory, "confidence", 0.0) or 0.0)}
+
+
+@router.get("/recall")
+async def recall_memories(q: str, request: Request) -> dict[str, Any]:
+    """What Sali retrieves for a query — memories (confidence/staleness) + graph facts."""
+    from sali.retrieval.router import classify as _classify
+    from sali.retrieval.service import RetrievalService
+
+    kernel = _kernel(request)
+    pool = await kernel.pool()
+    if not q.strip():
+        raise HTTPException(status_code=400, detail="q cannot be empty")
+    plan = _classify(q)
+    bundle = await RetrievalService(
+        pool, kernel.provider,
+        owner_timezone=kernel.settings.temporal.owner_timezone).gather(q, plan, k=8)
+    return {
+        "intent": str(getattr(plan, "intent", "")),
+        "memories": [{
+            "content": h.memory.content,
+            "confidence": round(float(h.effective_confidence), 3),
+            "stale": bool(getattr(h, "stale", False)),
+            "layer": str(getattr(h.memory, "layer", "")),
+        } for h in bundle.memories],
+        "graph": [{"src": f.src, "rel": f.rel, "dst": f.dst} for f in bundle.graph_facts],
+    }
+
+
 # ── Event Recovery ────────────────────────────────────────────────────────────
 
 @router.get("/events")
@@ -1078,10 +2093,69 @@ async def get_events(
     ]
 
 
+@router.get("/tasks/{task_id}/events")
+async def get_task_events(
+    task_id: UUID,
+    request: Request,
+    after_seq: int | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Task-scoped durable event log for the iOS pulse seed on TaskDetailView. Was: mobile
+    fetched the global /events (last 200 rows) and filtered client-side by task_id, so on a
+    busy backend a task whose events fell outside the 200-row window silently disappeared.
+    Now: a UNION on (subject_id = task_id) OR (payload->>'task_id' = task_id::text) so both
+    direct-subject events and dependent-work events (obligations, commitments, side effects
+    that carry the task_id in their payload) are returned bounded to THIS task's history."""
+    kernel = _kernel(request)
+    pool = await kernel.pool()
+    limit = max(1, min(limit, 500))
+    tid_text = str(task_id)
+
+    async with pool.acquire() as conn:
+        if after_seq is not None:
+            rows = await conn.fetch(
+                "SELECT seq, id, event_type, subject_type, subject_id, payload, created_at "
+                "FROM event WHERE seq > $1 "
+                "  AND ((subject_type = 'task' AND subject_id::text = $2) "
+                "        OR payload->>'task_id' = $2) "
+                "ORDER BY seq LIMIT $3",
+                after_seq, tid_text, limit)
+        else:
+            rows = await conn.fetch(
+                "SELECT seq, id, event_type, subject_type, subject_id, payload, created_at "
+                "FROM event WHERE (subject_type = 'task' AND subject_id::text = $1) "
+                "  OR payload->>'task_id' = $1 "
+                "ORDER BY seq DESC LIMIT $2", tid_text, limit)
+            rows = list(reversed(rows))
+
+    return [
+        {
+            "seq": r["seq"],
+            "type": r["event_type"],
+            "subject_type": r["subject_type"],
+            "subject_id": str(r["subject_id"]) if r["subject_id"] else None,
+            "payload": dict(r["payload"]) if r["payload"] else {},
+            "timestamp": r["created_at"].isoformat() if r["created_at"] else None,
+        }
+        for r in rows
+    ]
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _task_to_response(task: Any) -> TaskResponse:
+    # Turn 7: compute step-count vocabulary from the in-memory steps list. This
+    # matches the SQL predicate in _compute_tally exactly, so the row on the wire
+    # is byte-identical to what the store computes for the event bus.
+    _steps = list(task.steps or [])
+    _done  = sum(1 for s in _steps if s.status == "done")
+    _skip  = sum(1 for s in _steps if s.status == "skipped")
+    _verif = sum(1 for s in _steps if s.status == "done" and getattr(s, "verified", False))
     return TaskResponse(
+        done_steps=_done,
+        total_steps=len(_steps),
+        verified_steps=_verif,
+        skipped_steps=_skip,
         id=task.id,
         objective=task.objective,
         status=task.status,
@@ -1094,7 +2168,8 @@ def _task_to_response(task: Any) -> TaskResponse:
                 seq=s.seq, description=s.description, status=s.status,
                 note=s.note, attempts=s.attempts, last_error=s.last_error,
                 failure_class=s.failure_class, verified=s.verified,
-                checkpoint=s.checkpoint,
+                checkpoint=s.checkpoint, parent_seq=s.parent_seq,
+                definition_of_done=s.definition_of_done, scope_excludes=s.scope_excludes,
             )
             for s in task.steps
         ],

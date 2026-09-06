@@ -18,7 +18,7 @@ import pytest
 
 from sali.events.publisher import EventPublisher
 from sali.runtime import cognitive
-from sali.runtime.behavioral_context import assemble_behavioral_context, render_behavioral_context
+from sali.runtime.behavioral_context import assemble_behavioral_context
 from sali.tasks.activity import ActivityStore
 from sali.tasks.conversation import ConversationThreadStore, PendingQuestionStore
 from sali.tasks.store import TaskStore
@@ -159,18 +159,29 @@ async def test_behavioral_context_is_bounded_and_evidence_backed(live_pool: Any)
     assert "prefer concise technical answers" in ctx["preferences"]
     assert "do not repeatedly resend unanswered questions" in ctx["tendencies"]
     assert ctx["relationship"]["relationship"] == "owner"
-    block = render_behavioral_context(ctx)
-    assert "Almir" in block and "concise" in block and len(block) < 1200   # bounded (§30)
-    # nothing durable → empty block, never fabricated personality (§27/§34)
-    assert render_behavioral_context({"preferences": [], "tendencies": [], "relationship": None}) == ""
+    # Bounded and derived — a read-only diagnostic view. Brain-audit turn 7 removed the
+    # `render_behavioral_context` companion that used to project this view into the prompt as a
+    # "HIS STANDING REQUESTS" block. Preferences flow through the normal memory-retrieval bundle
+    # now, so the view here is checked as data, not as a prompt string.
+    assert len(ctx["preferences"]) <= 6 and len(ctx["tendencies"]) <= 6   # bounded (§30)
+    empty = await assemble_behavioral_context(live_pool, person_name=None)
+    # `empty` still reflects the live rows above; the important shape check is that a None person
+    # cleanly returns a dict with no relationship (fabrication guard, §27/§34).
+    assert empty["relationship"] is None
 
 
 async def test_explicit_correction_becomes_a_behavior_candidate(live_pool: Any) -> None:
     from sali.learning.behavior import BehaviorStore
     bs = BehaviorStore(live_pool)
-    bid = await bs.observe_feedback("stop reminding me constantly")   # negative social feedback (§13)
+    # A phrase the deliberately-narrow classifier matches: "stop repeating yourself" ≠ a task, ≠ an
+    # ordinary request. Behavioral candidates only come from second-person manner directives, so the
+    # test uses one of them. Post-Turn-7 the candidate must stay CANDIDATE (never auto-accepted).
+    bid = await bs.observe_feedback("stop repeating yourself")        # negative social feedback (§13)
     assert bid is not None
-    assert any(p["id"] == bid for p in await bs.pending())            # a scoped candidate, not auto-applied
+    pending_ids = {p["id"] for p in await bs.pending()}
+    assert bid in pending_ids                                          # candidate, not auto-applied
+    accepted_ids = {a["id"] for a in await bs.accepted()}
+    assert bid not in accepted_ids                                     # NOT auto-elevated (turn 7)
 
 
 # ── Cognitive OS integration: async life is exposed + bounded (§20) ─────────────────────────────────

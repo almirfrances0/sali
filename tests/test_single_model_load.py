@@ -16,7 +16,8 @@ import asyncio
 from typing import Any
 
 from sali.config.settings import ModelSettings
-from sali.provider.ollama import _gpu_lease
+from sali.provider.authority import InferenceKind
+from sali.provider.ollama import _inference_lease
 from sali.provider.presets import CREATIVE, DETERMINISTIC
 
 
@@ -26,7 +27,7 @@ async def test_gpu_lease_never_runs_two_generations_concurrently() -> None:
     state = {"concurrent": 0, "max": 0}
 
     async def generation() -> None:
-        async with _gpu_lease():
+        async with _inference_lease(InferenceKind.COGNITION):
             state["concurrent"] += 1
             state["max"] = max(state["max"], state["concurrent"])
             await asyncio.sleep(0.02)

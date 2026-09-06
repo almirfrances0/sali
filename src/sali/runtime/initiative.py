@@ -14,6 +14,7 @@ already lives (commitments, obligations, goals, external objects, routines).
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -21,7 +22,8 @@ from typing import Any
 # deterministic base importance per initiative source (§10) — never the model's say-so
 _SOURCE_IMPORTANCE: dict[str, float] = {
     "commitment": 0.80, "obligation": 0.70, "goal": 0.60, "capability_gap": 0.55,
-    "environment": 0.40, "routine": 0.45, "self": 0.35,
+    "open_loop": 0.50, "environment": 0.40, "routine": 0.45, "curiosity": 0.35,
+    "self": 0.35,
 }
 
 
@@ -121,6 +123,47 @@ class InitiativeEngine:
                 priority_score=sc["priority_score"], urgency_score=sc["urgency_score"],
                 risk_score=sc["risk_score"], confidence=sc["confidence"])
             touched.append(str(iid))
+
+        # 5) open loops (§6): unresolved matters Sali has mental space for. High-priority loops
+        # become initiative candidates so they surface for consideration. Low-priority loops stay
+        # dormant until they're reinforced (touched again).
+        with contextlib.suppress(Exception):
+            from sali.tasks.open_loops import OpenLoopStore
+            for loop in await OpenLoopStore(self._pool).as_initiative_candidates(limit=budget):
+                if len(touched) >= budget:
+                    break
+                # Urgency scales with the loop's own priority (which rises on reinforcement).
+                urgency = min(0.9, 0.3 + 0.7 * float(loop["priority"]))
+                sc = score(source="open_loop", urgency=urgency, risk=0.15,
+                           confidence=min(0.85, 0.4 + 0.5 * float(loop["priority"])))
+                iid, _ = await inits.upsert_candidate(
+                    source="open_loop", subject_ref=str(loop["id"]),
+                    title=f"Follow up: {str(loop['title'])[:80]}",
+                    reason_codes=[f"open_loop_{loop['kind']}"],
+                    priority_score=sc["priority_score"], urgency_score=sc["urgency_score"],
+                    risk_score=sc["risk_score"], confidence=sc["confidence"])
+                touched.append(str(iid))
+
+        # 6) curiosities (§5): knowledge gaps Sali repeatedly encounters. Only the HIGHEST-priority
+        # feed the initiative loop — idle-time investigation is legitimate, but background research
+        # must not dominate real user work. Deliberately low base importance (0.35) so a strong
+        # curiosity never outranks a goal, obligation, or commitment.
+        with contextlib.suppress(Exception):
+            from sali.learning.curiosity import CuriosityStore
+            for c in await CuriosityStore(self._pool).as_initiative_candidates(limit=3):
+                if len(touched) >= budget:
+                    break
+                # Urgency stays low for curiosities — even a strong one is patient work.
+                urgency = 0.25 + 0.35 * min(1.0, float(c["times_encountered"]) / 8.0)
+                sc = score(source="curiosity", urgency=urgency, risk=0.1,
+                           confidence=0.5)
+                iid, _ = await inits.upsert_candidate(
+                    source="curiosity", subject_ref=str(c["id"]),
+                    title=f"Investigate: {str(c['subject'])[:80]}",
+                    reason_codes=["knowledge_gap"],
+                    priority_score=sc["priority_score"], urgency_score=sc["urgency_score"],
+                    risk_score=sc["risk_score"], confidence=sc["confidence"])
+                touched.append(str(iid))
         return touched
 
     async def next_wake(self, *, now: datetime | None = None) -> datetime | None:

@@ -51,9 +51,12 @@ class EvidenceState(StrEnum):
 
 
 class ExperienceStore:
-    def __init__(self, pool: Any, publisher: Any = None) -> None:
+    def __init__(self, pool: Any, publisher: Any = None, provider: Any = None) -> None:
         self._pool = pool
         self._publisher = publisher
+        # Optional, and only ever used to NAME a capability (see `_capability_name`). Read paths — the
+        # API's read-only routes — construct this store without one and behave exactly as before.
+        self._provider = provider
 
     # ── experience extraction on task PASS, before cleanup (§18/§19) ─────────────────────────────────
     async def extract_and_persist(self, task_id: UUID) -> dict[str, Any] | None:
@@ -108,12 +111,90 @@ class ExperienceStore:
             #    "I can do this in THIS environment", evidence-backed, never a universal claim. Best-effort.
             with contextlib.suppress(Exception):
                 from sali.learning.capability import CapabilityStore
-                await CapabilityStore(self._pool, self._publisher).from_experience(record)
+
+                record["capability_name"] = await self._capability_name(record)
+                store = CapabilityStore(self._pool, self._publisher)
+                await store.from_experience(record)
+                # AND CREDIT THE USE. `record_use` had no caller anywhere, so `last_used`, `use_count`
+                # and `capability_usage` stayed empty forever: a capability could be "verified" at
+                # confidence 0.95 having never once been exercised, which is the difference between a
+                # claim and a competence. A finished task IS the exercise, and this is where the evidence
+                # exists — the objective, the outcome, and the task id that backs it.
+                await store.record_use(
+                    name=record["capability_name"], scope="environment",
+                    scope_ref=record.get("scope_ref") or "local",
+                    action=(record.get("objective") or "")[:200],
+                    result=(record.get("result") or record.get("headline") or "")[:400],
+                    success=True, verified=verified, task_id=task_id)
+                # The gap opened when this task was planned is closed by evidence, and this is also
+                # where it finally gets its real name — the same name from _capability_name, so the
+                # acquisition and the capability it produced agree.
+                from sali.learning.capability_acquisition import CapabilityAcquisitionStore
+
+                acq = CapabilityAcquisitionStore(self._pool, self._publisher)
+                live = await acq.for_task(task_id)
+                if live is not None:
+                    await acq.acquired(UUID(str(live["id"])),
+                                       capability_name=record["capability_name"])
         if record["lesson"]:
             await self._emit("experience.lesson_extracted", task_id,
                              {"memory_id": str(mem.id), "lesson": record["lesson"][:160]})
         await self._emit("memory.consolidated", task_id, {"memory_id": str(mem.id)})
         return record
+
+    _NAME_PROMPT = (
+        "A task just finished successfully. Name the reusable SKILL it demonstrates — not this task.\n\n"
+        "Objective: {objective}\nSteps that worked: {steps}\n\n"
+        "Answer with a short lowercase skill name, 2-5 words, no punctuation, no specifics: no file "
+        "paths, no folder names, no project names, no counts. It must be the same name the next time a "
+        "task of this kind succeeds, so that the skill is recognised instead of learned again.\n"
+        "Good: write a python archive script / build a static tailwind site / configure an nginx vhost\n"
+        "Bad: write a python backup script for the Photos folder into ~/Pictures/archive\n"
+        "Return only the name."
+    )
+
+    async def _capability_name(self, record: dict[str, Any]) -> str:
+        """The reusable name for the skill this task demonstrated.
+
+        THIS IS THE ANTI-RELEARN HINGE. `from_experience` used to name the capability after the raw
+        objective, so every task minted a unique string and nothing could ever match a later request:
+        one row read "Write a Python backup script that compresses the Photos folder into a timestamped
+        zip archive at ~/Pictures/archive/." — an objective, not a skill.
+
+        I tried to derive the name mechanically first, because it would have been free. It does not work:
+        normalising three real, semantically identical objectives produced three different keys
+        (`write:compresses-photos-python`, `write:archives-dated-documents`,
+        `write:photos-python-script`) because word choice decided identity. Naming has to be done by
+        something that understands the sentence.
+
+        So: ONE inference, once per completed task, on the background path after Almir already has his
+        reply — never per turn. If there is no provider, or the call fails, or it answers with something
+        unusable, the objective is used exactly as before, so this can only improve on the old behaviour.
+        """
+        objective = (record.get("objective") or "").strip()
+        if self._provider is None or not objective:
+            return objective[:120]
+        try:
+            from sali.provider.base import ChatMessage
+
+            steps = record.get("procedure") or []
+            res = await self._provider.chat([ChatMessage(
+                role="user",
+                content=self._NAME_PROMPT.format(
+                    objective=objective[:400],
+                    steps=", ".join(str(x) for x in steps[:8])[:400] or "(none recorded)"),
+            )])
+            name = " ".join((res.content or "").strip().lower().split())
+            name = name.strip(" .\"'`\n")
+            # Guard rails: a name that is too long, or that still carries the task's specifics, is worse
+            # than useless — it looks reusable and never matches. Reject and fall back.
+            if not (2 <= len(name.split()) <= 6):
+                return objective[:120]
+            if any(ch in name for ch in "/~\\") or any(c.isdigit() for c in name):
+                return objective[:120]
+            return name[:120]
+        except Exception:  # noqa: BLE001 - naming is an improvement, never a requirement
+            return objective[:120]
 
     async def _persist_procedure(self, task_id: UUID, record: dict[str, Any]) -> None:
         steps = record["procedure"]

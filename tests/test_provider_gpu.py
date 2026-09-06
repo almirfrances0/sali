@@ -1,16 +1,20 @@
-"""GPU safety guard: every model call takes a machine-wide single-generation lease (in-process
-semaphore → resource gate → cross-process flock), so Sali can never drive two concurrent generations
-onto the card and overload the machine into a shutdown — the model is only ever generating once."""
+"""GPU safety guard: every model call takes the machine-wide inference lease (authority → in-process
+semaphore → cross-process flock → resource gate), so Sali can never drive two concurrent generations
+onto the card and overload the machine into a shutdown — the model is only ever generating once.
+
+The CROSS-PROCESS half of that claim is proved in tests/test_one_mind.py, which holds the flock from
+a real second process; these tests cover the in-process half and the degradation paths."""
 
 from __future__ import annotations
 
 import asyncio
 
+from sali.provider.authority import InferenceKind
 from sali.provider.ollama import (
     _INFERENCE,
     _gpu_gate,
-    _gpu_lease,
     _gpu_snapshot,
+    _inference_lease,
     _inference_lock_fd,
 )
 
@@ -37,7 +41,7 @@ async def test_only_one_inference_slot() -> None:
 
 async def test_lease_serializes_and_releases() -> None:
     # The lease admits one holder and releases cleanly, so back-to-back generations don't deadlock.
-    async with _gpu_lease():
+    async with _inference_lease(InferenceKind.COGNITION):
         assert _INFERENCE.locked()  # the lease holds the in-process slot for its whole body
     assert not _INFERENCE.locked()
     # a second, sequential lease still acquires (the cross-process flock was released)
@@ -45,7 +49,7 @@ async def test_lease_serializes_and_releases() -> None:
 
 
 async def _run_lease() -> None:
-    async with _gpu_lease():
+    async with _inference_lease(InferenceKind.COGNITION):
         pass
 
 

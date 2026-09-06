@@ -26,8 +26,9 @@ class ConsolidationResult:
     episodes_created: int = 0
     stm_pruned: int = 0
     tool_experiences: int = 0
+    overclaims_recorded: int = 0   # §44: recurring over-claim families turned into a durable lesson
 
     @property
     def did_something(self) -> bool:
         return bool(self.procedures or self.failures_recorded or self.episodes_created
-                    or self.tool_experiences)
+                    or self.tool_experiences or self.overclaims_recorded)
