@@ -68,10 +68,18 @@ public struct ChatMessage: Identifiable, Sendable, Equatable {
     /// The "What Sali did" trail this turn produced, carried onto the finalized bubble so the record of
     /// the work survives the end of the stream instead of being thrown away with the live state.
     public var steps: [ActivityStep] = []
+    /// What this reply cost: tokens the model generated, and how long the turn took. Carried onto the
+    /// settled bubble for the same reason `steps` is — the live counter dies with the live turn, so
+    /// the number disappeared at the exact moment it stopped being a progress indicator and became a
+    /// FACT about the reply. Zero means "not measured" (a replayed turn, or history from the server),
+    /// which renders as nothing rather than as "0 tok".
+    public var generatedTokens: Int = 0
+    public var generationSeconds: Double = 0
 
     public init(id: String = UUID().uuidString, role: ChatRole, text: String, timestamp: Date = Date(),
          isAgentInitiated: Bool = false, sendStatus: SendStatus? = nil, attachment: FileAttachment? = nil,
-         agentImportance: String? = nil, steps: [ActivityStep] = []) {
+         agentImportance: String? = nil, steps: [ActivityStep] = [],
+         generatedTokens: Int = 0, generationSeconds: Double = 0) {
         self.id = id
         self.role = role
         self.text = text
@@ -81,6 +89,8 @@ public struct ChatMessage: Identifiable, Sendable, Equatable {
         self.attachment = attachment
         self.agentImportance = agentImportance
         self.steps = steps
+        self.generatedTokens = generatedTokens
+        self.generationSeconds = generationSeconds
     }
 }
 
@@ -107,7 +117,10 @@ private extension ChatMessage {
                    role: role,
                    text: m.content,
                    timestamp: m.createdAt ?? Date(),
-                   attachment: att)
+                   attachment: att,
+                   // Only Sali's replies. A token count under Almir's own message would be measuring
+                   // the wrong thing — his message is an input, not something that was generated.
+                   generatedTokens: role == .user ? 0 : (m.tokenCount ?? 0))
     }
 }
 
@@ -158,7 +171,30 @@ public final class ChatViewModel: ObservableObject {
     /// timeout, or a completion replayed after a reconnect. `nil` means "nothing is running" — the clock
     /// must never keep counting for work that already finished, which is exactly the kind of decaying
     /// state this screen is not allowed to show.
-    @Published public var turnStartedAt: Date?
+    @Published public var turnStartedAt: Date? {
+        didSet {
+            // The live count belongs to ONE turn, so its lifetime is the turn clock's. Every teardown
+            // route that already exists — completion, stop, error, revocation, timeout, a completion
+            // replayed after a reconnect — clears the clock, and therefore clears this too; a route
+            // added later cannot forget to. Only nil↔non-nil transitions count, because the clock is
+            // also re-assigned its own value mid-turn (`turnStartedAt ?? event.timestamp`).
+            guard (turnStartedAt == nil) != (oldValue == nil) else { return }
+            liveTokens = 0
+            liveTokenRate = 0
+        }
+    }
+
+    /// Tokens the model has actually generated this turn, and the rate — from `agent.generating`,
+    /// sampled about four times a second straight off the provider stream.
+    ///
+    /// This is the only number on the screen that reflects real generation. The typewriter in the
+    /// bubble is a REPLAY: the backend finishes the whole answer, then re-paces it through
+    /// `agent.token` at a fixed 25ms per piece, so its speed says nothing about whether Sali is
+    /// working or how hard. Counting starts while he is still THINKING — reasoning tokens are
+    /// counted too — so the number is moving from the first moment of the turn rather than only
+    /// once prose appears. Cumulative across a turn's tool iterations, so it never counts backwards.
+    @Published public private(set) var liveTokens: Int = 0
+    @Published public private(set) var liveTokenRate: Double = 0
 
     /// The task whose workspace chat uploads target, and whose artifacts surface inline (§10). nil when Sali
     /// has no active task — attaching is disabled then.
@@ -437,10 +473,13 @@ public final class ChatViewModel: ObservableObject {
         isSending = false
         activity = nil
         currentRunId = nil
-        turnStartedAt = nil
 
         // Preserve the partial reply as a finalized turn (same identity, plus this turn's activity trail).
+        // BEFORE `turnStartedAt` is cleared: finalize reads the turn's token count, and clearing the
+        // clock zeroes it through the didSet. A stopped turn still cost what it cost, and that number
+        // is arguably more interesting here than on a turn that ran to completion.
         finalizeStreaming(finalText: nil)
+        turnStartedAt = nil
         streamBuffer = ""
         activitySteps = []
         isQueued = false
@@ -472,6 +511,15 @@ public final class ChatViewModel: ObservableObject {
         stoppedRunIds.removeAll()
         stoppedRunOrder.removeAll()
         loadState = .idle
+    }
+
+    /// Forget the persisted chat bookkeeping. Called on an ERASE, not on an ordinary reset: these
+    /// are ids of messages the server no longer has, and keeping them means a future message that
+    /// reuses an id is silently swallowed as "already seen".
+    public func purgePersistedState() {
+        seenAgentOrder.removeAll()
+        seenAgentSet.removeAll()
+        UserDefaults.standard.removeObject(forKey: Self.seenAgentKey)
     }
 
     // MARK: - Files & images (conversation-level, §10)
@@ -693,7 +741,8 @@ public final class ChatViewModel: ObservableObject {
         // A run the user stopped is over as far as this client is concerned. The backend keeps emitting
         // for a beat after `conversation/cancel`; those tokens must not resurrect the turn or duplicate
         // the answer. Checked before anything else so no other branch can act on them.
-        if event.type == .messageDelta || event.type == .messageCompleted,
+        if event.type == .messageDelta || event.type == .messageCompleted
+            || event.type == .generating,
            let runId = event.runId, stoppedRunIds.contains(runId) {
             return
         }
@@ -702,7 +751,7 @@ public final class ChatViewModel: ObservableObject {
         // replay window overlaps live delivery), and applying an `agent.message`/`agent.final` twice would
         // double-append it. Token deltas are ephemeral (never persisted, never replayed) and high-volume,
         // so they stay OUT of the set — otherwise it would grow without bound during a long reply.
-        if event.type != .messageDelta {
+        if event.type != .messageDelta && event.type != .generating {
             guard !processedEventIDs.contains(event.id) else { return }
             processedEventIDs.insert(event.id)
             if processedEventIDs.count > 3000 {
@@ -718,7 +767,7 @@ public final class ChatViewModel: ObservableObject {
         if let evSession = event.sessionId, let mine = chatSessionId, evSession != mine {
             switch event.type {
             case .messageStarted, .messageDelta, .messageCompleted,
-                 .messageIterationBoundary:
+                 .messageIterationBoundary, .generating:
                 return
             // .agentMessage is DELIBERATELY not dropped by the cross-session filter (Almir §6):
             // a Sali-initiated message from a task-continuation session, or from a proactive
@@ -841,6 +890,20 @@ public final class ChatViewModel: ObservableObject {
             // Keep the origin we already have (the send) so the clock doesn't restart when the backend
             // picks the turn up; a turn we didn't start gets its origin from the event.
             turnStartedAt = turnStartedAt ?? event.timestamp ?? Date()
+            armTimeoutWatcher()
+
+        case .generating:
+            // Ephemeral and un-replayed, so a frame for a turn that already settled is stale by
+            // definition — the same guard every other turn-stream event uses.
+            guard !alreadyFinalized(event.runId) else { return }
+            if let r = event.runId { currentRunId = r }
+            // He is generating, therefore the turn is live: adopt it even if the run event was
+            // missed, so the count is never stranded at zero behind a dropped frame.
+            if turnStartedAt == nil { turnStartedAt = event.timestamp ?? Date() }
+            isSending = true
+            isQueued = false
+            if let n = event.int("tokens") { liveTokens = n }
+            liveTokenRate = event.double("tps") ?? liveTokenRate
             armTimeoutWatcher()
 
         case .messageDelta:
@@ -1027,10 +1090,11 @@ public final class ChatViewModel: ObservableObject {
             self.flushNow()
             self.isSending = false
             self.activity = nil
-            self.turnStartedAt = nil
+            // Finalize first — see `stop()`: clearing the clock zeroes the turn's token count.
             if let str = self.streaming, !str.text.isEmpty {
                 self.finalizeStreaming(finalText: nil)
             }
+            self.turnStartedAt = nil
         }
     }
 
@@ -1110,6 +1174,13 @@ public final class ChatViewModel: ObservableObject {
         // The activity trail is the record of what Sali actually did — carry it onto the finished turn
         // instead of discarding it when the live state clears.
         final.steps = activitySteps
+        // Same for the cost. Read HERE and not later: `turnStartedAt` is cleared by the completion
+        // handler moments after this runs, and clearing it zeroes `liveTokens` through its didSet —
+        // so a read even one statement later would always find 0.
+        final.generatedTokens = liveTokens
+        if let started = turnStartedAt {
+            final.generationSeconds = Date().timeIntervalSince(started)
+        }
         // Attach a research report announced during this turn (stashed before the summary streamed).
         if let rep = pendingReport, rep.runId == nil || rep.runId == final.id {
             if final.attachment == nil { final.attachment = rep.attachment }

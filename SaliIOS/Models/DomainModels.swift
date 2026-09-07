@@ -68,9 +68,15 @@ public struct ConversationMessage: Codable, Identifiable, Sendable, Equatable {
     /// A file Sali sent, carried on the history so it renders as a downloadable card and survives a
     /// reload (durable delivery — a live-only task.artifact.created card vanished on refresh).
     public let attachment: MessageAttachmentDTO?
+    /// What this reply cost, from `message.token_count` — written on every row since the table
+    /// existed and never read back until now. It is what makes the count survive a relaunch: without
+    /// it the app can only show a cost for turns it personally watched stream, so every past reply
+    /// came back blank. Optional because user rows and older servers may not carry it.
+    public let tokenCount: Int?
 
     enum CodingKeys: String, CodingKey {
         case id, seq, role, content, model, createdAt = "created_at", attachment
+        case tokenCount = "token_count"
     }
 }
 

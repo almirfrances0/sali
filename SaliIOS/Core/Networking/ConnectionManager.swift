@@ -142,7 +142,13 @@ public final class ConnectionManager: ObservableObject {
     public let pathObserver: NetworkPathObserver
     public let probe: any IdentityProbing
     private weak var applier: ConnectionApplying?
-    private let remoteFallback: APIConfiguration
+    /// Where "remote" points. A `var`, because it used to be a `let` captured once at init from
+    /// whatever configuration existed at launch — on a fresh install, the hardcoded default. Typing
+    /// your own URL in onboarding logged you in and then, about a second later, `switchToRemote`
+    /// probed this stale value and overwrote the typed URL with the default, persisting it. The
+    /// "type your own API URL, it's shareable" feature could never have worked for anyone whose host
+    /// was not the default.
+    private var remoteFallback: APIConfiguration
 
     // Machinery
     private var discoveryCancellable: AnyCancellable?
@@ -180,6 +186,14 @@ public final class ConnectionManager: ObservableObject {
 
     /// Retarget the applier after construction (two-phase init in AppState). Also re-reads the
     /// persisted `forcedRemote` preference from the applier's TokenStore.
+    /// Point "remote" at a new host. Called ONLY from the user-initiated Settings/onboarding path
+    /// (`AppState.applyConfiguration`) — never from `applyTransport`, which carries LAN URLs and
+    /// would make the LAN address the remote fallback the moment you walked out of the house.
+    public func setRemoteFallback(_ cfg: APIConfiguration) {
+        remoteFallback = cfg
+        lastKnownGoodRemote = cfg
+    }
+
     public func rebind(applier: ConnectionApplying) {
         self.applier = applier
         self.forcedRemote = applier.forcedRemote
@@ -500,9 +514,19 @@ public final class ConnectionManager: ObservableObject {
         if Task.isCancelled { return }
         lastKnownGoodRemote = remoteFallback
 
-        // SECURITY (F1): same anchor check for remote. If Cloudflare is proxying a DIFFERENT
+    // SECURITY (F1): same anchor check for remote. If Cloudflare is proxying a DIFFERENT
         // Sali (misconfigured tunnel, migrated backend), refuse quietly rather than sending
         // credentials.
+        // A BOOTING Sali is not a different Sali. /identity answers runtime_id "" until the
+        // runtime attaches, and "" never matches the enrolled anchor — so every ordinary daemon
+        // restart produced the message reserved for a hostile host, and on remote it was a hard
+        // refusal with no self-heal, which left an off-LAN phone stranded after an erase. Treat an
+        // empty id as "not ready, retry"; only a genuine, non-empty mismatch is a different Sali.
+        if let probedIdentity, probedIdentity.runtimeId.isEmpty {
+            lastError = "Sali is still starting up — retrying"
+            state = .saliUnreachable
+            return
+        }
         if let probedIdentity, let enrolled = applier.enrolledRuntimeId,
            !enrolled.isEmpty, enrolled != probedIdentity.runtimeId {
             lastError = "remote /identity reports a different Sali (runtime_id doesn't match enrolled)"
@@ -520,7 +544,10 @@ public final class ConnectionManager: ObservableObject {
         // Only swap the config if it's not already on remote. Otherwise the WS re-establishment
         // is entirely the WS layer's job — we just reflect its state.
         let alreadyOnRemote = applier.currentConfiguration.baseURL == remoteFallback.baseURL
-        if !alreadyOnRemote {
+        // Adopt the remote configuration ONLY if we actually reached it. This apply used to sit
+        // outside the probe result, so a FAILED probe still swapped the whole app onto that host and
+        // saved it — replacing a URL that worked with one that had just refused to answer.
+        if !alreadyOnRemote, probedIdentity != nil {
             await applyAndAwaitConnected(
                 remoteFallback,
                 runtimeId: probedIdentity?.runtimeId ?? "",

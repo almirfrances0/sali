@@ -71,13 +71,47 @@ public final class PushRegistration: ObservableObject {
     /// `sandbox` or `production` (`devices.py: set_push_token`), and a debug build signed with
     /// `aps-environment = development` produces a SANDBOX token — "development" on the wire is a 500,
     /// not a synonym.
+    /// Which APNs environment this build's token actually belongs to.
+    ///
+    /// Read from the `aps-environment` entitlement signed into the app, NOT from the build
+    /// configuration. Those are different facts, and when they disagreed push broke completely and
+    /// silently: the entitlement said `development` for Debug AND Release, so a Release build held a
+    /// sandbox token while this property claimed "production". The backend picks the APNs host from
+    /// that string, Apple answered BadDeviceToken, the server pruned the token as dead, and the app
+    /// never re-registered. Reading the entitlement means the two can no longer disagree — whatever
+    /// the entitlement says, that is what we report.
     public static var apsEnvironment: String {
+        if let fromProfile = entitlementAPSEnvironment {
+            return fromProfile == "production" ? "production" : "sandbox"
+        }
+        // No embedded profile: the simulator, or a build installed without one. Fall back to the
+        // build flag, which is the best guess available and matches the old behaviour.
         #if DEBUG
-        "sandbox"
+        return "sandbox"
         #else
-        "production"
+        return "production"
         #endif
     }
+
+    /// `aps-environment` from the embedded provisioning profile, or nil if it cannot be read.
+    ///
+    /// The profile is CMS-wrapped, so the plist is extracted by locating the XML between its
+    /// `<?xml` header and closing `</plist>` rather than by parsing the signature.
+    static let entitlementAPSEnvironment: String? = {
+        guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+              let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .isoLatin1),
+              let start = text.range(of: "<?xml"),
+              let end = text.range(of: "</plist>")
+        else { return nil }
+        let plist = String(text[start.lowerBound..<end.upperBound])
+        guard let plistData = plist.data(using: .isoLatin1),
+              let root = try? PropertyListSerialization.propertyList(
+                  from: plistData, options: [], format: nil) as? [String: Any],
+              let entitlements = root["Entitlements"] as? [String: Any]
+        else { return nil }
+        return entitlements["aps-environment"] as? String
+    }()
 
     // MARK: - What to say about it
 

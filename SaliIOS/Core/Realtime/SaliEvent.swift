@@ -28,6 +28,9 @@ public struct SaliEvent: Identifiable, Sendable, Equatable {
         case .messageStarted:   return "Sali is responding…"
         case .messageDelta:     return "Sali is responding…"
         case .messageCompleted: return "Sali finished responding"
+        // Never an activity row: this is a counter, sampled several times a second. It belongs in the
+        // live status line, and a feed of "412 tokens" entries would bury everything Sali actually did.
+        case .generating:       return "Generating…"
         // Not shown as an activity label - the handler seals what was streamed and moves on.
         case .messageIterationBoundary: return "…"
         case .toolStarted:      return "Working: \(string("tool") ?? string("name") ?? "a tool")"
@@ -112,6 +115,11 @@ public struct SaliEvent: Identifiable, Sendable, Equatable {
         if case let .string(s)? = data[key] { return Int(s) }
         return nil
     }
+    public func double(_ key: String) -> Double? {
+        if case let .number(n)? = data[key] { return n }
+        if case let .string(s)? = data[key] { return Double(s) }
+        return nil
+    }
 
     /// A payload string that is safe to put in a sentence: trimmed, single-line, and empty treated as
     /// missing. Payload text is already capped server-side (120–200 chars at the emit sites).
@@ -142,6 +150,11 @@ public enum EventType: Sendable, Equatable, Hashable {
     /// a zipped project. Attaches it to the reply as a downloadable file (Almir is on his phone, so a
     /// local path can't reach him; this is how he actually gets a file).
     case fileSent
+    /// The model is producing tokens right now (backend: agent.generating, ephemeral — never
+    /// persisted and never replayed). Carries `tokens` produced so far and `tps`, sampled ~4x a
+    /// second from the provider stream. This is the only signal in the whole turn that reflects
+    /// real generation: `agent.token` is a re-paced replay of text the model already finished.
+    case generating
     case agentMessage, resourceIncident, resourceState, intentRevoked, error
     case connected, subscribed, pong
     /// Everything the chat turn-stream doesn't own. It used to be a bare catch-all, which is why ~40 of the
@@ -160,6 +173,7 @@ public enum EventType: Sendable, Equatable, Hashable {
         case "agent.run":        self = .messageStarted
         case "agent.token":      self = .messageDelta      // a streamed chunk; text in data.text
         case "agent.final":      self = .messageCompleted  // the settled assistant reply
+        case "agent.generating": self = .generating
         case "agent.thinking", "agent.status", "agent.retrieval": self = .toolProgress
         // Iter N's content was progress narration - the model returned with tool calls, so this was
         // not the final answer. See EventType.messageIterationBoundary above for the whole rationale.

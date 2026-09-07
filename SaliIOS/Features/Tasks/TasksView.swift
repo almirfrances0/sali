@@ -920,6 +920,15 @@ enum TaskSeenStore {
     static func markSeen(_ taskId: String, at date: Date = Date()) {
         UserDefaults.standard.set(date.timeIntervalSince1970, forKey: prefix + taskId)
     }
+
+    /// Drop every stamp. After an erase the task ids these are keyed by no longer exist anywhere,
+    /// so without this they sit in UserDefaults forever, one orphan per task ever opened.
+    static func purge() {
+        for key in UserDefaults.standard.dictionaryRepresentation().keys
+        where key.hasPrefix(prefix) {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
 }
 
 /// Task-scoped event handling shared by the list (health verdicts) and the detail screen (the pulse lane
@@ -1195,6 +1204,10 @@ struct TasksView: View {
     @StateObject private var viewModel = TasksViewModel()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    /// The task a notification (or a feed row) asked us to open. Bound to `navigationDestination`, so
+    /// setting it pushes the detail screen and clearing it pops back.
+    @State private var deepLinkedTask: String?
+
     private var records: [TaskRecord] { viewModel.boardState.value?.records ?? [] }
     private var activeTaskId: String? { viewModel.boardState.value?.activeTaskId }
 
@@ -1229,6 +1242,15 @@ struct TasksView: View {
                     PresenceToolbarItem()
                 }
                 .safeAreaInset(edge: .top, spacing: 0) { controlBar }
+                // A push about a task must OPEN that task. `openTask` set `focusedTaskID` and
+                // `consumeFocusedTask()` was never called by anything, so tapping a task
+                // notification switched to this tab and dropped the id — landing on an unfiltered
+                // list with no indication of which task it was about.
+                .navigationDestination(item: $deepLinkedTask) { TaskDetailView(taskId: $0) }
+        }
+        .onChange(of: appState.focusedTaskID) { _, id in
+            guard id != nil else { return }
+            deepLinkedTask = appState.consumeFocusedTask()
         }
         .task { await viewModel.loadAll(api: appState.api) }
         .onChange(of: appState.latestEvent?.id) { _, _ in

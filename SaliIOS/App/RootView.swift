@@ -80,15 +80,47 @@ private struct TabShell: View {
                 .tag(AppTab.sali)
         }
         .tint(Theme.Colors.accent)
+        // Belt to the UIImage's braces. SwiftUI applies `.symbolVariant(.fill)` to tab items
+        // automatically; this asks it not to. On its own it was NOT enough — the bar still came back
+        // filled on device, which is why `item(_:)` builds a UIImage that the substitution cannot
+        // reach. Kept because it costs nothing and covers any symbol added here later.
+        .environment(\.symbolVariants, .none)
     }
 
-    /// Selection is carried by three things at once, none of them a hue: the glyph FILLS, the ink jumps
-    /// from tertiary to full, and the label gains a weight step (the last two live in `SaliTabBarStyle`).
-    /// Any one of them alone is arguable in one scheme or the other; all three together are not.
+    /// ONE OUTLINE GLYPH PER TAB, in both states.
+    ///
+    /// Selection used to swap the glyph for its `.fill` variant, which is what made the selected tab
+    /// read as bold — a filled shape is a block of ink next to three line drawings, and it changes
+    /// the SUBJECT of the icon, not just its state. Selection is now carried by the two signals that
+    /// do not touch the drawing at all: the ink jumps from tertiary to full, and the label gains a
+    /// weight step (both in `SaliTabBarStyle`).
+    ///
+    /// The glyph is built as a `UIImage`, NOT as `Image(systemName:)`, and that is the whole point.
+    /// SwiftUI substitutes the `.fill` variant into any `Image(systemName:)` inside a `.tabItem`, and
+    /// `.environment(\.symbolVariants, .none)` did not stop it here — the icons still came back
+    /// filled on device. A `UIImage` never enters that substitution, so the symbol that is named is
+    /// the symbol that draws. The explicit configuration also pins the WEIGHT to `.regular`, which is
+    /// the other half of "not bold": the stock bar renders selected items heavier.
     private func item(_ tab: AppTab) -> some View {
-        Label(tab.title,
-              systemImage: appState.selectedTab == tab ? tab.selectedSymbol : tab.symbol)
+        Label {
+            Text(tab.title)
+        } icon: {
+            Image(uiImage: Self.glyph(tab.symbol))
+        }
     }
+
+    /// A template-rendered outline glyph at a fixed regular weight. Cached because `.tabItem` rebuilds
+    /// on every selection change and `UIImage(systemName:)` is not free.
+    @MainActor private static func glyph(_ name: String) -> UIImage {
+        if let cached = glyphCache[name] { return cached }
+        let config = UIImage.SymbolConfiguration(pointSize: 22, weight: .regular, scale: .medium)
+        let image = (UIImage(systemName: name, withConfiguration: config) ?? UIImage())
+            .withRenderingMode(.alwaysTemplate)
+        glyphCache[name] = image
+        return image
+    }
+
+    @MainActor private static var glyphCache: [String: UIImage] = [:]
 }
 
 // MARK: - Tab bar styling

@@ -126,6 +126,10 @@ struct SettingsView: View {
     @State private var showSignOutConfirmation = false
     @State private var modelError: String?
     @State private var showEraseConfirmation = false
+    @State private var sudoDraft: String = ""
+    @State private var sudoConfigured: Bool?
+    @State private var sudoSaving = false
+    @State private var sudoError: String?
     @State private var eraseConfirmText = ""
     @State private var isErasing = false
     @State private var eraseResult: String?
@@ -582,8 +586,82 @@ struct SettingsView: View {
                 }
                 .frame(minHeight: 44)
             }
+            sudoRow
         } header: {
             SectionHeader("Security")
+        } footer: {
+            Text("The sudo password is stored encrypted on your machine and handed straight to sudo. "
+                 + "Sali never sees it — not in his prompt, his logs, or his memory.")
+                .font(Theme.Typography.footnote)
+                .foregroundStyle(Theme.Colors.secondaryText)
+        }
+    }
+
+    /// Hand Sali the sudo password without ever putting it in front of him.
+    ///
+    /// He can ask for it out loud ("I need sudo for that — set it in Settings"); what he must never do
+    /// is RECEIVE it, because anything he receives is in the model's context, the turn journal and
+    /// potentially his memory. This field posts it to the vault instead, and the only thing that ever
+    /// reads it back is the askpass helper piping it into sudo. There is no way to read it out here —
+    /// the API exposes whether one is set, never the value.
+    @ViewBuilder
+    private var sudoRow: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.s) {
+            HStack(spacing: Theme.Spacing.m) {
+                Image(systemName: "lock.shield")
+                    .font(Theme.Typography.body)
+                    .foregroundStyle(Theme.Colors.secondaryText)
+                    .frame(width: 24)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Sudo password")
+                        .font(Theme.Typography.body)
+                        .foregroundStyle(Theme.Colors.primaryText)
+                    Text(sudoConfigured == true
+                         ? "Set — Sali can do elevated work on his machine."
+                         : sudoConfigured == false
+                           ? "Not set — he'll have to ask you for anything needing root."
+                           : "Checking…")
+                        .font(Theme.Typography.footnote)
+                        .foregroundStyle(Theme.Colors.secondaryText)
+                }
+            }
+            SecureField(sudoConfigured == true ? "Replace it" : "Set it", text: $sudoDraft)
+                .textContentType(.password)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                .frame(minHeight: 44)
+            if let sudoError {
+                Text(sudoError)
+                    .font(Theme.Typography.footnote)
+                    .foregroundStyle(Theme.Colors.danger)
+            }
+            Button(sudoSaving ? "Saving…" : "Save to the vault") { Task { await saveSudoPassword() } }
+                .disabled(sudoDraft.trimmingCharacters(in: .whitespaces).isEmpty || sudoSaving)
+                .frame(minHeight: 44)
+        }
+        .padding(.vertical, Theme.Spacing.xs)
+        .task { await loadSudoStatus() }
+    }
+
+    private func loadSudoStatus() async {
+        struct Status: Decodable { let configured: Bool }
+        guard let s: Status = try? await appState.api.get("secrets/sudo") else { return }
+        sudoConfigured = s.configured
+    }
+
+    private func saveSudoPassword() async {
+        sudoSaving = true
+        sudoError = nil
+        defer { sudoSaving = false }
+        struct Status: Decodable { let configured: Bool }
+        do {
+            let s: Status = try await appState.api.post(
+                "secrets/sudo", json: ["password": sudoDraft])
+            sudoConfigured = s.configured
+            sudoDraft = ""          // never keep it in memory a moment longer than the request
+            Haptics.success()
+        } catch {
+            sudoError = (error as? LocalizedError)?.errorDescription ?? "Couldn't save that."
         }
     }
 

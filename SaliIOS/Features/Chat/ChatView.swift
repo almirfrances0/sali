@@ -471,7 +471,9 @@ private struct ChatContentView: View {
                             text: viewModel.streaming?.text ?? "",
                             phase: livePhase,
                             startedAt: viewModel.turnStartedAt,
-                            steps: viewModel.activitySteps
+                            steps: viewModel.activitySteps,
+                            tokens: viewModel.liveTokens,
+                            tokenRate: viewModel.liveTokenRate
                         )
                         .padding(.top, liveGapAbove)
                         // NAMESPACED so the live bubble can never share SwiftUI identity with the settled
@@ -1316,6 +1318,19 @@ private struct TurnView: View {
                     ActivityTimeline(steps: message.steps)
                 }
 
+                // WHAT THIS REPLY COST, kept after the turn ends.
+                //
+                // The live counter dies with the live turn, so the number used to vanish at the exact
+                // moment it stopped being a progress indicator and became a fact about the answer —
+                // you could watch it climb and then never see the total. Sits in the same place as the
+                // live one, directly under "What Sali did", so the figure does not move when the turn
+                // settles. Zero means not measured (server history, or a turn replayed after a
+                // reconnect) and renders nothing rather than a misleading "0 tok".
+                if message.generatedTokens > 0 {
+                    TurnCostLine(tokens: message.generatedTokens,
+                                 seconds: message.generationSeconds)
+                }
+
                 // A VISIBLE copy control. A long-press context menu is invisible — nobody discovers a
                 // gesture on a wall of text, so the affordance has to be on screen. Quiet enough to
                 // ignore while reading, present enough to find without being told.
@@ -1546,6 +1561,17 @@ private enum TurnPhase: Equatable {
         default: nil
         }
     }
+
+    /// Is the model producing tokens right now? True while thinking and while writing — reasoning
+    /// tokens are generation too, and the count moves through both. False when the turn is queued
+    /// behind another (nothing of ours is being generated yet) and while a tool runs, where the
+    /// count is paused at a real total and a "per second" would be a lie about a shell command.
+    var isGenerating: Bool {
+        switch self {
+        case .thinking, .writing: true
+        case .queued, .working: false
+        }
+    }
 }
 
 /// The live turn: ONE status line pinned at the top (so no phase change can ever reflow the prose beneath
@@ -1556,6 +1582,8 @@ private struct LiveTurnView: View {
     let phase: TurnPhase
     let startedAt: Date?
     let steps: [ActivityStep]
+    let tokens: Int
+    let tokenRate: Double
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -1579,7 +1607,8 @@ private struct LiveTurnView: View {
                 // Then the live status - "Writing", "Web search", the running tool name. This is the
                 // one moving line on screen and it earns its position under the activity: what
                 // happened, above what is happening now.
-                TurnStatusLine(phase: phase, startedAt: startedAt)
+                TurnStatusLine(phase: phase, startedAt: startedAt,
+                               tokens: tokens, tokenRate: tokenRate)
 
                 // Then the message itself. The stream lands here and only here; earlier iterations'
                 // narration was moved into the activity trail above by the iteration_boundary event.
@@ -1594,6 +1623,37 @@ private struct LiveTurnView: View {
     }
 }
 
+/// What a finished reply cost: `412 tok · 7.2s · 57/s`.
+///
+/// Deliberately the quietest thing in the turn — tertiary ink, metadata size, monospaced digits so a
+/// column of replies lines up. It reports and never claims: these are the model's own eval_count and
+/// the wall clock, not an estimate.
+private struct TurnCostLine: View {
+    let tokens: Int
+    let seconds: Double
+
+    var body: some View {
+        HStack(spacing: Theme.Spacing.xs) {
+            Text("\(tokens.formatted(.number.grouping(.automatic))) tok")
+            if seconds >= 0.1 {
+                Text(verbatim: "·").foregroundStyle(Theme.Colors.tertiaryText.opacity(0.6))
+                Text(seconds >= 1 ? String(format: "%.1fs", seconds)
+                                  : String(format: "%.0fms", seconds * 1000))
+                // The rate needs a real interval underneath it; below a second it is noise.
+                if seconds >= 1 {
+                    Text(verbatim: "·").foregroundStyle(Theme.Colors.tertiaryText.opacity(0.6))
+                    Text("\(Int((Double(tokens) / seconds).rounded()))/s")
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .font(Theme.Typography.metadata.monospacedDigit())
+        .foregroundStyle(Theme.Colors.tertiaryText)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(tokens) tokens generated in \(String(format: "%.1f", seconds)) seconds")
+    }
+}
+
 /// `phase · elapsed`. One row, one height, for the whole turn.
 ///
 /// It REPORTS; it does not act. Stop lives in the composer, in one fixed place that is always on screen —
@@ -1602,6 +1662,11 @@ private struct LiveTurnView: View {
 private struct TurnStatusLine: View {
     let phase: TurnPhase
     let startedAt: Date?
+    /// Tokens the model has generated so far this turn, and the current rate. Zero until the first
+    /// `agent.generating` frame lands — a few hundred milliseconds into the turn, while Sali is still
+    /// thinking, because reasoning tokens count too.
+    let tokens: Int
+    let tokenRate: Double
 
     var body: some View {
         HStack(spacing: Theme.Spacing.s) {
@@ -1629,6 +1694,37 @@ private struct TurnStatusLine: View {
                     Text(elapsedLabel(from: startedAt, to: context.date))
                         .font(Theme.Typography.metadata.monospacedDigit())
                         .foregroundStyle(Theme.Colors.tertiaryText)
+                }
+
+                // THE ONE HONEST MEASURE OF WORK ON THIS SCREEN.
+                //
+                // The clock says how long this has been running; the typewriter below is a replay of
+                // text the model already finished. Neither answers "is he actually doing something".
+                // This does: it comes off the provider stream itself and moves while he is still
+                // thinking, before a single word of prose exists. Rendered from the first frame
+                // rather than only once prose flows — the count IS the sign of life during the long
+                // silent stretch, which is exactly when a still screen makes you doubt the app.
+                if tokens > 0 {
+                    Text(verbatim: "·")
+                        .font(Theme.Typography.metadata)
+                        .foregroundStyle(Theme.Colors.tertiaryText)
+                        .accessibilityHidden(true)
+                    Text("\(tokens.formatted(.number.grouping(.automatic))) tok")
+                        .font(Theme.Typography.metadata.monospacedDigit())
+                        .foregroundStyle(Theme.Colors.tertiaryText)
+                        // A count that animates its digits reads as a spinner rather than a number,
+                        // and this one changes four times a second.
+                        .contentTransition(.identity)
+                        .animation(nil, value: tokens)
+                    // The rate is dropped once generation stops: the total stays true, a "per second"
+                    // for something that is no longer happening does not.
+                    if tokenRate >= 1, phase.isGenerating {
+                        Text("\(Int(tokenRate.rounded()))/s")
+                            .font(Theme.Typography.metadata.monospacedDigit())
+                            .foregroundStyle(Theme.Colors.tertiaryText.opacity(0.7))
+                            .contentTransition(.identity)
+                            .animation(nil, value: tokenRate)
+                    }
                 }
             }
 

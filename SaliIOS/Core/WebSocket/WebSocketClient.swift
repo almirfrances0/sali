@@ -235,6 +235,17 @@ public final class WebSocketClient: ObservableObject {
             // The server replays at most `replayBatchCap` events per subscribe. If it filled the batch, our
             // watermark has advanced but there is still a gap — ask again until it comes back short.
             let replayed = (json["replayed"] as? Int) ?? 0
+            // OUR CURSOR CAN BE PAST THE END OF THE LOG. `lastSequence` only ever rises and is
+            // persisted, so a datastore restore — or any reset that restarts the sequence — leaves
+            // us asking for events after a point the server will never reach again. Replay then
+            // returns nothing FOREVER, which is byte-identical to "you are up to date", and a
+            // mid-turn socket drop stops self-healing with nothing to indicate why. The server now
+            // reports its tail, so the condition is finally detectable: drop the cursor and re-sync.
+            if let maxSeq = json["max_seq"] as? Int, lastSequence > maxSeq {
+                resetSequence()
+                subscribeForRecovery()
+                return
+            }
             if replayed >= Self.replayBatchCap { subscribeForRecovery() }
             didFinishReplay.send(())
             return

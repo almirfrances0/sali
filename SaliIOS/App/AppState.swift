@@ -457,6 +457,11 @@ public final class AppState: ObservableObject {
     /// For automatic LAN↔Remote transport swaps on the SAME Sali runtime, use `applyTransport(_:runtimeId:)`.
     public func applyConfiguration(_ cfg: APIConfiguration) {
         configuration = cfg
+        // Tell the connection manager where "remote" now IS. Without this its `remoteFallback` stays
+        // whatever it was at launch — on a fresh install, the hardcoded default — and the next
+        // reconcile silently swaps the app back onto that host and persists it, discarding the URL
+        // just typed. Only here: this is the user-initiated path.
+        connection.setRemoteFallback(cfg)
         tokenStore.saveConfiguration(cfg)
         auth.updateConfiguration(cfg)
         ws.updateConfiguration(cfg)
@@ -526,6 +531,13 @@ public final class AppState: ObservableObject {
         liveEvents.removeAll()
         latestEvent = nil
         chatViewModel.reset()
+        // The persisted stores too, or the phone keeps describing a world the server has forgotten:
+        // banners about deleted tasks, dedup ids for deleted messages (which would swallow a new
+        // message reusing an id), and a "last looked at" stamp per task id that no longer exists.
+        // An erase that leaves these behind is not a reset, it is a half-reset that only looks clean.
+        chatViewModel.purgePersistedState()
+        notifications.clear()
+        TaskSeenStore.purge()
         snapshot = .idle
         snapshotUpdatedAt = nil
         liveTurnStreaming = false
@@ -609,10 +621,15 @@ public enum AppTab: String, CaseIterable, Hashable, Sendable {
         }
     }
 
-    /// The RESTING glyph. One family by construction: five simple, single-object outlines — a bubble, a
-    /// clock, a tray, a checked square, a ring around a core — drawn at one weight, each with a solid
-    /// counterpart in `selectedSymbol`. The old set mixed a two-object bubble pair, a medical ECG trace, a
-    /// tray, a checklist, and a ring: five different drawing styles, which is why the bar read as stock.
+    /// The glyph, in BOTH states. One family by construction: simple, single-object outlines — a
+    /// bubble, a clock, a checked square, a ring around a core — drawn at one weight. The old set
+    /// mixed a two-object bubble pair, a medical ECG trace, a tray, a checklist and a ring: five
+    /// different drawing styles, which is why the bar read as stock.
+    ///
+    /// There is no filled counterpart any more. Selection used to swap in `.fill`, which made the
+    /// selected tab a block of ink among four line drawings — the "bold icons" Almir asked to lose.
+    /// Selection is now carried entirely by ink tier and label weight (`SaliTabBarStyle`), so the
+    /// drawing itself never changes and the eye tracks one constant shape.
     public var symbol: String {
         switch self {
         case .chat:  "bubble.left"
@@ -623,16 +640,6 @@ public enum AppTab: String, CaseIterable, Hashable, Sendable {
         }
     }
 
-    /// The SELECTED glyph: the very same object, filled. Selection is a change of weight, never of subject —
-    /// so the eye tracks one shape moving between states instead of learning ten icons.
-    public var selectedSymbol: String {
-        switch self {
-        case .chat:  "bubble.left.fill"
-        case .now:   "clock.fill"
-        case .work:  "checkmark.square.fill"
-        case .sali:  "circle.circle.fill"
-        }
-    }
 }
 
 // MARK: - Presence

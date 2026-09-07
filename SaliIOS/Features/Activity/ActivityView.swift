@@ -142,13 +142,26 @@ final class NowViewModel: ObservableObject {
     @Published var scope: FeedScope = .milestones
     @Published var showsTechnical = false
 
+    /// What belongs in "what Sali did" — families, so a new event type in an existing family shows
+    /// up without an app release. Deliberately excludes the per-turn machinery (agent.status,
+    /// self.presence, context.assembled, attention.*, execution.*): it is real, and it is not news.
+    static let feedTypes = "task.,agent.message,goal.,commitment.,initiative.,learning.,memory.created,"
+        + "grounding.,workspace.,tool.discovery_synced,schedule."
+
     /// Seeds the feed from the durable event log. This is a SEED, not a poll: it runs once per refresh and
     /// everything newer arrives on the socket, de-duplicated against these rows by sequence.
     func seedHistory(api: APIClient) async {
         let hadValue = history.value != nil
         if !hadValue { history = .loading }
         do {
-            let rows: [DurableEventRow] = try await api.get("events", query: ["limit": "200"])
+            // ASK FOR MILESTONES, not the last 200 rows of anything. Measured on the live log,
+            // an unfiltered request came back as 24 agent.status, 18 self.presence, 12
+            // memory.created and turn housekeeping — with ZERO task, goal or Sali-initiated
+            // messages in it. "What did Sali do today" rendered empty on a day with eight
+            // conversations, because the interesting rows were pushed out by per-turn chatter.
+            // A trailing "." means "this family", so the backend keeps its own event vocabulary.
+            let rows: [DurableEventRow] = try await api.get(
+                "events", query: ["limit": "200", "types": Self.feedTypes])
             history = .loaded(rows.compactMap(\.event))
         } catch {
             // Same posture as the snapshot: a transient failure keeps whatever we already have.
