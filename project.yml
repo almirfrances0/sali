@@ -17,11 +17,24 @@ targets:
     platform: iOS
     deploymentTarget: "17.0"
     sources:
+      # EXCLUDE EDITOR AND TOOL BACKUPS EVERYWHERE.
+      #
+      # XcodeGen globs these directories, so a `LifeView.swift.agenda-bak` sitting next to the real
+      # file was picked up as a bundled RESOURCE and shipped inside the app. It then broke the build
+      # outright the moment the backup was tidied away, because the generated project still
+      # referenced a path that no longer existed — a build failure caused by deleting a file that
+      # should never have been in the target. Excluding the patterns is the durable fix: source
+      # control and the working tree can hold whatever they like, and the app stops caring.
       - path: SaliIOS/App
+        excludes: &backups ["**/*-bak", "**/*.bak", "**/*.orig", "**/*.rej", "**/*~"]
       - path: SaliIOS/Core
+        excludes: *backups
       - path: SaliIOS/DesignSystem
+        excludes: *backups
       - path: SaliIOS/Models
+        excludes: *backups
       - path: SaliIOS/Features
+        excludes: *backups
       - path: SaliIOS/Assets.xcassets
     settings:
       base:
