@@ -1178,7 +1178,14 @@ private struct TranscriptRow: Identifiable {
 
             rows.append(TranscriptRow(id: message.id,
                                       message: message,
-                                      showsMark: message.role != .user && (!sameAuthor || isAgent),
+                                      // EVERY message from Sali carries his mark. Grouping runs of
+                                      // consecutive replies under one mark is the messaging-app habit,
+                                      // but here the transcript also carries proactive messages, task
+                                      // announcements and notifications — and a Sali line with no mark
+                                      // beside it reads as an orphan, or as the app talking rather than
+                                      // him. Almir: "all message from sali on the app in the chat must
+                                      // have the sali logo coz some message and notification doesn't".
+                                      showsMark: message.role != .user,
                                       gapAbove: gap,
                                       spine: spine))
             previous = message
