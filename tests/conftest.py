@@ -17,6 +17,26 @@ import pytest
 from sali.config.settings import DbSettings, ModelSettings, Settings
 from sali.provider.fake import FakeModelProvider
 
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_task_archive(tmp_path_factory: Any) -> Iterator[None]:
+    """Keep the suite out of Almir's real sali-works archive.
+
+    Any test that creates a task writes <works>/tasks/<id>/meta.json through
+    `sali.tasks.logger`. Without this the suite has been permanently littering his workspace — and
+    those folders are what the app's History screen reads."""
+    import os
+    root = tmp_path_factory.mktemp("sali-works-test")
+    previous = os.environ.get("SALI_WORKS_ROOT")
+    os.environ["SALI_WORKS_ROOT"] = str(root)
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("SALI_WORKS_ROOT", None)
+        else:
+            os.environ["SALI_WORKS_ROOT"] = previous
+
 TEST_DB = "sali_test"
 
 

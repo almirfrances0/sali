@@ -13,6 +13,7 @@ rather than fabricating a pass/fail it did not observe.
 from __future__ import annotations
 
 import re
+import os
 from pathlib import Path
 
 from sali.tools.base import VerifyResult
@@ -52,6 +53,19 @@ async def service_active(unit: str) -> VerifyResult | None:
         return None
     state = out.splitlines()[0] if out else ("active" if rc == 0 else "unknown")
     return VerifyResult(state == "active", f"service {unit} is {state}")
+
+
+async def process_running(name: str) -> VerifyResult | None:
+    """Whether a process matching `name` is running right now (`pgrep -fi`, case-insensitive over the full
+    command line). Used to VERIFY a claim that an app was closed/killed: `success=True` means it is STILL
+    running — so the claim is false. `None` when pgrep is unavailable. Note it reports presence, not
+    ownership: a root-owned GUI app (launched via pkexec) shows as running here even though the daemon
+    could not have signalled it, which is exactly the case that must be caught rather than claimed done."""
+    rc, out, _err, ran = await _run(["pgrep", "-fi", "--", name])
+    if not ran:
+        return None
+    running = rc == 0 and bool((out or "").strip())
+    return VerifyResult(running, f"{name} is {'still running' if running else 'not running'}")
 
 
 async def service_loaded(unit: str) -> bool | None:
@@ -111,6 +125,27 @@ def path_exists(path: str) -> VerifyResult | None:
         return None  # globs/vars/relative paths can't be resolved reliably here → no opinion
     exists = Path(path).expanduser().exists()
     return VerifyResult(exists, f"{path} " + ("exists" if exists else "does not exist"))
+
+
+def path_is_real_file(path: str) -> VerifyResult | None:
+    """Is this path a file that actually lives HERE — not a link to one somewhere else?
+
+    `path_exists` follows symlinks, which is right for "is there something at this path" and wrong for
+    "did you create this file". A symlink satisfies the first and not the second: the bytes are still
+    only in the other place, and moving or copying the directory leaves a dangling link. Used by the
+    completion gates, which are asserting authorship, not reachability."""
+    if any(c in path for c in "*$") or not (path.startswith("/") or path.startswith("~")):
+        return None  # globs/vars/relative paths can't be resolved reliably here → no opinion
+    p = Path(path).expanduser()
+    if p.is_symlink():
+        try:
+            target = os.readlink(p)
+        except OSError:
+            target = "?"
+        return VerifyResult(False, f"{path} is a symlink to {target}, not a file created here")
+    if not p.exists():
+        return VerifyResult(False, f"{path} does not exist")
+    return VerifyResult(True, f"{path} exists")
 
 
 def path_absent(path: str) -> VerifyResult | None:

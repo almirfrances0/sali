@@ -115,10 +115,39 @@ class ResidencyReport:
         }
 
 
+def normalize_ref(ref: str) -> str:
+    """Canonical form of an ollama model reference: 'sali' -> 'sali:latest', 'sali:pro' unchanged.
+
+    Public because more than one place has to decide "is this the same model?", and each one that
+    rolled its own base-name comparison got it wrong the same way (see `_same_model` below, and
+    `OllamaProvider.ensure_only_loaded`). One helper, so a third caller cannot diverge again.
+    """
+    name, _, tag = ref.partition(":")
+    return f"{name}:{tag or 'latest'}"
+
+
 def _same_model(loaded: str, chat_model: str) -> bool:
-    """Ollama reports 'sali:latest'; a caller may configure 'sali'. Compare on the base name so an
-    implicit :latest never reads as a different model — and a duplicate never hides behind a tag."""
-    return loaded.split(":", 1)[0] == chat_model.split(":", 1)[0]
+    """Ollama reports 'sali:latest'; a caller may configure 'sali'. Normalise an implicit tag to
+    ':latest' so those two never read as different models — and a duplicate never hides behind a
+    tag.
+
+    NOT a base-name comparison. That was the original implementation, and it silently equated every
+    tag of one name: with `sali:latest`, `sali:lite` and `sali:pro` all present (2026-09-06), three
+    genuinely different quants — 3.62, 2.86 and 4.47 bits/weight — compared EQUAL. Two failures came
+    out of that, both observed on this host:
+
+      1. Sali ran the wrong model without noticing. `sali:lite` was resident while settings named
+         `sali:latest`; every residency check reported the configured model present, so nothing
+         corrected it and cognition ran on the 2.86-bpw build.
+      2. Cognition could refuse to start outright. OLLAMA_MAX_LOADED_MODELS=2 permits two resident
+         models, so `sali:latest` + `sali:lite` together made `chat_runners` 2 —
+         `assert_single_residency` raises DuplicateResidency on that, and `heal()` cannot clear it
+         because it evicts only `chat_model` and leaves the other tag loaded. The refusal persists
+         until a human unloads one by hand.
+
+    Tags identify quantisation here, so they are load-bearing and must be compared.
+    """
+    return normalize_ref(loaded) == normalize_ref(chat_model)
 
 
 async def survey(client: Any, chat_model: str) -> ResidencyReport:

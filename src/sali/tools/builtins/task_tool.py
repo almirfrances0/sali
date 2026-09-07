@@ -20,7 +20,11 @@ from sali.tools.base import Tool, ToolResult
 from sali.tools.context import ToolContext
 from sali.tools.registry import ToolRegistry
 
-_STEP_STATES = ["done", "failed", "running", "skipped"]
+# 'blocked' is here because the runtime prompt tells Sali, verbatim, to "call advance_task with
+# status='blocked' and say plainly what you need from Almir" — and the tool used to reject exactly
+# that call. After three failed attempts the one instruction he is given was the one he could not
+# obey. The column already permits it (task_step CHECK allows blocked).
+_STEP_STATES = ["done", "failed", "running", "skipped", "blocked"]
 
 # ── Dead-work guard (autonomy) ───────────────────────────────────────────────────────────────────
 # An autonomy/continuation turn must never resurrect an objective Almir recently abandoned/revoked, or
@@ -158,16 +162,29 @@ def _verify_definition_of_done(task: Any, step_seq: int) -> tuple[bool, str]:
     roots = [root] if root else []
     roots += list(getattr(task, "allowed_write_roots", None) or [])
     missing: list[str] = []
+    linked: list[str] = []
     for p in paths:
         candidates = [p] if os.path.isabs(p) else [
             os.path.join(r, p) for r in roots if r
         ] or [p]
-        if not any(os.path.exists(c) for c in candidates):
+        # A symlink is NOT the file. os.path.exists() follows links, so pointing this path at a file
+        # in another directory used to satisfy the gate — which is exactly how one deliverable ended
+        # up split across two folders, half of it links. The step asked for a file HERE.
+        if any(os.path.exists(c) and not os.path.islink(c) for c in candidates):
+            continue
+        if any(os.path.islink(c) for c in candidates):
+            linked.append(p)
+        else:
             missing.append(p)
     if missing:
         return False, ("not done yet — the definition of done names files that do not exist on disk: "
                        + ", ".join(missing[:6])
                        + ". Create them with real tool calls, then mark the step done.")
+    if linked:
+        return False, ("not done yet — these are symlinks, not files you created here: "
+                       + ", ".join(linked[:6])
+                       + ". If the work really lives elsewhere, say so and change the step; do not "
+                         "satisfy the path with a link.")
     return True, ""
 
 
@@ -479,16 +496,19 @@ class PlanTask(Tool):
 class AdvanceTask(Tool):
     name = "advance_task"
     description = (
-        "Update your progress on the current task: mark a step done, failed, running, or skipped "
-        "(with an optional note of what happened). The task completes on its own once every step is "
-        "done. Steps are numbered from 1."
+        "Update your progress on the current task: mark a step done, failed, running, skipped, "
+        "or blocked (with a note of what happened — for failed or blocked, say what stopped "
+        "you, because that note is what Sali researches later to unblock the step). The task "
+        "completes on its own once every step is done. Steps are numbered from 1."
     )
     parameters = {
         "type": "object",
         "properties": {
             "step": {"type": "integer", "description": "The step number (1-based)."},
             "status": {"type": "string", "enum": _STEP_STATES},
-            "note": {"type": "string", "description": "Optional: what happened on this step."},
+            "note": {"type": "string", "description": "What happened on this step. For 'failed' or "
+                     "'blocked' this is required in practice: it becomes the error Sali researches "
+                     "in free time to get the step moving again."},
             "checkpoint": {"type": "object", "description": "Optional: save in-step progress (any keys) "
                            "so you resume MID-step, not from scratch, after a restart."},
         },

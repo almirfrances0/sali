@@ -691,6 +691,57 @@ async def revive_task(
     return {"revoked_task_id": str(task_id), "new_task_id": str(new_task.id), "status": "revived"}
 
 
+@router.delete("/tasks/{task_id}")
+async def delete_task(
+    task_id: UUID, request: Request, _: Identity = Depends(require_controller),
+) -> dict[str, Any]:
+    """Permanently delete a FINISHED task row (its steps/artifacts/reviews follow via ON DELETE CASCADE).
+
+    Distinct from cancel/abandon, which TOMBSTONE a live intent so no background path resurrects it. This
+    is the tidy-up for work that is already over — the abandoned experiments cluttering the Work screen.
+    A task that is still LIVE is refused rather than silently killed behind the owner's back: cancel it
+    first, then delete. Files already written under the workspace stay on disk."""
+    live = {"open", "running", "waiting", "blocked", "paused"}
+    pool = await _kernel(request).pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT status FROM sali.task WHERE id = $1", task_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="task not found")
+        status = str(row["status"])
+        if status in live:
+            raise HTTPException(
+                status_code=409,
+                detail=f"this task is still {status} — cancel it first, then delete it")
+        await conn.execute("DELETE FROM sali.task WHERE id = $1", task_id)
+    return {"task_id": str(task_id), "deleted": True, "was": status}
+
+
+@router.post("/factory-reset")
+async def factory_reset_endpoint(
+    payload: dict[str, Any], request: Request, _: Identity = Depends(require_controller),
+) -> dict[str, Any]:
+    """Erase everything Sali has learned, done, or remembered — the clean slate for going to production.
+
+    Wipes memories + the knowledge graph, every conversation and message, the event/audit log, all tasks
+    with their steps and artifacts, learning/experience/skills, schedules, commitments, initiatives — every
+    table except the few that keep the install valid. PRESERVED: the schema, the enrolled device + its
+    session, and the login password + chosen chat model, so the phone is never locked out of its own Sali.
+    Files on disk are deliberately NOT touched — this resets what Sali KNOWS, not the documents produced
+    together.
+
+    Irreversible, so it requires an explicit confirmation phrase in the body: {"confirm": "ERASE"}."""
+    if str(payload.get("confirm") or "").strip().upper() != "ERASE":
+        raise HTTPException(status_code=400,
+                            detail='confirmation required: send {"confirm": "ERASE"}')
+    from sali.db.reset import factory_reset
+
+    kernel = _kernel(request)
+    pool = await kernel.pool()
+    # The workspace is where the durable task/conversation/research archives live. Without this the
+    # Work screen's History (which reads those files, not the DB) survives a "reset" untouched.
+    return await factory_reset(pool, workspace=kernel.settings.permissions.workspace)
+
+
 # ── System health (§18) — resource stewardship surfaced with meaning ────────────────────────────────
 
 @router.get("/system")
@@ -1478,9 +1529,10 @@ async def set_model(request: Request, payload: dict[str, Any],
         raise HTTPException(
             status_code=422,
             detail=f"'{name}' has no tool-calling — Sali needs tools to work, so it can't be used")
-    # Point the provider at it + persist the choice.
-    with contextlib.suppress(Exception):
-        kernel.provider.set_active_model(name)
+    # Point the provider at it + persist the choice. NOT suppressed: this override is what EVERY
+    # subsequent inference reads (provider.chat_model), so if it silently failed the switch would be a
+    # lie — the app showing the new model while the brain kept answering on the old one. Fail loudly.
+    kernel.provider.set_active_model(name)
     # CRITICAL on a 12GB card: evict the model we just switched AWAY from (and any stray) so two 30B
     # MoEs never sit in VRAM together. Ollama holds up to 2 models and Sali pins keep_alive=24h, so
     # without this the old model lingers. The new one loads on the next turn into the freed VRAM.
@@ -1492,13 +1544,30 @@ async def set_model(request: Request, payload: dict[str, Any],
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE sali.sali_state SET active_chat_model = $1 WHERE id = true", name)
+        # Keep the self-model in lockstep: point the `thinks_with` edge at the new model NOW, so
+        # self_state reports the live model immediately (set_fact supersedes the old edge). Fail-open
+        # — the swap already succeeded via the provider + sali_state; a graph hiccup must not block it.
+        with contextlib.suppress(Exception):
+            from sali.core.enums import MemorySource
+            from sali.graph.writer import ensure_node, set_fact
+            sali_node = await conn.fetchrow(
+                "SELECT id FROM graph_node WHERE canonical_key='agent:sali' AND valid_until IS NULL")
+            if sali_node is not None:
+                model_node = await ensure_node(
+                    conn, node_type="model", name=name, canonical_key=f"model:{name}",
+                    source=MemorySource.SYSTEM_OBSERVATION)
+                await set_fact(conn, src_id=sali_node["id"], rel_type="thinks_with",
+                               dst_id=model_node.id, source=MemorySource.SYSTEM_OBSERVATION)
     # Broadcast live so the app updates the active model + shows/hides the image button immediately.
     if runtime is not None:
         with contextlib.suppress(Exception):
             await runtime._publisher.emit(
                 event_type="model.changed", subject_type="model", origin="system",
                 data={"name": name, "vision": vision, "tools": tools})
-    return {"active": name, "vision": vision, "tools": tools, "unloaded": unloaded}
+    # `effective` is read back OFF the provider — what the next turn will really run on. A client can
+    # compare it to `active` and know the switch landed instead of trusting the request it just sent.
+    return {"active": name, "vision": vision, "tools": tools, "unloaded": unloaded,
+            "effective": getattr(kernel.provider, "chat_model", name)}
 
 
 @router.get("/routines")

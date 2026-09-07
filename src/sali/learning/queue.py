@@ -29,24 +29,39 @@ class LearningItem:
     subject: str
     reason: str | None
     priority: int
+    # What this gap BLOCKED, when it blocked something. Learning that is not attached to the work it
+    # unblocks can never come back and finish it — the whole point of failure→learn→retry (§18).
+    task_id: UUID | None = None
+    step_seq: int | None = None
 
 
 async def enqueue(conn: Any, *, kind: str, subject: str, reason: str | None = None,
-                  priority: int = 5) -> bool:
+                  priority: int = 5, task_id: Any = None, step_seq: int | None = None) -> bool:
     """Add a learning item unless the same (kind, subject) is already pending. Returns True if added."""
     row = await conn.fetchrow(
-        "INSERT INTO learning_queue (kind, subject, reason, priority) VALUES ($1,$2,$3,$4) "
+        "INSERT INTO learning_queue (kind, subject, reason, priority, task_id, step_seq) "
+        "VALUES ($1,$2,$3,$4,$5,$6) "
         "ON CONFLICT (kind, subject) WHERE status='pending' DO NOTHING RETURNING id",
-        kind, subject[:280], reason, priority)
+        kind, subject[:280], reason, priority, task_id, step_seq)
+    if row is None and task_id is not None:
+        # The gap was already queued — from an earlier pass, or before it blocked anything. Attach the
+        # work now rather than dropping the link: the answer is coming either way, and without this the
+        # first sighting of a subject would permanently decide whether it can ever unblock a step.
+        await conn.execute(
+            "UPDATE learning_queue SET task_id=$3, step_seq=$4 "
+            "WHERE kind=$1 AND subject=$2 AND status='pending' AND task_id IS NULL",
+            kind, subject[:280], task_id, step_seq)
     return row is not None
 
 
 async def pending(conn: Any, *, limit: int = 10) -> list[LearningItem]:
     rows = await conn.fetch(
-        "SELECT id, kind, subject, reason, priority FROM learning_queue "
-        "WHERE status='pending' ORDER BY priority, created_at LIMIT $1", limit)
+        "SELECT id, kind, subject, reason, priority, task_id, step_seq FROM learning_queue "
+        # A gap that is holding up real work is researched before idle curiosity, whatever its priority.
+        "WHERE status='pending' ORDER BY (task_id IS NULL), priority, created_at LIMIT $1", limit)
     return [LearningItem(id=r["id"], kind=r["kind"], subject=r["subject"], reason=r["reason"],
-                         priority=r["priority"]) for r in rows]
+                         priority=r["priority"], task_id=r["task_id"],
+                         step_seq=r["step_seq"]) for r in rows]
 
 
 async def count_pending(conn: Any) -> int:
@@ -89,11 +104,18 @@ async def queue_gaps(conn: Any, *, budget: Budget | None = None) -> int:
     # Covers ALL tools. For execute_command, includes the specific command in the subject.
     if added < budget.max_new_per_pass:
         failing = await conn.fetch(
-            "SELECT tool_name, plan->'args'->>'command' AS command, count(*) AS fails "
-            "FROM tool_execution "
-            "WHERE success IS FALSE "
-            "  AND started_at > now() - make_interval(days => $1) "
-            "GROUP BY tool_name, plan->'args'->>'command' "
+            # The most RECENT failure's task/step comes along, so researching this gap can hand the
+            # answer back to the work that is waiting on it.
+            "SELECT te.tool_name, te.plan->'args'->>'command' AS command, count(*) AS fails, "
+            "  (array_agg(tx.task_id ORDER BY te.started_at DESC) "
+            "     FILTER (WHERE tx.task_id IS NOT NULL))[1] AS task_id, "
+            "  (array_agg(tx.step_seq ORDER BY te.started_at DESC) "
+            "     FILTER (WHERE tx.step_seq IS NOT NULL))[1] AS step_seq "
+            "FROM tool_execution te "
+            "LEFT JOIN task_execution tx ON tx.execution_id = te.id "
+            "WHERE te.success IS FALSE "
+            "  AND te.started_at > now() - make_interval(days => $1) "
+            "GROUP BY te.tool_name, te.plan->'args'->>'command' "
             "HAVING count(*) >= 3 ORDER BY count(*) DESC LIMIT $2",
             budget.scan_window_days, budget.max_new_per_pass)
         for r in failing:
@@ -102,6 +124,44 @@ async def queue_gaps(conn: Any, *, budget: Budget | None = None) -> int:
             cmd = r.get("command")
             subject = cmd if cmd and r["tool_name"] == "execute_command" else f"{r['tool_name']} (recurring failure)"
             if await enqueue(conn, kind="recurring_failure", subject=subject,
-                             reason=f"{r['tool_name']} failed {r['fails']}× recently", priority=2):
+                             reason=f"{r['tool_name']} failed {r['fails']}× recently", priority=2,
+                             task_id=r["task_id"], step_seq=r["step_seq"]):
+                added += 1
+
+    # 3) A STEP THAT IS ACTUALLY STUCK. The two sources above are statistical — they need a pattern
+    # (3+ failures) or attention's interest before Sali notices anything. But a single failed step on a
+    # live task is the case that matters most: work is stopped RIGHT NOW and one answer restarts it.
+    # Priority 1 (ahead of everything) and a wider window, because a blocked task can sit for days.
+    if added < budget.max_new_per_pass:
+        stuck = await conn.fetch(
+            "SELECT s.task_id, s.seq, s.description, s.last_error, s.failure_class "
+            "FROM task_step s JOIN task t ON t.id = s.task_id "
+            "WHERE s.status = 'failed' AND s.last_error IS NOT NULL "
+            "  AND t.status NOT IN ('done','failed','abandoned','cancelled','superseded') AND t.archived_at IS NULL "
+            # 'completed' was never a status this schema has — the terminal words are done/failed/
+            # abandoned/cancelled/superseded — so this guard used to admit finished AND ABANDONED
+            # work. Queueing research for a step on a task Almir stopped is the first half of
+            # resurrecting dead work.
+            "  AND NOT EXISTS (SELECT 1 FROM revoked_intent r "
+            "                  WHERE r.task_id = t.id AND r.superseded_by IS NULL) "
+            "  AND s.finished_at > now() - interval '7 days' "
+            # Nothing already queued for this exact step.
+            "  AND NOT EXISTS (SELECT 1 FROM learning_queue q WHERE q.status='pending' "
+            "                    AND q.task_id = s.task_id AND q.step_seq = s.seq) "
+            "ORDER BY s.finished_at DESC LIMIT $1",
+            budget.max_new_per_pass)
+        for r in stuck:
+            if added >= budget.max_new_per_pass:
+                break
+            # The subject is what gets searched, so lead with the error — that is the thing to solve —
+            # and keep the step for context. `blocked_step` is a distinct kind so it can never collide
+            # with the recurring-failure entry for the same tool.
+            err = " ".join((r["last_error"] or "").split())[:180]
+            desc = " ".join((r["description"] or "").split())[:90]
+            subject = f"{err} (while: {desc})" if desc else err
+            if await enqueue(conn, kind="blocked_step", subject=subject,
+                             reason=f"step {r['seq']} is stuck on this"
+                                    + (f" ({r['failure_class']})" if r["failure_class"] else ""),
+                             priority=1, task_id=r["task_id"], step_seq=r["seq"]):
                 added += 1
     return added

@@ -71,13 +71,17 @@ async def _reset_lease(live_pool: Any) -> Any:
 
 # ── CognitiveState: derived + reconstructable (§3/§4) ───────────────────────────────────────────────
 
-async def test_cognitive_state_is_derived_and_reconstructable(live_pool: Any) -> None:
+async def test_cognitive_state_is_derived_and_reconstructable(live_pool: Any, tmp_path: Any) -> None:
     loop = _loop(live_pool, FakeModelProvider())
     store = loop._tasks
     task = await store.create("Build a Laravel app", ["scaffold", "auth"])
     await store.activate(task.id)
     await store.bind_workspace(task.id, objective="Build a Laravel app", explicit=None,
-                               sali_works_root="/home/almir/Desktop/sali-works")
+                               # A tmp root, not Almir's real one: binding an 'auto' workspace CREATES
+                               # <root>/tasks/<id>/ on disk, so this test was leaving a folder in his
+                               # actual archive on every run. The assertion below only needs the path to
+                               # contain "sali-works", which a tmp copy does.
+                               sali_works_root=str(tmp_path / "sali-works"))
     await loop._decisions.record(task.id, decision="Use PostgreSQL", source="user")
 
     state = await cognitive.assemble(live_pool, loop=loop, session_id=uuid4())

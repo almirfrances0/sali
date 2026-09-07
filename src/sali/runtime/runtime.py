@@ -105,6 +105,8 @@ class AgentRuntime:
         # but never calls advance_task on, so a task can't loop on one step forever. In-memory (a
         # restart resets it, which is fine — recovery re-drives from durable step state).
         self._step_drives: dict[tuple[str, int], int] = {}
+        # Steps the backstop has already force-failed — it fires at most once per step.
+        self._step_forced: set[tuple[str, int]] = set()
 
         # Canonical event publisher — single path for all events
         self._publisher = EventPublisher(pool)
@@ -205,8 +207,25 @@ class AgentRuntime:
         """A compact operational snapshot for observability / the iPhone controller (§46)."""
         return (await self.cognitive_state()).snapshot()
 
+    # The one model, the one coordinator, the one clock — reachable without poking at privates from
+    # three other modules. Sali composing his own words needs all three: the model to write with, the
+    # coordinator to know whether Almir is being served right now, and the clock to say a time in
+    # Almir's zone rather than the host's.
+    @property
+    def provider(self) -> Any:
+        return getattr(self._loop, "provider", None)
+
+    @property
+    def coordinator(self) -> Any:
+        return self._coordinator
+
+    @property
+    def temporal(self) -> Any:
+        return getattr(self._loop, "temporal", None)
+
     async def send_agent_message(
         self, text: str, *, importance: str = "update", task_id: UUID | None = None,
+        decision_id: str | None = None,
     ) -> None:
         """Send an AGENT-originated message to the human via the event bus (§34/§35) — distinct from a
         reply to a user message and from a low-level system event. `importance` lets clients filter
@@ -224,11 +243,27 @@ class AgentRuntime:
                 from sali.runtime.grounding_log import GroundingLog
                 await GroundingLog(self._pool).record(
                     session_id=self._session_id, run_id=None, claims=_rv.struck)
+        # PERSIST IT. The event alone is ephemeral: GET /conversation reads only the `message` table,
+        # so a message Sali chose to send on his own vanished the next time Almir opened the app — and
+        # the client's durable seen-set then blocked the replay from re-adding it. There was literally
+        # nothing left to answer. Written as role='agent' (the app already maps that to a Sali-initiated
+        # bubble) on the same persistent session the conversation endpoint reads.
+        with contextlib.suppress(Exception):
+            async with self._pool.acquire() as _mc:
+                await _mc.execute(
+                    "INSERT INTO conversation (id, channel) VALUES ($1, 'agent') "
+                    "ON CONFLICT (id) DO NOTHING", self._session_id)
+                await _mc.execute(
+                    "INSERT INTO message (conversation_id, seq, role, content) "
+                    "SELECT $1, coalesce(max(seq), 0) + 1, 'agent', $2 "
+                    "FROM message WHERE conversation_id = $1", self._session_id, text[:2000])
         with contextlib.suppress(Exception):
             await self._publisher.emit(
                 event_type="agent.message", session_id=self._session_id, task_id=task_id,
                 origin="agent", data={"text": text[:2000], "importance": importance,
-                                      "channel": "agent_message"})
+                                      "channel": "agent_message",
+                                      # So the phone can report "seen, deliberately not answered".
+                                      "decision_id": decision_id})
 
     def set_broadcaster(self, broadcaster: Any) -> None:
         self._coordinator.set_broadcaster(broadcaster)
@@ -453,10 +488,26 @@ class AgentRuntime:
                         "SELECT 1 FROM event WHERE event_type='agent.message' "
                         "AND payload->>'task_id' = $1 LIMIT 1", tid))
             if not told:
+                from sali.cognitive import voice
+                fallback = (f"I'm working on this in the background: {primary.objective}. "
+                            f"You can keep talking to me while I do — I'll tell you when it's done.")
+                # This fires mid-continuation-turn, so the composer will usually decline (the model is
+                # busy being Sali) and the template ships. That is the correct answer here: finding
+                # nicer words for himself must never be why Almir's own turn waits.
+                announce = await voice.compose(
+                    situation=("You've just picked up a job Almir gave you and started working on it "
+                               "in the background. Tell him you're on it — once, briefly."),
+                    facts={"the job": primary.objective,
+                           "where it runs": "in the background, on this machine",
+                           "he can": "keep talking to you while it runs",
+                           "you will": "tell him when it's finished"},
+                    fallback=fallback)
                 await self.send_agent_message(
-                    f"I'm working on this in the background: {primary.objective}. "
-                    f"You can keep talking to me while I do — I'll tell you when it's done.",
-                    importance="progress", task_id=primary.id)
+                    announce,
+                    # 'progress' is in push.py's _QUIET_IMPORTANCES, so this once-per-task announce
+                    # never reached a pocketed phone. The durable once-per-task guard above already
+                    # stops it repeating, so it is not the per-turn texture that filter exists for.
+                    importance="update", task_id=primary.id)
         # NAME THE STEP. A generic four-point instruction was skimmed: successive turns each announced
         # "Step 1: create requirements.txt… it already exists, so I'll overwrite it", did the work, and
         # never marked it — so the next turn started step 1 again, forever. Telling Sali the exact step
@@ -471,9 +522,15 @@ class AgentRuntime:
         nxt = None
         async with self._loop.pool.acquire() as conn:
             nxt = await conn.fetchrow(
-                "SELECT s.seq, s.description, s.attempts, s.last_error, "
+                "SELECT s.seq, s.description, s.attempts, s.last_error, s.status, s.failure_class, "
                 "       s.definition_of_done, s.scope_excludes, s.parent_seq "
-                "FROM task_step s WHERE s.task_id=$1 AND s.status IN ('pending','running') "
+                # 'failed' is admitted BACK IN. This is the edit that turns "fail and stop" into
+                # "fail, learn, come back and finish": a step that failed was neither pending nor
+                # running, so the driver never handed it back and the task was silently abandoned
+                # mid-way. Nothing else in the system could resume it either — the only writes that
+                # returned a failed step to 'pending' were model-invoked modify_task calls that the
+                # engine never makes. Which step is actually safe to retry is decided just below.
+                "FROM task_step s WHERE s.task_id=$1 AND s.status IN ('pending','running','failed') "
                 "  AND NOT EXISTS ("
                 "    SELECT 1 FROM unnest(s.depends_on) AS dep "
                 "    WHERE dep NOT IN (SELECT seq FROM task_step "
@@ -482,6 +539,19 @@ class AgentRuntime:
                 "    SELECT 1 FROM task_step c WHERE c.task_id=$1 AND c.parent_seq=s.seq "
                 "      AND c.status IN ('pending','running','waiting')) "
                 "ORDER BY s.seq LIMIT 1", primary.id)
+        # THE RETRY POLICY NOW DECIDES, instead of merely advising. `tasks/retry.py` was written,
+        # pure and correct — and its only caller interpolated the verdict into a prompt as a STRING,
+        # so it drove nothing. A step that failed for a reason retrying cannot fix (permission, fatal)
+        # still escalates, and a dependency failure still blocks; only a transient/recoverable failure
+        # under the attempt ceiling comes back. Admitting a failed step also makes the existing
+        # "you already attempted this N times — do NOT repeat that approach, search the web if you
+        # lack the knowledge" prompt block reachable for the first time, since attempts only ever
+        # increments on 'failed'.
+        if nxt is not None and str(nxt["status"]) == "failed":
+            from sali.tasks.retry import RetryAction, retry_decision
+
+            if retry_decision(int(nxt["attempts"] or 0), nxt["failure_class"]) is not RetryAction.RETRY:
+                nxt = None
         if nxt is not None:
             # ONGOING STEP, IN REALTIME. Mark the step we're about to drive as 'running' and announce
             # task.step.started, so the app shows the ONE step Sali is on RIGHT NOW instead of inferring
@@ -628,22 +698,38 @@ class AgentRuntime:
             ):
                 reason = "definition of done met (files present); advanced by the engine"
 
-        # (b) BOUNDED FORCE: driven several times with real work in the workspace but never marked.
+        # (b) BOUNDED FORCE: driven several times but never marked, and the definition of done was
+        # NOT met. This used to mark the step 'done' — an unverified success asserted by the engine
+        # itself, on evidence ("the workspace is not empty") that any earlier step satisfies. That is
+        # a fabrication in the one record the reviewer and the tally read, and it also destroyed the
+        # signal the learner needs: a stuck step is the single best thing Sali can learn from.
+        # Now it is marked 'failed' with a plain statement of what the engine could and could not
+        # confirm. That is honest, and it is what feeds queue_gaps -> research_pass -> _unblock_step,
+        # which researches the blocker and reopens the step WITH the lesson attached.
+        stuck = False
         if reason is None:
             key = (str(task_id), seq)
             self._step_drives[key] = self._step_drives.get(key, 0) + 1
-            worked = bool(roots and os.path.isdir(roots[0]) and any(os.scandir(roots[0])))
-            if self._step_drives[key] >= 3 and worked:
-                reason = (f"advanced by the engine after {self._step_drives[key]} work-turns with no "
-                          "explicit mark (backstop against looping on one step)")
+            # Once per step, ever. Without this the step would be failed, reopened by the learner,
+            # and failed again on the very next drive — a ping-pong that never lets the retry land.
+            if self._step_drives[key] >= 3 and key not in self._step_forced:
+                self._step_forced.add(key)
+                stuck = True
+                reason = (f"the engine could not confirm this step finished: "
+                          f"{self._step_drives[key]} work-turns with no explicit mark and the "
+                          "definition of done not met")
 
         if reason is not None:
             with contextlib.suppress(Exception):
-                await self._loop._tasks.advance(task_id, seq, "done", note=reason,
-                                                run_id=None)
+                await self._loop._tasks.advance(task_id, seq, "failed" if stuck else "done",
+                                                note=reason, run_id=None)
             with contextlib.suppress(Exception):
+                # The event must say what actually happened. Announcing "step completed" for a
+                # step the engine just marked FAILED would put the fabrication back on the screen
+                # after taking it out of the database.
                 await self._publisher.emit(
-                    event_type="task.step.completed", task_id=task_id,
+                    event_type="task.step.failed" if stuck else "task.step.completed",
+                    task_id=task_id,
                     session_id=_TASK_WORK_SESSION, subject_type="task", subject_id=task_id,
                     origin="runtime", data={"seq": seq, "auto_advanced": True, "reason": reason})
             self._step_drives.pop((str(task_id), seq), None)
@@ -679,6 +765,23 @@ class AgentRuntime:
         the TASK) → do the work → automatically resume the primary from durable state. One foreground run at
         a time is preserved throughout (the lease stays authoritative)."""
         C = attention.AttentionCategory
+        # HE ANSWERED. Credit any unsolicited message Sali sent SINCE ALMIR LAST SPOKE — this is the
+        # only positive signal in the whole communication loop, and without it the system could only
+        # ever learn "be quieter" (see the deleted 30-minute "assume ignored" sweep).
+        #
+        # Scoped to decisions sent after the PREVIOUS user message rather than a flat recency window,
+        # so an ongoing back-and-forth doesn't retroactively credit something from hours ago. Runs
+        # before classification and before this message is persisted, so `max(created_at)` is genuinely
+        # the previous turn. Silence is deliberately NOT written here: not answering is Almir's
+        # prerogative, and only an OBSERVED signal should ever teach Sali anything.
+        with contextlib.suppress(Exception):
+            async with self._pool.acquire() as _pc:
+                await _pc.execute(
+                    "UPDATE sali.proactive_decision SET engagement = 'replied', engagement_at = now() "
+                    "WHERE decision = 'sent' AND engagement IS NULL "
+                    "  AND decided_at > coalesce("
+                    "      (SELECT max(created_at) FROM sali.message WHERE role = 'user'), "
+                    "      now() - interval '2 hours')")
         # Cognitive OS §44: if the primary task paused to ask the user a question, THIS message is the
         # answer — record it and put the task back to 'running' BEFORE classification, so the same task
         # resumes (never a new task, never a lost question).

@@ -48,7 +48,14 @@ def test_is_noise_keeps_real_work() -> None:
 def test_score_ranks_meaningfully() -> None:
     assert score(ev(K.FILE_MODIFIED, "/p/src/main.py")) > score(ev(K.FILE_MODIFIED, "/p/data.bin"))
     assert score(ev(K.FILE_DELETED, "/p/x.py")) > score(ev(K.FILE_MODIFIED, "/p/x.py"))
-    assert score(DesktopEvent(K.WINDOW_FOCUS, "firefox", T0)) == 0.5
+    # NOT a magic number: what matters is that a focus change SURVIVES the attention gate. It scored
+    # exactly 0.5 against an INTERESTING threshold of 0.55, so every window focus was discarded
+    # before it was written — 421 desktop observations in the live log, not one about what Almir had
+    # on screen. Assert the property, so the next person to tune this number cannot re-blind him.
+    from sali.events import attention
+
+    focus = score(DesktopEvent(K.WINDOW_FOCUS, "firefox", T0))
+    assert attention.assess(importance=focus).action is not attention.AttentionAction.IGNORE
     assert 0.0 <= score(ev(K.FILE_CREATED, "/p/pyproject.toml")) <= 1.0
 
 

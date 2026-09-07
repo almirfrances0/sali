@@ -100,10 +100,19 @@ async def record_failures(conn: Any, *, limit: int = 50) -> int:
         else:
             # Non-command tool: a later success of the same tool is a correction
             learned_fix = bool(fix and fix_step and fix_step != step)
-        if not learned_fix:
+        # Did this failure stop REAL WORK? A failure with no fix is normally noise — but one that
+        # blocked a task step is a lesson-in-waiting: it is what the learning queue researches and
+        # what `learned → retry` closes. Without this, a blocked step left nothing behind to close.
+        blocked = await conn.fetchrow(
+            "SELECT task_id, step_seq FROM task_execution WHERE execution_id = $1 LIMIT 1", row["id"])
+        if not learned_fix and blocked is None:
             continue  # §18 is failure→CORRECTION — a bare one-off error is noise, not a lesson
-        content = (f"A past attempt failed: the {row['tool_name']} tool{doing} failed{because}. "
-                   f"What fixed it: `{fix_step or fix_command}`.")
+        if learned_fix:
+            content = (f"A past attempt failed: the {row['tool_name']} tool{doing} failed{because}. "
+                       f"What fixed it: `{fix_step or fix_command}`.")
+        else:
+            content = (f"An attempt failed and is still unresolved: the {row['tool_name']} "
+                       f"tool{doing} failed{because}. No fix is known yet.")
         note = f"task: {row['user_input'][:120]}" if row["user_input"] else None
         # A STRUCTURED incident (§24/§25) alongside the text, so recall gives Sali the whole shape, not
         # a sentence. Everything here is FACT from the tool_execution rows; the *cause* is deliberately
@@ -114,10 +123,16 @@ async def record_failures(conn: Any, *, limit: int = 50) -> int:
             "tool": row["tool_name"],
             "failed_command": step,
             "error": (row["error"] or "")[:400] or None,
-            "hypothesis": f"the fix `{fix_step or fix_command}` suggests the failure was addressable",
-            "correction": fix_step or fix_command,
-            "verified": True,  # the correction was a verified_success later in the same run
-            "outcome": "resolved",
+            # An OPEN incident asserts no cause and no fix. Inventing either is exactly the
+            # confabulation §25 forbids; it carries the blocked step instead, so the lesson that
+            # eventually closes it can find its way back to the work.
+            "hypothesis": (f"the fix `{fix_step or fix_command}` suggests the failure was addressable"
+                           if learned_fix else None),
+            "correction": (fix_step or fix_command) if learned_fix else None,
+            "verified": bool(learned_fix),  # a verified_success later in the same run
+            "outcome": "resolved" if learned_fix else "open",
+            "task_id": str(blocked["task_id"]) if blocked else None,
+            "step_seq": int(blocked["step_seq"]) if blocked and blocked["step_seq"] is not None else None,
             # Which execution produced this lesson. The claim_key now names the lesson, so this is what
             # tells the consolidator that this particular execution has already been accounted for.
             "tool_execution_id": str(row["id"]),
@@ -132,7 +147,9 @@ async def record_failures(conn: Any, *, limit: int = 50) -> int:
             conn, layer=MemoryLayer.EPISODIC, content=content,
             source=MemorySource.SYSTEM_OBSERVATION, functional=True,
             claim_key=_lesson_key(row["tool_name"], step, command),
-            importance=0.6, obs_conf=1.0, note=note,
+            # An open incident is worth less than a solved one — it is a question, not an answer.
+            # Same claim_key either way, so the resolved lesson SUPERSEDES the open one when it lands.
+            importance=0.6 if learned_fix else 0.45, obs_conf=1.0, note=note,
             structured=incident,
         )
         count += 1

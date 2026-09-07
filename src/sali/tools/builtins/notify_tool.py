@@ -72,11 +72,39 @@ class Notify(Tool):
         env = _desktop_env()
         sent = _notify_send(title, message, env)
         opened = _open_terminal(title, message, env) if args.get("terminal") else False
-        if not sent and not opened:
-            return ToolResult(ok=False, display="couldn't reach the desktop",
-                              error="no desktop session (DISPLAY/DBUS) to notify on")
-        how = "notification" + (" + terminal" if opened else "")
-        return ToolResult(ok=True, output={"delivered": how}, display=f"told Almir ({how})")
+
+        # REACH ALMIR WHERE HE ACTUALLY IS. This tool only ever fired a libnotify popup at DISPLAY=:0 —
+        # on a headless box that is nobody, yet it returned "told Almir", so Sali believed he had spoken.
+        # Emitting agent.message puts it in the phone's chat through the existing bridge (the event
+        # trigger fires pg_notify -> EventBridge -> WebSocket -> chat + APNs); no new transport.
+        delivered_to_chat = False
+        with contextlib.suppress(Exception):
+            if getattr(ctx, "pool", None) is not None:
+                from sali.runtime.session import persistent_session_id
+
+                sid = persistent_session_id()
+                async with ctx.pool.acquire() as conn:
+                    await conn.execute(
+                        "INSERT INTO conversation (id, channel) VALUES ($1, 'agent') "
+                        "ON CONFLICT (id) DO NOTHING", sid)
+                    await conn.execute(
+                        "INSERT INTO message (conversation_id, seq, role, content) "
+                        "SELECT $1, coalesce(max(seq), 0) + 1, 'agent', $2 "
+                        "FROM message WHERE conversation_id = $1", sid, message[:2000])
+                    await conn.execute(
+                        "INSERT INTO event (event_type, subject_type, subject_id, payload) "
+                        "VALUES ('agent.message', 'agent', $1, $2)",
+                        sid, {"text": message[:2000], "importance": "update",
+                              "channel": "agent_message", "session_id": str(sid)})
+                delivered_to_chat = True
+
+        if not delivered_to_chat and not sent and not opened:
+            return ToolResult(ok=False, display="couldn't reach Almir",
+                              error="no chat channel and no desktop session to notify on")
+        how = ("chat" if delivered_to_chat else "") + (" + notification" if sent else "") \
+            + (" + terminal" if opened else "")
+        return ToolResult(ok=True, output={"delivered": how.strip(" +")},
+                          display=f"told Almir ({how.strip(' +')})")
 
 
 def _notify_send(title: str, message: str, env: dict[str, str]) -> bool:

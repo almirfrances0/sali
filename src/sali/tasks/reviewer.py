@@ -13,6 +13,8 @@ stores concise operational results only — evidence, never opinion; no chain-of
 
 from __future__ import annotations
 
+import re
+
 import contextlib
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -100,6 +102,33 @@ def _row_to_result(row: Any) -> ReviewResult:
         failures=list(row["failures"] or []),
         recommendations=list(row["recommendations"] or []),
         passed=row["passed_count"], failed=row["failed_count"], unknown=row["unknown_count"])
+
+
+_OBJECTIVE_SPLIT = re.compile(r",| \+ | with | using | including | plus ", re.IGNORECASE)
+# Filler that carries no checkable requirement on its own.
+_OBJECTIVE_NOISE = re.compile(
+    r"^(a|an|the|and|for|to|please|build|create|make|it|that|this|some|professional)\b\s*$",
+    re.IGNORECASE)
+
+
+def objective_requirements(objective: str, *, limit: int = 6) -> list[str]:
+    """The things the OBJECTIVE asks for, as separate checkable clauses.
+
+    The review used to be built only from the steps and the artifacts, so a requirement the owner
+    stated but no step happened to name — "shared styling" — was invisible to the verdict: it could
+    not pass, fail, or even be listed as unchecked. Splitting on the connectors people actually use
+    is crude, but a crude list of the stated requirements beats a precise list of the wrong ones."""
+    out: list[str] = []
+    for raw in _OBJECTIVE_SPLIT.split(objective or ""):
+        clause = " ".join(raw.split()).strip(" .;:-—\"'`")
+        if len(clause) < 6 or _OBJECTIVE_NOISE.match(clause):
+            continue
+        if clause.lower() in {c.lower() for c in out}:
+            continue
+        out.append(clause[:120])
+        if len(out) >= limit:
+            break
+    return out
 
 
 class TaskReviewer:
@@ -241,6 +270,32 @@ class TaskReviewer:
             await self._emit("review.requirement.checked", task_id, run_id, review_id,
                              {"requirement": desc, "status": req["status"]})
 
+        # THE OBJECTIVE ITSELF. Nothing above checks it: the steps are the plan Sali wrote, and a plan
+        # can be completed in full while the thing that was actually asked for is not delivered. These
+        # are recorded as unresolved rather than passed, because no deterministic check was run — and
+        # naming them is the point: an unchecked requirement that is written down gets looked at, and
+        # one that is invisible does not.
+        objective_reqs = objective_requirements(task["objective"] or "")
+        step_text = " ".join(str(s2["description"] or "") for s2 in steps).lower()
+        unchecked: list[str] = []
+        for clause in objective_reqs:
+            # If a step literally names it, the step's own verdict above already speaks for it.
+            if clause.lower() in step_text:
+                continue
+            unchecked.append(clause)
+            requirements.append({
+                "requirement": f"stated in the objective: {clause}",
+                "kind": "objective", "status": "unknown",
+                "evidence": "no step named this and no check was run against it",
+            })
+        if unchecked:
+            recommendations.append({
+                "requirement": "requirements stated in the objective but never checked",
+                "action": ("verify these against what was actually produced, then say plainly which "
+                           "hold and which do not: " + "; ".join(unchecked[:6])),
+                "evidence": "",
+            })
+
         passed = sum(1 for r in requirements if r["status"] in _PASSING)
         failed = sum(1 for r in requirements if r["status"] == "failed")
         unknown = sum(1 for r in requirements if r["status"] in ("pending", "unknown", "blocked", "attempted"))
@@ -267,6 +322,12 @@ class TaskReviewer:
                                     "action": "no step was verified by a tool execution and no\n                                              artifact could be probed; complete real work before\n                                              marking the task done",
                                     "evidence": ""})
         else:
+            # DELIBERATELY NOT a rework trigger. Bouncing the first review whenever the objective
+            # mentions something no step named would fail nearly every task once and then pass on the
+            # retry regardless — friction with no added truth. The value is in NAMING the gap: these
+            # requirements are counted as unresolved, listed in `requirements_checked`, carried in the
+            # summary, and reported to the owner when the task completes, so "done" never silently
+            # means "done, except the parts nobody looked at".
             status = ReviewStatus.PASSED
         summary = (f"{passed} passed, {failed} failed, {unknown} unresolved "
                    f"of {len(requirements)} requirement(s)")

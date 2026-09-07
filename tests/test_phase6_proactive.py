@@ -23,9 +23,15 @@ pytestmark = pytest.mark.db
 class _Runtime:
     def __init__(self) -> None:
         self.sent: list[tuple[str, str]] = []
+        self.decision_ids: list[str | None] = []
 
-    async def send_agent_message(self, msg: str, *, importance: str = "reminder") -> None:
+    # Mirrors the real signature. `decision_id` is what lets the app report back that Almir SAW an
+    # unsolicited message — without it the only engagement signal is silence, which is what used to
+    # train Sali mute. A stub that silently ignores it would let that regress unnoticed.
+    async def send_agent_message(self, msg: str, *, importance: str = "reminder",
+                                 task_id: object = None, decision_id: str | None = None) -> None:
         self.sent.append((msg, importance))
+        self.decision_ids.append(decision_id)
 
 
 async def test_overdue_commitment_drives_one_grounded_reminder(live_pool: Any) -> None:
@@ -40,6 +46,7 @@ async def test_overdue_commitment_drives_one_grounded_reminder(live_pool: Any) -
 
     # 1) the gate said SEND and the runtime actually reached out, once
     assert len(rt.sent) == 1
+    assert rt.decision_ids[0], "the message must carry its decision id or 'read' can never be reported"
     assert "tax docs" in rt.sent[0][0] and rt.sent[0][1] == "reminder"
     # 2) the decision was recorded in the audit ledger (the 'would silence be better?' sink)
     async with live_pool.acquire() as c:

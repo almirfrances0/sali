@@ -190,7 +190,12 @@ def _default_fs_readonly() -> list[str]:
 
 
 def _default_workspace() -> str:
-    return str(Path.home() / "Desktop" / "sali-works")
+    """Where Sali's work lives. ``SALI_WORKS_ROOT`` overrides it — the ONE knob that moves the whole
+    workspace, so a test run cannot bind task workspaces inside Almir's real archive. Production sets
+    nothing and gets the original path."""
+    import os
+    root = os.environ.get("SALI_WORKS_ROOT")
+    return root if root else str(Path.home() / "Desktop" / "sali-works")
 
 
 def _default_skills_root() -> str:

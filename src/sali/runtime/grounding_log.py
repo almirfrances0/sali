@@ -38,7 +38,7 @@ class GroundingLog:
                     (getattr(c, "kind", None) or "unknown")[:40],
                     (getattr(c, "verdict", None) or "unsupported")[:40],
                     (getattr(c, "sentence", "") or "")[:1000],
-                    _detail_json(getattr(c, "detail", None)))
+                    _detail_obj(getattr(c, "detail", None)))
         return len(rows)
 
     async def metrics(self) -> dict[str, Any]:
@@ -83,17 +83,19 @@ class GroundingLog:
         } for r in rows]
 
 
-def _detail_json(detail: Any) -> str:
-    """Coerce a claim's detail into a JSON object string for the jsonb column."""
-    import json
+def _detail_obj(detail: Any) -> dict[str, Any]:
+    """Coerce a claim's detail into a JSON OBJECT (a dict) for the jsonb column.
+
+    Returns a dict, never a pre-encoded JSON string: the pool's jsonb codec encodes exactly once, so a
+    string here would be double-encoded and stored as a jsonb string scalar — `detail->>'reason'` then
+    reads nothing, which is precisely how this ledger silently corrupted every row it wrote."""
     if detail is None:
-        return "{}"
+        return {}
+    if isinstance(detail, dict):
+        return detail
     if isinstance(detail, str):
-        return json.dumps({"reason": detail[:500]})
-    try:
-        return json.dumps(detail)
-    except Exception:  # noqa: BLE001 - detail is diagnostic; never let it break the record
-        return json.dumps({"reason": str(detail)[:500]})
+        return {"reason": detail[:500]}
+    return {"reason": str(detail)[:500]}
 
 
 __all__ = ["GroundingLog"]

@@ -13,3 +13,9 @@ dist/
 *.log
 .coverage
 ios.zip
+
+# Working backups from audit sessions — never part of the source
+*-bak
+*.bak
+*.mine
+*.mine2

@@ -177,8 +177,13 @@ def _honest_line(kinds: set[str]) -> str:
         return ("Actually — I didn't send it this turn (I didn't run send_file), so it's not in your "
                 "chat. Say the word and I'll send it now.")
     if "action_done" in kinds:
-        return ("To be straight with you: I didn't actually run anything to do that, so I can't say "
-                "it's done. Want me to actually do it now?")
+        # No "want me to do it now?" here. The struck claim is often one Sali VOLUNTEERED — Almir said
+        # "the site was good sali" and got back "Thanks! … To be straight with you: I didn't actually
+        # run anything to do that, so I can't say it's done. Want me to actually do it now?" Offering
+        # to perform a task nobody asked for turns an honest retraction into a non-sequitur. State the
+        # correction; let Almir decide whether there is anything to do.
+        return ("To be straight with you: I didn't actually run anything just then, so I shouldn't "
+                "have said that part.")
     if "state" in kinds:
         return "Correction: I checked, and the machine says otherwise — I shouldn't have stated that."
     if "capability" in kinds:
@@ -234,6 +239,46 @@ async def validate_proactive(
     return await validate_response(text, receipts=[], cap_of=cap_of, families=PROACTIVE_FAMILIES)
 
 
+# A complaint about one of Sali's OWN faculties. Only mechanical-failure language counts: hedging
+# recall ("my memory of that is hazy") is honest and must never be struck, so `memory` is not a
+# faculty here at all — the ambiguity is not worth the false positives.
+_FACULTY_WORDS = {
+    "perception": "perception", "senses": "perception", "sense": "perception",
+    "sight": "perception", "vision": "perception", "eyes": "perception",
+    "connection": "internet", "internet": "internet", "network": "internet",
+    "model": "model", "brain": "model",
+    "embedder": "embedder", "embeddings": "embedder",
+}
+_FACULTY_COMPLAINT_RE = re.compile(
+    r"\bmy\s+(?P<faculty>" + "|".join(sorted(_FACULTY_WORDS, key=len, reverse=True)) + r")\b"
+    r"(?:['’]s|\s+(?:is|are|was|were|seems?|looks?|feels?|been|being|has\s+been))?\s*"
+    r"(?:a\s+(?:bit|little)\s+|kind\s+of\s+|sort\s+of\s+|really\s+|quite\s+|"
+    r"acting\s+|playing\s+|)?"
+    r"(?P<state>acting\s+up|playing\s+up|up\s+tonight|down|broken|offline|off\b|glitch\w*|"
+    r"dim\b|flaky|spotty|degraded|struggling|misbehav\w*|on\s+the\s+blink|"
+    r"not\s+work\w*|not\s+great|unreliable)",
+    re.IGNORECASE,
+)
+
+
+def _faculty_complaints(text: str, health: dict[str, bool] | None) -> list[tuple[str, str]]:
+    """(sentence, faculty) for each complaint the live health snapshot contradicts.
+
+    No snapshot → no opinion. A faculty that really IS degraded → left alone: saying so is honest and
+    useful, and this must never suppress a true report."""
+    if not health:
+        return []
+    out: list[tuple[str, str]] = []
+    for sentence in _sentences(text):
+        m = _FACULTY_COMPLAINT_RE.search(sentence)
+        if not m:
+            continue
+        key = _FACULTY_WORDS[m.group("faculty").lower()]
+        if health.get(key) is True:          # the subsystem is up; the complaint is invented
+            out.append((sentence, key))
+    return out
+
+
 async def validate_response(
     text: str,
     *,
@@ -241,6 +286,7 @@ async def validate_response(
     cap_of: dict[str, frozenset[Capability]],
     families: frozenset[str] = _ALL_FAMILIES,
     receipt_numbers: set[int] | None = None,
+    health: dict[str, bool] | None = None,
 ) -> ResponseValidation:
     """Adjudicate Sali's reply against the turn's receipts + the live machine and return a validation
     whose `rewritten` has every DISPROVED operational claim struck and replaced with the honest line.
@@ -293,6 +339,15 @@ async def validate_response(
                 kind="state", verdict=VERDICT_UNSUPPORTED, source=SRC_SYSTEM_STATE,
                 sentence=sentence, detail=chk.detail))
             struck_sentences.add(sentence)
+
+        # 2b) a complaint about one of Sali's OWN faculties that the health snapshot contradicts.
+        if "state" in families:
+            for sentence, faculty in _faculty_complaints(text, health):
+                result.claims.append(ResponseClaim(
+                    kind="state", verdict=VERDICT_UNSUPPORTED, source=SRC_SYSTEM_STATE,
+                    sentence=sentence,
+                    detail=f"said {faculty} was degraded; the health probe reports it working"))
+                struck_sentences.add(sentence)
 
         # 3) capability claim in a domain this runtime cannot reach.
         for sentence in _sentences(text):

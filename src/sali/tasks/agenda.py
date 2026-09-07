@@ -134,8 +134,12 @@ class AgendaSynthesiser:
 
             today_schedules = await conn.fetch(
                 "SELECT id, name, prompt, next_run_at FROM sali.schedule "
+                # From the START of today, not from `now` — otherwise a schedule that was due earlier
+                # today (including one that is overdue and hasn't fired) drops off the agenda the moment
+                # its time passes, which is exactly when it's worth seeing. `todays_start` was already
+                # computed above and never used.
                 "WHERE enabled AND next_run_at > $1 AND next_run_at <= $2 "
-                "ORDER BY next_run_at LIMIT $3", now, todays_end, self._per)
+                "ORDER BY next_run_at LIMIT $3", todays_start, todays_end, self._per)
             for row in today_schedules:
                 view.today.append(AgendaItem(
                     kind="schedule", id=str(row["id"]),
@@ -155,21 +159,41 @@ class AgendaSynthesiser:
                     when=f"was due {self._temporal.ago(row['deadline'])}",
                     reason="deadline has passed and nothing settled it"))
 
+            # The schema allows THREE words for "this is waiting on Almir", and the runtime writes
+            # `waiting_for_user` (tasks/coordination.py) far more often than the bare `waiting` this
+            # query used to ask for — so a task genuinely waiting on him was invisible here. `paused`
+            # joins them because it is also work only he can restart, and it previously had NO section
+            # at all: a paused task simply vanished from the agenda entirely.
             waiting = await conn.fetch(
-                "SELECT id, objective FROM sali.task WHERE status='waiting' "
+                "SELECT id, objective, status FROM sali.task "
+                "WHERE status IN ('waiting','waiting_for_user','paused') "
                 "ORDER BY updated_at DESC LIMIT $1", self._per)
             for row in waiting:
+                _st = str(row["status"])
                 view.waiting.append(AgendaItem(
                     kind="task", id=str(row["id"]), title=str(row["objective"])[:120],
-                    when="", reason="the task is waiting for a reply from Almir"))
+                    when="",
+                    reason=("paused — it resumes when you say so" if _st == "paused"
+                            else "the task is waiting for a reply from Almir")))
 
+            # Same vocabulary gap: the reviewer writes `blocked_by_review` / `needs_changes`
+            # (tasks/store.py), neither of which matched the bare `blocked` asked for here — so a task
+            # the review stopped never reached this section. The reason now names WHICH kind of blocked
+            # instead of always claiming an external dependency.
             blocked_tasks = await conn.fetch(
-                "SELECT id, objective FROM sali.task WHERE status='blocked' "
+                "SELECT id, objective, status FROM sali.task "
+                "WHERE status IN ('blocked','blocked_by_review','needs_changes') "
                 "ORDER BY updated_at DESC LIMIT $1", self._per)
+            _blocked_reason = {
+                "blocked_by_review": "a review blocked it",
+                "needs_changes": "the review asked for changes",
+            }
             for row in blocked_tasks:
                 view.blocked.append(AgendaItem(
                     kind="task", id=str(row["id"]), title=str(row["objective"])[:120],
-                    when="", reason="the task is blocked by an external dependency"))
+                    when="",
+                    reason=_blocked_reason.get(str(row["status"]),
+                                               "the task is blocked by an external dependency")))
             blocked_commits = await conn.fetch(
                 "SELECT id, description FROM sali.commitment WHERE status='blocked' "
                 "ORDER BY updated_at DESC LIMIT $1", max(0, self._per - len(blocked_tasks)))
@@ -203,7 +227,11 @@ class AgendaSynthesiser:
 
             initiatives = await conn.fetch(
                 "SELECT id, title, status FROM sali.initiative "
-                "WHERE status IN ('candidate','active','planning','ready','executing') ORDER BY updated_at DESC LIMIT $1",
+                # Ask for what is NOT closed rather than enumerating states: the old list named
+                # 'active' and 'planning', which the CHECK constraint does not even permit, while
+                # omitting the real ones ('observed','evaluated','planned','verifying'). So a live
+                # initiative could never match. Mirrors InitiativeStore.open().
+                "WHERE status NOT IN ('completed','dismissed','expired') ORDER BY updated_at DESC LIMIT $1",
                 self._per)
             for row in initiatives:
                 view.initiatives.append(AgendaItem(

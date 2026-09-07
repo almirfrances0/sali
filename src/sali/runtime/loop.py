@@ -68,6 +68,8 @@ from sali.twin import awareness as twin_awareness
 from sali.verify.claims import check_claims
 from sali.verify.claims import render as render_checks
 from sali.verify.engine import verify_effect
+from sali.verify.work_record import check_work_question
+from sali.verify.work_record import render as render_record
 
 # Tools whose arguments carry a raw shell command — the binary they run is what the tool-authority
 # floor is keyed on.
@@ -174,16 +176,19 @@ _PROMISE_RE = re.compile(
 # handles same-turn intent; this only fires when the reply defers into future attention.
 _OPEN_LOOP_RE = re.compile(
     r"\b("
-    r"i'?ll (look into|investigate|check on|come back to|circle back to|revisit|dig into)|"
-    r"let me (look into|investigate|check on|dig into)|"
+    r"(i'?ll|i will) (look into|look at|investigate|check on|check|come back to|circle back to"
+    r"|revisit|dig into|follow up on|get back to|keep an eye on)|"
+    r"let me (look into|look at|investigate|check on|dig into)|"
     # thinking-verbs (figure out / understand / verify) removed: "I need to understand X" is almost
     # always the CURRENT turn's reasoning, not a durable follow-up — it filed Sali's own chain-of-
     # thought ("First, I need to understand what's going on") as a promise_followup open loop.
     r"i (need|want) to (look into|investigate|check on|dig into|follow up on)|"
     r"still (need|want) to (look into|investigate|check on|dig into|follow up on)|not sure yet|"
-    r"open question|remains to be seen|worth (looking into|investigating)|"
-    r"todo:|follow.?up:"
-    r")\b",
+    r"open question|remains to be seen|worth (looking into|investigating)"
+    r")\b"
+    # Colon-terminated triggers live OUTSIDE the \b-closed group: a word boundary after ":" requires a
+    # word character to follow it, so "todo: fix the config" never matched — both were dead code.
+    r"|\btodo:|\bfollow.?up:",
     re.IGNORECASE,
 )
 # Planning-narration / vague-subject fillers: phrases _OPEN_LOOP_RE can still catch that are the
@@ -357,6 +362,14 @@ _RECALL_GROUNDING = (
     "record of it and ask him to remind you. A truthful 'I don't have that on record' is always "
     "better than a confident description of something that did not happen.)"
 )
+
+
+# A reply that ALREADY admits it couldn't close the app — don't "correct" an honest answer into another.
+_CLOSE_DISCLAIM_RE = re.compile(
+    r"\b(?:can'?t|cannot|could\s?n'?t|couldn'?t|unable|not\s+able|won'?t\s+be\s+able"
+    r"|still\s+(?:running|open|there|up)|need\s+(?:sudo|elevated|permission)|as\s+root|pkexec"
+    r"|you'?ll\s+need\s+to|close\s+it\s+yourself)\b",
+    re.IGNORECASE)
 
 
 def _pace_chunks(text: str, *, max_pieces: int = 220) -> list[str]:
@@ -593,14 +606,19 @@ def _render_tool_record(record: list[tuple[str, bool]]) -> str:
 _GOAL_RE = re.compile(
     r"\b(goal:|"
     r"(our|my|the) goal is|"
-    r"i want us to (build|deploy|ship|launch|create|migrate|set\s?up|automate|integrate)|"
+    # First-person SINGULAR was missing: "i want US to build" matched while "i want to build" did
+    # not, so the most natural way Almir states an objective — "I want to build a hosting business" —
+    # could never become a goal. The plural was never meant to be mandatory.
+    r"i want (us )?to (build|deploy|ship|launch|create|migrate|set\s?up|automate|integrate)|"
+    r"i (plan|intend) to (build|deploy|ship|launch|create|migrate|set\s?up|automate|integrate)|"
+    r"i'?m (building|deploying|launching|migrating) (?:a |the |our |my )?[a-z0-9]|"
     r"we should (build|deploy|ship|launch|create|migrate)|"
     r"let'?s (build|deploy|ship|launch|create|migrate|set\s?up|automate|integrate)|"
-    r"add (this|that) (as|to) (a )?(goal|goals|agenda)|"
+    r"add (this|that) (as|to) (a |my |our )?(goal|goals|agenda)|"
     r"make (this|that) (a )?goal|"
     r"long[-\s]?term (i|we) want|"
     r"the objective is|"
-    r"we'?re (building|deploying|launching|migrating) (?:a |the |our )?[a-z0-9])"
+    r"we'?re (building|deploying|launching|migrating) (?:a |the |our |my )?[a-z0-9])"
     ,
     re.IGNORECASE,
 )
@@ -614,6 +632,24 @@ def _goal_signal(text: str) -> bool:
     system through the existing planning path."""
     return bool(text and len(text) < 4000 and _GOAL_RE.search(text))
 
+
+# "Sali, go learn X" — a request to STUDY something over time, not a chore to run now. Deliberately
+# explicit: this must never fire on ordinary requests ("look at this file"), only on a directed ask.
+_LEARN_RE = re.compile(
+    r"\b(go learn\b|learn (how to|about|to use|more about)\b|teach yourself\b|study up on\b"
+    r"|get (good|better) at\b|figure out how to\b|research how\b|read up on\b|find out how to\b"
+    r"|get familiar with\b|master \w)",
+    re.IGNORECASE,
+)
+
+_LEARN_PROMPT = (
+    "Almir said this to Sali:\n\n{msg}\n\n"
+    "If he asked Sali to LEARN or get better at something — a subject to study over time, not a task "
+    "to carry out right now — reply on ONE line, exactly like this:\n\n"
+    "LEARN: <the subject, as a short noun phrase>\n\n"
+    "Otherwise reply with exactly: NONE\n"
+    "No other output. No explanation. No JSON."
+)
 
 _GOAL_PROMPT = (
     "Almir just said:\n\n{msg}\n\n"
@@ -800,6 +836,49 @@ def _infer_kind(sentence: str) -> str:
     return "fact"
 
 
+def _second_person_fact(sentence: str) -> str:
+    """Rewrite a first-person durable statement into how Sali should recall it, addressed to Almir as
+    'you'. Word-boundary swaps only (never letters inside words), so it is safe on a matched sentence.
+    Only the deterministic capture path uses it; imperfect phrasing is fine — the memory carries
+    USER_EXPLICIT provenance."""
+    s = (sentence or "").strip()
+    s = re.sub(r"^(?:this|that|these)\s+(?:is|are)\s+my\b", "your", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bmy\b", "your", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bI\s+am\b", "you are", s)
+    s = re.sub(r"\bI'?m\b", "you're", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bI\b", "you", s)
+    s = re.sub(r"\bme\b", "you", s, flags=re.IGNORECASE)
+    return (s[:1].upper() + s[1:]) if s else s
+
+
+def _deterministic_fact(text: str) -> str | None:
+    """A clearly-stated durable fact ("this is my wife, her name is Faith", "my project is TanzHost"),
+    extracted WITHOUT the model gate. The safety net for the Q2_K failure mode that captured 0 memories
+    in 3 days: `_DURABLE_FACT_RE` is high-precision for exactly these personalization-critical shapes,
+    so when it matches we persist the fact ourselves instead of trusting a KEEP: line. Returns the
+    second-person fact from the single matching sentence, else None (leaving explicit-remember and
+    correction turns to the model, as before)."""
+    for sent in re.split(r"(?<=[.!?])\s+|\n+", (text or "").strip()):
+        if _DURABLE_FACT_RE.search(sent):
+            rewritten = _second_person_fact(sent.strip())
+            return rewritten[:240] if len(rewritten) >= 6 else None
+    return None
+
+
+def _tool_experience_key(tool_name: str, arguments: dict[str, Any] | None) -> str | None:
+    """The `tool:<key>` memory key under which per-tool reliability + p50 latency are learned
+    (`learning/tool_experience.py`). execute_command is keyed by the underlying BINARY (curl/git/…) so
+    each command's reliability is separate; every other tool is keyed by its own name. Mirrors the miner
+    so the prediction reads the same row the scorer writes."""
+    if tool_name == "execute_command":
+        cmd = str((arguments or {}).get("command") or "").strip()
+        if not cmd:
+            return None
+        from sali.core.toolvocab import binary_of
+        return f"tool:{binary_of(cmd)}"
+    return f"tool:{tool_name}"
+
+
 class _MemorySink:
     """Bridges the remember tool to the memory system: write a durable fact, then embed it so it's
     immediately recallable. Injected into ToolContext so the tools layer needn't import memory."""
@@ -824,7 +903,7 @@ class _MemorySink:
     async def remember(
         self, content: str, *, source: MemorySource, note: str | None = None,
         importance: float = 0.6, needs_grounding: bool = False, about: str | None = None,
-        kind: str | None = None,
+        kind: str | None = None, structured: dict[str, Any] | None = None,
     ) -> None:
         # An `about` topic makes this a functional claim: restating a fact about the same topic
         # supersedes the old value (evidence-priority) instead of piling up a contradiction.
@@ -842,6 +921,10 @@ class _MemorySink:
             layer=layer, content=content, source=source,
             importance=importance, note=note, needs_grounding=needs_grounding,
             functional=bool(claim_key), claim_key=claim_key,
+            # Provenance rides on `structured` because that IS carried through retrieval, unlike
+            # `note` — which is persisted but never reaches the recall path, so a cited memory could
+            # never actually show its citation.
+            structured=structured or {},
         )
         await self._service.embed_pending()
 
@@ -1014,8 +1097,10 @@ class _ResearchSink:
         return None
 
     async def research(self, query: str, *, step_seq: int | None = None) -> dict[str, Any]:
+        from sali.config.settings import Settings
+        from sali.core.clock import SystemClock
         from sali.tools.builtins.web import WebSearch
-        from sali.tools.context import local_context
+        from sali.tools.context import ToolContext
 
         task_id = await self._current_task_id()
         with contextlib.suppress(Exception):
@@ -1026,7 +1111,12 @@ class _ResearchSink:
                     data={"query": query[:200]})
         results: list[dict[str, Any]] = []
         with contextlib.suppress(Exception):
-            res = await WebSearch().run({"query": query}, local_context())
+            # WITH the pool, so what this reads is cached and survives the link going down. Through
+            # `local_context()` the web tool's cache writes were silent no-ops, and every page Sali
+            # researched for a task was unreadable the moment he went offline.
+            ctx = ToolContext(settings=Settings(), clock=SystemClock(), pool=self._pool,
+                              run_id=self._run_id)
+            res = await WebSearch().run({"query": query}, ctx)
             results = list(res.output.get("results", [])) if res.ok else []
         if not results:
             # research is durable even when it FAILS — the task keeps its progress, never restarts (§21)
@@ -1530,11 +1620,20 @@ class AgentLoop:
 
         The deadline is the END of the resolved span, which is what "by tomorrow" means: any time up to
         the close of tomorrow is on time."""
-        if not reply or not _PROMISE_RE.search(reply):
+        _pm = _PROMISE_RE.search(reply or "")
+        if not reply or _pm is None:
             return
-        window = self.temporal.resolve(reply)
+        # Resolve the deadline from the PROMISE CLAUSE, not the whole reply. Resolving the entire
+        # message let a stray "yesterday" in an unrelated sentence become the deadline — and
+        # TemporalService tries today -> yesterday -> tomorrow in a FIXED order, so a past token beats
+        # the future one actually being promised, producing a commitment that is overdue the instant
+        # it is filed. The clause is the sentence the promise phrase actually sits in.
+        _left = reply.rfind(".", 0, _pm.start())
+        _right = reply.find(".", _pm.start())
+        _clause = reply[_left + 1: _right if _right >= 0 else len(reply)].strip() or reply
+        window = self.temporal.resolve(_clause)
         if window is None or window.end <= self.temporal.now():
-            return                      # no time named, or a time already past — not a deadline
+            return                      # no time named IN THE PROMISE, or already past — not a deadline
         # A commitment with a sub-5-minute deadline is chat filler ("in a minute", "in a sec")
         # dressed up by the temporal resolver, not a real promise across time. Filing it as one
         # produces an overdue commitment almost immediately, then confabulates on the next turn
@@ -1794,6 +1893,48 @@ class AgentLoop:
                         f"{temp:.0f}°C. Heavy or parallel work is a bad idea until it settles.")
         return "\n".join(parts) if parts else None
 
+    async def _capture_learning_request(self, user_input: str, journal: Any) -> None:
+        """"Sali, go learn X" becomes a CURIOSITY Sali works in its own time — never a task.
+
+        This is the door that was missing. `plan_task` already REFUSES a learning request (it matches
+        the research intent) and that refusal is CORRECT — learning is not a chore with steps and a
+        deadline. But with no other door the request fell through and became a task anyway, which is
+        exactly what Almir saw. A curiosity is the right home: `encounter` dedups by subject slug and
+        REINFORCES on repeat (asking twice sharpens one topic instead of forking two), keeps an
+        accumulating `discoveries` log, and deliberately never auto-closes — "learning takes time, day
+        after day" expressed as schema.
+
+        priority 0.75 clears the 0.6 floor in `as_initiative_candidates`, so a directed ask is eligible
+        on the very next background cycle, while an ambient curiosity (0.4) waits its turn. Runs after
+        the reply has already shipped, so it never delays him."""
+        if not _LEARN_RE.search(user_input or ""):
+            return
+        from sali.provider.base import ChatMessage as _CM
+        res = await self.provider.chat([_CM(role="user",
+                                            content=_LEARN_PROMPT.format(msg=user_input[:600]))])
+        raw = (res.content or "").strip()
+        subject = ""
+        for line in raw.splitlines():
+            stripped = line.strip()
+            up = stripped.upper().lstrip("*-# ")
+            if up.startswith("LEARN:"):
+                subject = stripped.split(":", 1)[1].strip().strip("\"\'`* ")
+                break
+            if up == "NONE" or up.startswith("NONE "):
+                return
+        if not subject or len(subject) < 3:
+            return
+        from sali.learning.curiosity import CuriosityStore
+
+        cid = await CuriosityStore(self.pool, self._publisher).encounter(
+            subject=subject,
+            statement=f"Almir asked Sali to learn about {subject}.",
+            why_it_matters="Directly requested by Almir.",
+            priority=0.75, ttl_days=90)
+        with contextlib.suppress(Exception):
+            await journal.event("learning_requested",
+                                {"subject": subject[:120], "curiosity_id": str(cid)})
+
     async def _capture_goal(self, user_input: str, journal: Any) -> None:
         """A durable OBJECTIVE Almir just declared becomes a first-class goal, once.
 
@@ -1872,7 +2013,14 @@ class AgentLoop:
                 content = stripped.split(":", 1)[1].strip().strip("\"'`")
                 break
             if up == "SKIP" or up.startswith("SKIP "):
-                return
+                break
+        # DETERMINISTIC SAFETY NET. The KEEP/SKIP gate is a Q2_K free-text call whose failure
+        # is silent: SKIP / prose / malformed output on ~every real turn (0 memories in 3 days).
+        # So a clearly-stated durable fact must NOT depend on it — if the model gave no KEEP
+        # line, extract the fact ourselves from the high-precision `_DURABLE_FACT_RE` shapes.
+        # The model still wins when it produced a clean sentence; this only catches what it dropped.
+        if not content or len(content) < 6:
+            content = _deterministic_fact(user_input) or ""
         if not content or len(content) < 6:
             return
         kind = _infer_kind(content)
@@ -1895,7 +2043,7 @@ class AgentLoop:
         # dropped the name, the original message.
         with contextlib.suppress(Exception):
             _rel = _extract_relationship(content) or _extract_relationship(user_input)
-            _graph = getattr(self._memory_sink, "_graph", None)
+            _graph = self._graph  # the loop's real GraphService; _MemorySink has no _graph attr
             if _rel and _graph is not None:
                 _pname, _reltype = _rel
                 _almir = await _graph.ensure_node(
@@ -2163,7 +2311,9 @@ class AgentLoop:
                 world_note = ""
                 with contextlib.suppress(Exception):  # world-state is best-effort, never breaks a turn
                     # probe live gpu/ram/disk only when the query is about the system/live state (§7)
-                    ws = await self._world.snapshot(with_resources=plan.needs_live or plan.system_query)
+                    _wants_machine = bool(plan.needs_live or plan.system_query)
+                    ws = await self._world.snapshot(with_resources=_wants_machine,
+                                                    with_files=_wants_machine)
                     world_note = ws.render()
                 # SELF-STATE and HEALTH: kept DISTINCT from identity and world (§2), and — unlike before —
                 # surfaced into the prompt every turn (§11), so Sali knows what it's doing and how its
@@ -2225,6 +2375,27 @@ class AgentLoop:
                                 {"checked": len(_checks),
                                  "contradicted": sum(1 for c in _checks if not c.agrees)},
                             )
+                # WHAT ACTUALLY HAPPENED, when Almir asks about work that already ended. Sibling to
+                # check_claims above: same seam, same discipline, different table. That probe settles
+                # what he ASSERTS about this machine; this one fetches what the RECORD says about work
+                # Sali did himself, before he can guess at it.
+                #
+                # NOT the last-hour gate below. That one guards sali_state.last_failure — Sali's own
+                # LAST TURN, rendered in the present tense with no timestamp, where age is the only
+                # thing keeping it true. This is a named past task with its end time inside every
+                # sentence. Different table, different tense; that gate stays at 3600.
+                record_note: str | None = None
+                if not as_subagent:
+                    with contextlib.suppress(Exception):
+                        _rec = await check_work_question(self.pool, user_input,
+                                                         now=self.clock.now())
+                        if _rec is not None:
+                            record_note = render_record(_rec, ago=getattr(self.temporal, "ago", None))
+                            await journal.event(
+                                "work_record",
+                                {"kind": _rec.kind, "source": _rec.source,
+                                 "status": _rec.status, "age_s": int(_rec.age_s)},
+                            )
                 # No behavior_note assembly (brain-audit turn 7). Accepted preferences reach the
                 # model through the normal memory retrieval bundle, not a bespoke prompt-injection
                 # channel. The renderer is deleted; the assembler stays as a read-only API endpoint
@@ -2246,6 +2417,11 @@ class AgentLoop:
                         and tasks_note is None
                         and not machine_changes
                         and not checked_note
+                        # A record block is fetched precisely BECAUSE Almir asked about it. pack()
+                        # drops P1 sections silently under the small budget, so without this the
+                        # block could be looked up and then squeezed straight back out of the prompt
+                        # it exists for.
+                        and not record_note
                         and not as_subagent
                         and not plan.system_query and not plan.needs_live
                         and not plan.use_tools and not plan.use_graph
@@ -2302,6 +2478,7 @@ class AgentLoop:
                     agenda_note = _render_agenda(_view)
                 assembled = self.context.assemble(
                     user_input, bundle, specs, checked_note=checked_note,
+                    record_note=record_note,
                     temporal_note=temporal_note, when=self.temporal.ago,
                     live_note=LIVE_NOTE if plan.needs_live else None, history=history,
                     machine_changes=machine_changes, tasks_note=tasks_note,
@@ -2832,7 +3009,8 @@ class AgentLoop:
                                     exec_record_id,
                                     status="completed" if ok else "failed",
                                     result_summary=summary[:200] if summary else None,
-                                    error=summary[:200] if not ok else None)
+                                    error=summary[:200] if not ok else None,
+                                    execution_id=getattr(self, "_last_exec_id", None))
                         # Record meaningful progress on tool success (not heartbeat, not prose)
                         if ok and task_transition.active_task is not None:
                             with contextlib.suppress(Exception):
@@ -2881,6 +3059,15 @@ class AgentLoop:
                         messages.append(tool_msg)
                         if ok and call.name == "plan_task" and not as_subagent:
                             planned_this_turn = True
+                            # Populate task_skill NOW, at plan time. The only other caller (_skills_note
+                            # in astream context-assembly, gated on an ALREADY-active task) never fired for
+                            # how tasks actually run, so `task_skill` stayed empty and proficiency reported
+                            # 'novice' for everything with zero evidence. Persist here for the task just
+                            # created, reusing the same idempotent path. Best-effort — never break a turn.
+                            with contextlib.suppress(Exception):
+                                _planned_task = await self._tasks.current()
+                                if _planned_task is not None:
+                                    await self._skills_note(_planned_task, journal)
                         if ok:
                             # It works now — whatever was wrong has been fixed, so stop refusing it.
                             failed_sigs.pop(sig, None)
@@ -2981,8 +3168,13 @@ class AgentLoop:
                     from sali.verify.response_claims import validate_response
                     _cap_of = {t.name: t.capabilities
                                for t in self.registry.tools(available_only=False)}
+                    # Sali's live subsystem health, so "my perception's acting up" can be checked
+                    # against the probe instead of being taken on faith (cached, ~45s, no new cost).
+                    _health_map: dict[str, bool] | None = None
+                    with contextlib.suppress(Exception):
+                        _health_map = dict((await self._health.report())["subsystems"])
                     _rv = await validate_response(final_text, receipts=tool_record, cap_of=_cap_of,
-                                                  receipt_numbers=receipt_numbers)
+                                                  receipt_numbers=receipt_numbers, health=_health_map)
                     if _rv.changed:
                         await journal.event("response_claim_struck", {
                             "kinds": sorted({c.kind for c in _rv.struck}),
@@ -3003,6 +3195,38 @@ class AgentLoop:
                             await GroundingLog(self.pool).record(
                                 session_id=session_id, run_id=journal.run_id, claims=_rv.struck)
                         final_text = _rv.rewritten
+
+                # CLOSE-REQUEST REALITY CHECK: if Almir asked to close a NAMED app this turn and it is
+                # STILL running, any "done" / "it's gone" / "🔒" is false — the daemon runs as `almir` and
+                # cannot signal a root-owned (pkexec) GUI window without sudo. This verifies the TARGET
+                # ALMIR named (not Sali's phrasing, which slips to a pronoun the reply-side check can't
+                # attach), and only corrects when the reply does not already admit it couldn't. This is the
+                # exact recurring fabrication Almir reported ("close thunar → says closed, still open").
+                with contextlib.suppress(Exception):
+                    from sali.tools.probe import process_running as _proc_running
+                    from sali.verify.claims import extract_close_targets
+
+                    _close_targets = extract_close_targets(user_input)
+                    if _close_targets and not _CLOSE_DISCLAIM_RE.search(final_text):
+                        _still_open: list[str] = []
+                        for _ct in _close_targets:
+                            _pr = await _proc_running(_ct)
+                            if _pr is not None and _pr.success:
+                                _still_open.append(_ct)
+                        if _still_open:
+                            _names = ", ".join(dict.fromkeys(_still_open))
+                            final_text = (
+                                f"I can't actually close {_names} from here — it's still running. It looks "
+                                f"like it was started with elevated privileges (as root, via pkexec), which "
+                                f"I can't signal without sudo. You can close it yourself, or tell me to try "
+                                f"with sudo.")
+                            with contextlib.suppress(Exception):
+                                await journal.event("response_claim_struck", {
+                                    "kinds": ["process_close"], "count": len(_still_open),
+                                    "details": [f"{_names} still running"]})
+                                await self._emit(conn, "grounding.response_corrected", session_id, {
+                                    "run_id": str(journal.run_id), "kinds": ["process_close"],
+                                    "count": len(_still_open)}, subject_type="conversation")
 
                 # CROSS-TURN CONSISTENCY (§ Phase 3 #5, FLAG-ONLY): a blatant existence flip — Sali
                 # negating this turn what an earlier reply asserted (the /about-us.html "it's at X" then
@@ -3280,23 +3504,30 @@ class AgentLoop:
                 # here, after the reply is already on its way to him, and writes the memory itself. The
                 # model is still doing the understanding — deciding what the fact is and what topic it
                 # belongs to — but the decision to persist is the runtime's, not the model's.
-                if "remember" not in used_tools and _durable_signal(user_input, final_text):
-                    with contextlib.suppress(Exception):  # capture is a nicety, never break a done turn
-                        await self._capture_durable(user_input, final_text, journal)
-                # A durable OBJECTIVE (not a request) becomes a first-class goal that will feed
-                # the agenda synthesiser on every future turn. Gated conservatively (see
-                # _goal_signal) and idempotent (see _capture_goal), so noise doesn\'t fill the
-                # goal table - a false positive on the gate just costs one extra model call.
-                with contextlib.suppress(Exception):
-                    await self._capture_goal(user_input, journal)
-                # A PROMISE WITH A DEADLINE BECOMES A COMMITMENT HE CAN BE HELD TO.
-                with contextlib.suppress(Exception):
-                    await self._capture_promise(final_text, task_id=None, journal=journal)
-                # A follow-up WITHOUT a deadline ("I'll look into that") becomes an OPEN LOOP —
-                # the "still-on-my-mind" register the InitiativeEngine consults each cycle.
-                # Cheap; deduped by LOWER(title); TTL 14d so dropped loops age out.
-                with contextlib.suppress(Exception):
-                    await self._capture_open_loop(final_text, task_id=None, journal=journal)
+                # Capture is triggered by ALMIR's message. On an internal/self-directed turn the
+                # "user_input" is Sali's own chain-of-thought, so gating here stops self-talk from
+                # minting phantom memories/goals/promises (mirrors reflection.py's internal filter).
+                if not internal and not as_subagent:
+                    if "remember" not in used_tools and _durable_signal(user_input, final_text):
+                        with contextlib.suppress(Exception):  # capture is a nicety, never break a done turn
+                            await self._capture_durable(user_input, final_text, journal)
+                    # A durable OBJECTIVE (not a request) becomes a first-class goal that will feed
+                    # the agenda synthesiser on every future turn. Gated conservatively (see
+                    # _goal_signal) and idempotent (see _capture_goal), so noise doesn\'t fill the
+                    # goal table - a false positive on the gate just costs one extra model call.
+                    with contextlib.suppress(Exception):
+                        await self._capture_goal(user_input, journal)
+                    # "go learn X" is a CURIOSITY, not a task — the door plan_task correctly refuses.
+                    with contextlib.suppress(Exception):
+                        await self._capture_learning_request(user_input, journal)
+                    # A PROMISE WITH A DEADLINE BECOMES A COMMITMENT HE CAN BE HELD TO.
+                    with contextlib.suppress(Exception):
+                        await self._capture_promise(final_text, task_id=None, journal=journal)
+                    # A follow-up WITHOUT a deadline ("I'll look into that") becomes an OPEN LOOP —
+                    # the "still-on-my-mind" register the InitiativeEngine consults each cycle.
+                    # Cheap; deduped by LOWER(title); TTL 14d so dropped loops age out.
+                    with contextlib.suppress(Exception):
+                        await self._capture_open_loop(final_text, task_id=None, journal=journal)
                 await self._append_message(
                     conn, session_id, "assistant", final_text, model=self.settings.model.chat_model,
                     attachment=_reply_attachment,
@@ -3467,6 +3698,13 @@ class AgentLoop:
                 "  plan=$4, started_at=now() WHERE id=$1",
                 exec_id, int(decision.risk), f"policy:{decision.action.value}", plan_json,
             )
+        # Publish the tool_execution id for the task bookkeeping OUTSIDE this method. The
+        # `task_execution` row is written BEFORE the tool runs (it records the intent), so it cannot
+        # know this id yet — and without the link, `learning.failures` and `queue_gaps` can never tell
+        # WHICH blocked step a failure belongs to, which is why that column was NULL in production
+        # forever. Safe as a field: tool calls in a turn are sequential on the one cognition slot, and
+        # the reader runs immediately after this method returns.
+        self._last_exec_id = exec_id
         await journal.set_state(RunState.EXECUTE_TOOL)
         started = self.clock.now()
         # Resolve workspace from the active task (if any).
@@ -3546,6 +3784,30 @@ class AgentLoop:
             {"tool": tool.name, "verified": verify.success, "success": success},
         )
 
+        # PREDICTION LEDGER: settle expected-vs-actual for effectful tools (real /cognitive-metrics
+        # signal) + surface a confident surprise. Additive, fail-open, tool result untouched.
+        with contextlib.suppress(Exception):
+            from sali.core.enums import Capability as _Cap
+            if getattr(tool, "capabilities", frozenset()) & {
+                    _Cap.WRITE, _Cap.EXECUTE, _Cap.DESTRUCTIVE, _Cap.SYSTEM, _Cap.NETWORK}:
+                await self._ledger_tool_outcome(
+                    conn, journal, tool, call.arguments, success, duration, error_text)
+                # Only on success: a host Sali actually reached is part of its digital world; one a
+                # failed command merely named is not.
+                if success:
+                    await self._note_external_entity(tool, call.arguments)
+                # HOME KNOWLEDGE: fold this outcome into what Sali knows about his own machine, so
+                # "today ping says command-not-found" is already known BEFORE he reaches for it
+                # tomorrow. Deterministic classes only, and a success RETIRES the constraint — see
+                # sali/learning/environment.py for the three guards against learned helplessness.
+                if tool.name == "execute_command":
+                    from sali.core.toolvocab import binary_of as _bin
+                    from sali.learning import environment as _env
+                    _cmd = str((call.arguments or {}).get("command") or "")
+                    if _cmd.strip():
+                        await _env.note_tool_outcome(
+                            conn, binary=_bin(_cmd), success=success, error_text=error_text)
+
         # Provenance (§10): a tool result IS a live observation made just now — tag it with source +
         # timestamp so the model treats it as current ground truth, never confuses it with a memory, and
         # can prefer it over a stale recall. (ssh_run additionally carries the remote host_id in output.)
@@ -3561,6 +3823,90 @@ class AgentLoop:
                                       "error": redact_obj(result.error or verify.detail)}),
             False, result.error or verify.detail or result.display or "failed",
         )
+
+    async def _note_external_entity(self, tool: Any, arguments: dict[str, Any] | None) -> None:
+        """Record the external things a tool actually touched — a host, a site, a repo — so the Digital
+        World is an inventory Sali EARNED by working rather than a table someone must fill by hand.
+
+        `ExternalEntityStore.discover` had no caller anywhere in the codebase, which is exactly why that
+        screen could never show a single row: it was structurally incapable of it. The store dedupes by
+        (service, ref), so re-touching the same host is a no-op and this can run on every effectful call.
+        Best-effort and fail-open — bookkeeping must never affect a tool result."""
+        args = arguments or {}
+        blob = " ".join(str(v) for v in args.values() if isinstance(v, str | int))[:400]
+        found: list[tuple[str, str, str]] = []      # (service, ref, object_type)
+        _m = re.search(r"\bssh\s+(?:-\S+\s+)*(?:[A-Za-z0-9_.-]+@)?([A-Za-z0-9_.-]{2,})", blob)
+        if _m:
+            found.append(("ssh", _m.group(1), "host"))
+        for _host in re.findall(r"https?://([A-Za-z0-9.-]{3,})", blob)[:2]:
+            found.append(("web", _host, "website"))
+        _m = re.search(r"\bgit@([A-Za-z0-9.-]+)[:/]([A-Za-z0-9_./-]+)", blob)
+        if _m:
+            found.append(("git", (_m.group(1) + "/" + _m.group(2))[:120], "repository"))
+        if not found:
+            return
+        from sali.tasks.external import ExternalEntityStore
+
+        store = ExternalEntityStore(self.pool, self._publisher)
+        for service, ref, otype in found[:3]:
+            with contextlib.suppress(Exception):
+                await store.discover(service=service, ref=ref, object_type=otype,
+                                     purpose=f"touched by {tool.name}", status="active")
+
+    async def _ledger_tool_outcome(
+        self, conn: Any, journal: Any, tool: Any, arguments: dict[str, Any] | None,
+        success: bool, duration_ms: int, error_text: str | None,
+    ) -> None:
+        """PREDICTION LEDGER (the improvement engine). For an effectful tool, compare the learned
+        EXPECTATION (per-tool reliability + p50 latency, mined into memory `tool:<key>`) against what
+        actually happened, SETTLE it in decision_trace (the mutable expected->actual ledger the
+        /cognitive-metrics rollup reads — this is the real, non-cosmetic settlement that ledger lacked),
+        and emit a surprise signal when a CONFIDENT expectation is violated. Additive + fail-open; never
+        touches the tool result. Deliberately does NOT raise an autonomy candidate — surprise is measured
+        and observable here, not an actuator (respects the ungated-autonomy caution)."""
+        key = _tool_experience_key(tool.name, arguments)
+        prior: dict[str, Any] | None = None
+        if key:
+            row = await conn.fetchrow(
+                "SELECT structured FROM memory WHERE claim_key=$1 AND valid_until IS NULL "
+                "  AND superseded_by IS NULL", key)
+            if row and isinstance(row["structured"], dict):
+                prior = row["structured"]
+        predicted_rel = prior.get("reliability") if prior else None
+        p50 = prior.get("latency_p50_ms") if prior else None
+        runs = int(prior.get("runs") or 0) if prior else 0
+        conf = float(predicted_rel) if isinstance(predicted_rel, (int, float)) else 0.5
+        actual = "success" if success else "failure"
+        outcome_surprise = abs((1.0 if success else 0.0) - conf)
+        latency_surprise = 0.0
+        if isinstance(p50, (int, float)) and p50 and duration_ms and duration_ms > p50:
+            latency_surprise = min(1.0, (duration_ms - p50) / float(p50))
+        surprise = round(max(outcome_surprise, latency_surprise), 3)
+        evidence: dict[str, Any] = {
+            "tool": tool.name, "key": key, "predicted_reliability": predicted_rel,
+            "predicted_p50_ms": p50, "prior_runs": runs, "duration_ms": duration_ms,
+            "outcome_surprise": round(outcome_surprise, 3),
+            "latency_surprise": round(latency_surprise, 3), "surprise": surprise,
+        }
+        if error_text:
+            evidence["error"] = error_text[:200]
+        # Running a tool IS an act we expected to succeed; record it and settle with what happened.
+        from sali.cognitive.decision_trace import DecisionTraceStore
+        trace = DecisionTraceStore(self.pool)
+        tid = await trace.record(
+            mode="act", subject_ref=tool.name, origin="tool_dispatch",
+            reason_codes=["tool_prediction", "learned_prior" if prior else "cold_start"],
+            confidence=conf, evidence=evidence, expected_outcome="success")
+        await trace.observe_outcome(tid, actual_outcome=actual)
+        await journal.event("tool.prediction", {**evidence, "actual": actual}, latency_ms=duration_ms)
+        # A CONFIDENT expectation violated (a reliable tool failed, or latency spiked far past typical) is
+        # a genuine surprise worth surfacing — gated on enough prior evidence so cold-start never cries wolf.
+        if prior and runs >= 3 and surprise >= 0.5:
+            with contextlib.suppress(Exception):
+                await self._emit(conn, "tool.surprise", journal.run_id,
+                                 {"tool": tool.name, "surprise": surprise, "actual": actual,
+                                  "predicted_reliability": predicted_rel, "duration_ms": duration_ms,
+                                  "p50_ms": p50})
 
     async def _audit(
         self,

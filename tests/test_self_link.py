@@ -59,6 +59,17 @@ async def test_link_self_is_idempotent(db_conn: Any) -> None:
     assert await _agent_edges(db_conn) == first  # re-linking re-affirms, never duplicates
 
 
+async def test_model_swap_supersedes_thinks_with(db_conn: Any) -> None:
+    # REGRESSION (BUG 4): `thinks_with` used `relate`, so re-linking after a model swap left TWO current
+    # edges and the self-model reported a stale/ambiguous model. set_fact makes it single-valued — the
+    # new model supersedes the old, leaving exactly one current thinks_with edge.
+    machine = await _seed_world(db_conn)
+    await link_self(db_conn, machine_id=machine.id, model_name="sali:latest", workspace=_WS, source_dir=_SRC)
+    await link_self(db_conn, machine_id=machine.id, model_name="sali:lite", workspace=_WS, source_dir=_SRC)
+    thinks = {(r, k) for (r, k) in await _agent_edges(db_conn) if r == "thinks_with"}
+    assert thinks == {("thinks_with", "model:sali:lite")}, thinks  # exactly one current edge, the NEW model
+
+
 async def test_two_hop_from_agent_reaches_the_environment(db_conn: Any) -> None:
     from sali.graph import traverse
 

@@ -21,8 +21,11 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+from sali.core.enums import MemorySource, compare_sources
+from sali.core.knowledge import looks_checkable
 from sali.learning.behavior import BehaviorStore
 from sali.learning.candidates import LearningCandidateStore
+from sali.memory.writer import _record_memory_contradiction
 from sali.obs.log import get_logger
 
 log = get_logger("sali.learning.daily")
@@ -30,6 +33,16 @@ log = get_logger("sali.learning.daily")
 # A failed experiment that never once succeeded and keeps failing is noise, not knowledge (§5/§13).
 _ARCHIVE_AFTER_DAYS = 14
 _ARCHIVE_MIN_FAILURES = 3
+
+# FREE-TEXT semantic reconciliation (§13/§46) — the deliberately conservative half. Similarity is only a
+# FINDER: the >=0.92 band is surfaced for review; a row is only RETIRED at near-paraphrase (>=0.95) with a
+# STRICT evidence-authority win (never a tie), same scope, and NON-verifiable content (a checkable clash is
+# sent to grounding, not guessed). Supersession is the SOFT bitemporal close (valid_until + superseded_by),
+# so it is reversible + audited, never a delete. Episodic/procedural/experience/identity are excluded.
+_RECONCILE_SIM_FLAG = 0.92
+_RECONCILE_SIM_RETIRE = 0.95
+_RECONCILE_SCAN_LIMIT = 60
+_RECONCILE_MAX_RETIRE = 25
 
 
 @dataclass(slots=True)
@@ -41,6 +54,8 @@ class DailySummary:
     contradictions_open: int = 0
     candidates_active: int = 0
     behavior_pending: int = 0
+    reconciled: int = 0                   # free-text semantic memories superseded (soft, reversible)
+    conflicts_flagged: int = 0            # near-duplicate/verifiable conflicts surfaced for review
     consolidated: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -86,6 +101,9 @@ class DailyConsolidation:
                     summary.promoted += 1
             summary.archived = await self._archive_stale()
 
+            # 2b) free-text semantic reconciliation — conservative + reversible (see module note)
+            summary.reconciled, summary.conflicts_flagged = await self._reconcile_semantic()
+
             # 3) surface health (bounded reads) for the summary + the iPhone controller (§28)
             counts = await self._candidates.counts()
             summary.candidates_active = counts["active"]
@@ -100,6 +118,80 @@ class DailyConsolidation:
         await self._complete(run_id, summary)
         await self._emit("learning.daily_completed", {"ran_on": day.isoformat(), **summary.to_dict()})
         return summary
+
+    async def _reconcile_semantic(self) -> tuple[int, int]:
+        """Reconcile contradictory SEMANTIC free-text memories — the gap the functional/claim_key layer
+        never covered (memory.forgotten/contradiction = 0 for free-text). Deliberately conservative:
+        embedding similarity is only a FINDER; a row is RETIRED only at near-paraphrase, same scope, a
+        STRICT authority win, and non-verifiable content — otherwise the pair is merely flagged (or, if
+        checkable, marked for grounding so Sali re-observes instead of guessing). Supersession is the SOFT
+        bitemporal close (reversible + audited). Bounded per cycle. Returns (retired, flagged)."""
+        retired = 0
+        flagged = 0
+        seen: set[frozenset[str]] = set()
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, content, source::text AS source, scope, embedding::text AS vec "
+                "FROM memory WHERE layer='semantic'::memory_layer AND valid_until IS NULL "
+                "  AND superseded_by IS NULL AND embed_status='done' AND embedding IS NOT NULL "
+                "ORDER BY valid_from DESC LIMIT $1", _RECONCILE_SCAN_LIMIT)
+            for r in rows:
+                if retired >= _RECONCILE_MAX_RETIRE:
+                    break
+                near = await conn.fetchrow(
+                    "SELECT id, content, source::text AS source, "
+                    "  1 - (embedding <=> $1::vector) AS sim "
+                    "FROM memory WHERE layer='semantic'::memory_layer AND valid_until IS NULL "
+                    "  AND superseded_by IS NULL AND embed_status='done' AND embedding IS NOT NULL "
+                    "  AND id <> $2 AND scope = $3 "        # SAME scope only — a global vs project fact differ
+                    "ORDER BY embedding <=> $1::vector LIMIT 1", r["vec"], r["id"], r["scope"])
+                if near is None or float(near["sim"]) < _RECONCILE_SIM_FLAG:
+                    continue
+                pair = frozenset((str(r["id"]), str(near["id"])))
+                if pair in seen:
+                    continue
+                seen.add(pair)
+                if r["content"] == near["content"]:
+                    continue  # identical text is corroboration, not a conflict
+                sim = float(near["sim"])
+                # VERIFIABLE clash → never guess a winner; flag both for the grounding faculty to settle.
+                if looks_checkable(r["content"]) or looks_checkable(near["content"]):
+                    await conn.execute(
+                        "UPDATE memory SET needs_grounding=true, updated_at=now() "
+                        "WHERE id = ANY($1::uuid[]) AND needs_grounding=false", [r["id"], near["id"]])
+                    await self._flag_conflict(conn, r["id"], near["id"], sim, "verifiable")
+                    flagged += 1
+                    continue
+                src_r, src_n = MemorySource(r["source"]), MemorySource(near["source"])
+                decision = compare_sources(src_r, src_n)  # "new" => r out-ranks near
+                # Only a NEAR-PARAPHRASE with a STRICT authority win is retired; ties + the softer band flag.
+                if sim < _RECONCILE_SIM_RETIRE or decision == "tie":
+                    await self._flag_conflict(conn, r["id"], near["id"], sim,
+                                              "tie" if decision == "tie" else "near")
+                    flagged += 1
+                    continue
+                winner, loser = (r, near) if decision == "new" else (near, r)
+                w_src, l_src = (src_r, src_n) if decision == "new" else (src_n, src_r)
+                async with conn.transaction():
+                    closed = await conn.execute(
+                        "UPDATE memory SET valid_until=now(), updated_at=now() "
+                        "WHERE id=$1 AND valid_until IS NULL AND superseded_by IS NULL", loser["id"])
+                    if closed.split()[-1] == "0":
+                        continue  # already closed by someone else
+                    await conn.execute("UPDATE memory SET superseded_by=$2 WHERE id=$1",
+                                       loser["id"], winner["id"])
+                    await _record_memory_contradiction(
+                        conn, loser["id"], winner["id"], l_src, w_src, "new_wins")
+                retired += 1
+        if retired or flagged:
+            await self._emit("learning.reconciled", {"retired": retired, "flagged": flagged})
+        return retired, flagged
+
+    async def _flag_conflict(self, conn: Any, a_id: Any, b_id: Any, sim: float, why: str) -> None:
+        await conn.execute(
+            "INSERT INTO event (event_type, subject_type, subject_id, payload) "
+            "VALUES ('memory.possible_conflict','memory',$1,$2)",
+            a_id, {"similar_to": str(b_id), "similarity": round(sim, 3), "reason": why})
 
     async def catch_up(self, *, max_cycles: int = 1) -> list[DailySummary]:
         """Run missed cycles, most-recent first, up to ``max_cycles`` (§26). If the machine was offline

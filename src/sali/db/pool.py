@@ -17,13 +17,22 @@ from sali.config.settings import Settings
 _SERVER_SETTINGS = {"search_path": "sali, public", "application_name": "sali"}
 
 
+def _encode_json(value: Any) -> str:
+    """`default=str` so a stray datetime / UUID / Decimal inside a jsonb payload serialises to its text
+    form instead of raising `TypeError: Object of type datetime is not JSON serializable` — which used
+    to abort the whole write mid-transaction (self_state's `assemble()` returns raw datetimes → the
+    tool_execution result UPDATE crashed, orphaning the exec row in 'executing' and poisoning
+    last_failure). Diagnostic jsonb blobs never need to round-trip back as native objects, so text is safe."""
+    return json.dumps(value, default=str)
+
+
 async def init_connection(conn: Any) -> None:
     """Register codecs so Python dicts round-trip as JSONB/JSON transparently."""
     await conn.set_type_codec(
-        "jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog"
+        "jsonb", encoder=_encode_json, decoder=json.loads, schema="pg_catalog"
     )
     await conn.set_type_codec(
-        "json", encoder=json.dumps, decoder=json.loads, schema="pg_catalog"
+        "json", encoder=_encode_json, decoder=json.loads, schema="pg_catalog"
     )
 
 

@@ -45,6 +45,42 @@ def _is_ephemeral_task_dir(root: str | None, task_id: UUID) -> bool:
     return (p.name == str(task_id) and p.parent.name == "tasks" and "sali-works" in str(p))
 
 
+# The durable record, which lives in the SAME directory as an ephemeral 'auto' workspace and must
+# survive its cleanup: the artifact copies, the task snapshot, and the task's event log. `/tasks/history`
+# reads meta.json from exactly here, so removing these is not reclaiming scratch — it is deleting the
+# archive.
+_ARCHIVE_KEEP = frozenset({"artifacts", "meta.json", "events.jsonl"})
+
+
+def _unpreserved_files(root: Path, preserved: set[str]) -> list[str]:
+    """Regular files in the workspace that are NOT part of the archive and were never registered as
+    artifacts — i.e. output that nothing has a copy of. Their presence vetoes deletion.
+
+    Symlinks are followed for the is_file() test but compared by name: a link into another directory
+    is still something the task produced and still something we refuse to silently destroy."""
+    out: list[str] = []
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return ["<unreadable>"]        # cannot prove it is safe → treat as unsafe
+    for entry in entries:
+        if entry.name in _ARCHIVE_KEEP:
+            continue
+        if entry.name in preserved:
+            continue
+        if entry.is_dir() and not entry.is_symlink():
+            for sub in entry.rglob("*"):
+                if sub.is_file() and sub.name not in preserved:
+                    out.append(str(sub.relative_to(root)))
+                    if len(out) > 20:
+                        return out
+        else:
+            out.append(entry.name)
+        if len(out) > 20:
+            return out
+    return out
+
+
 class WorkspaceCleanupStore:
     def __init__(self, pool: Any, publisher: Any = None) -> None:
         self._pool = pool
@@ -67,18 +103,51 @@ class WorkspaceCleanupStore:
         if policy == "keep":
             await self._finish(cid, "skipped", reason=f"{ws_type} workspace is never auto-deleted")
             return {"status": "skipped", "workspace_type": ws_type, "root": root}
-        return await self._delete(cid, task_id, root)
+        # What has a durable copy? `_preserve_artifacts` copied every registered artifact into
+        # <root>/artifacts/ before we got here, so those basenames are safe to remove from the
+        # working tree. Anything else in there has no copy anywhere.
+        async with self._pool.acquire() as conn:
+            arts = await conn.fetch(
+                "SELECT artifact_path FROM task_artifact WHERE task_id = $1", task_id)
+        preserved = {Path(a["artifact_path"]).name for a in arts}
+        return await self._delete(cid, task_id, root, preserved)
 
-    async def _delete(self, cleanup_id: UUID, task_id: UUID, root: str) -> dict[str, Any]:
+    async def _delete(self, cleanup_id: UUID, task_id: UUID, root: str,
+                      preserved: set[str] | None = None) -> dict[str, Any]:
         if not _is_ephemeral_task_dir(root, task_id):
             await self._finish(cleanup_id, "skipped", reason="path is not the task's ephemeral dir")
             return {"status": "skipped", "reason": "unsafe path — refused", "root": root}
+        preserved = preserved or set()
+        p = Path(root)
+        # VETO: never delete output that nothing holds a copy of. This directory doubles as the task's
+        # ARCHIVE, so a blanket rmtree here destroyed the artifact copies made moments earlier as well
+        # as any file the task produced but never registered.
+        if p.exists():
+            orphans = _unpreserved_files(p, preserved)
+            if orphans:
+                reason = (f"kept: {len(orphans)} file(s) here have no preserved copy "
+                          f"({', '.join(orphans[:5])}{'…' if len(orphans) > 5 else ''})")
+                await self._finish(cleanup_id, "skipped", reason=reason[:200])
+                await self._emit("workspace.cleanup_skipped", task_id,
+                                 {"root": root, "reason": reason[:200], "files": orphans[:20]})
+                log.info("workspace_cleanup_kept", task_id=str(task_id), files=len(orphans))
+                return {"status": "skipped", "reason": reason, "root": root}
         await self._mark(cleanup_id, "started")
         await self._emit("workspace.cleanup_started", task_id, {"root": root})
         try:
-            p = Path(root)
             if p.exists():
-                shutil.rmtree(p)
+                # Remove the working tree but KEEP the archive — same directory, different lifetime.
+                for entry in p.iterdir():
+                    if entry.name in _ARCHIVE_KEEP:
+                        continue
+                    if entry.is_dir() and not entry.is_symlink():
+                        shutil.rmtree(entry)
+                    else:
+                        entry.unlink()
+                # Nothing durable was left behind, so take the directory too: a genuinely ephemeral
+                # workspace should leave no husk (there are already 95 of those on this machine).
+                if not any(p.iterdir()):
+                    shutil.rmtree(p)
             await self._finish(cleanup_id, "completed")
             await self._emit("workspace.cleanup_completed", task_id, {"root": root})
             return {"status": "completed", "root": root}
@@ -102,16 +171,16 @@ class WorkspaceCleanupStore:
             if tid is None or not _is_ephemeral_task_dir(r["workspace_root"], tid):
                 await self._finish(r["id"], "skipped", reason="not resumable safely")
                 continue
-            await self._mark(r["id"], "started")
-            try:
-                p = Path(r["workspace_root"])
-                if p.exists():
-                    shutil.rmtree(p)
-                await self._finish(r["id"], "completed")
-                await self._emit("workspace.cleanup_completed", tid, {"root": r["workspace_root"]})
+            # Reuse the guarded delete rather than a second, blunter copy of it: the retry path used
+            # a blanket rmtree, so a cleanup that crashed once would come back later and destroy the
+            # archive + unpreserved output that the primary path now refuses to touch.
+            async with self._pool.acquire() as conn:
+                arts = await conn.fetch(
+                    "SELECT artifact_path FROM task_artifact WHERE task_id = $1", tid)
+            preserved = {Path(a["artifact_path"]).name for a in arts}
+            res = await self._delete(r["id"], tid, r["workspace_root"], preserved)
+            if res.get("status") == "completed":
                 done += 1
-            except Exception as exc:  # noqa: BLE001 - stays failed, still resumable next time
-                await self._finish(r["id"], "failed", reason=str(exc)[:200])
         return done
 
     async def pending(self, *, limit: int = 50) -> list[dict[str, Any]]:

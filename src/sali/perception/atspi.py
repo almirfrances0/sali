@@ -28,11 +28,16 @@ def _env() -> dict[str, str]:
     return env
 
 
-def _run_probe(system_python: str, max_depth: int, max_nodes: int) -> dict[str, Any] | None:
+def _run_probe(system_python: str, max_depth: int, max_nodes: int,
+               pid: int = 0) -> dict[str, Any] | None:
     try:
+        argv = [system_python, _PROBE, "--max-depth", str(max_depth), "--max-nodes", str(max_nodes)]
+        if pid:
+            # Which application is focused is a question X11 already answered exactly. Handing the
+            # PID over turns the probe's guess into a lookup.
+            argv += ["--pid", str(pid)]
         out = subprocess.run(  # noqa: S603 - fixed argv (our own probe), Sali's own machine
-            [system_python, _PROBE, "--max-depth", str(max_depth), "--max-nodes", str(max_nodes)],
-            env=_env(), timeout=8, check=True, capture_output=True, text=True)
+            argv, env=_env(), timeout=8, check=True, capture_output=True, text=True)
     except (OSError, subprocess.SubprocessError):
         return None
     try:
@@ -49,13 +54,17 @@ def _to_node(raw: Any) -> UiNode | None:
     if not isinstance(raw_kids, list):  # a malformed probe tree must never raise (ui_tree "never raises")
         raw_kids = []
     kids = [n for n in (_to_node(c) for c in raw_kids) if n is not None]
-    return UiNode(role=str(raw.get("role", "?")), name=str(raw.get("name", "")), children=kids)
+    # `raw` has already been through redact_obj in ui_tree, so any text here is scrubbed.
+    return UiNode(role=str(raw.get("role", "?")), name=str(raw.get("name", "")),
+                  text=str(raw.get("text", "")), children=kids)
 
 
-async def ui_tree(system_python: str, *, max_depth: int, max_nodes: int) -> tuple[UiNode | None, str]:
+async def ui_tree(system_python: str, *, max_depth: int, max_nodes: int,
+                  pid: int = 0) -> tuple[UiNode | None, str]:
     """The focused app's accessibility tree, plus a detail string explaining any unavailability.
-    Never raises."""
-    parsed = await asyncio.to_thread(_run_probe, system_python, max_depth, max_nodes)
+    Never raises. `pid` is the focused window's process from X11 — when known it selects the
+    application exactly, instead of the probe inferring it from ACTIVE states."""
+    parsed = await asyncio.to_thread(_run_probe, system_python, max_depth, max_nodes, pid)
     if parsed is None:
         return None, "accessibility probe didn't run (no system PyGObject / a11y bus)"
     if not parsed.get("ok"):

@@ -28,6 +28,10 @@ class _Bucket:
     sample: str  # a representative target, to name a single-file bucket well
     targets: set[str]  # DISTINCT targets (capped) — so we can say "20 changes to 1 file" vs "20 files"
     capped: bool = False  # True once distinct targets hit the cap (so counts read as "N+")
+    # Whatever the source event carried beyond its target — for a window focus, the TITLE. Without
+    # this the row said "focused code" and nothing else: the app but never the document, which is the
+    # half that says what Almir is actually working ON.
+    extra: dict = None  # type: ignore[assignment]
 
 
 class Aggregator:
@@ -43,12 +47,17 @@ class Aggregator:
         if bucket is None:
             self._buckets[key] = _Bucket(
                 kind=event.kind, where=self._where(event), count=1, first_at=event.at,
-                last_at=event.at, importance=importance, sample=event.target, targets={event.target})
+                last_at=event.at, importance=importance, sample=event.target, targets={event.target},
+                extra=dict(getattr(event, "extra", None) or {}))
             return
         bucket.count += 1
         bucket.last_at = event.at
         bucket.importance = max(bucket.importance, importance)
         bucket.sample = event.target
+        # Newest wins: within one window a person switches documents inside the same app, and the
+        # title he is on NOW is the one worth reporting.
+        if getattr(event, "extra", None):
+            bucket.extra = dict(event.extra)
         if len(bucket.targets) < _MAX_TARGETS:
             bucket.targets.add(event.target)
         else:
@@ -83,14 +92,19 @@ class Aggregator:
         return parent or os.sep
 
     def _observe(self, b: _Bucket) -> Observation:
+        detail = {"where": b.where, "sample": b.sample, "files": len(b.targets)}
+        if b.extra:
+            detail.update({k: v for k, v in b.extra.items() if v})
         return Observation(
             kind=b.kind, summary=self._summary(b), importance=b.importance, count=b.count,
-            first_at=b.first_at, last_at=b.last_at,
-            detail={"where": b.where, "sample": b.sample, "files": len(b.targets)})
+            first_at=b.first_at, last_at=b.last_at, detail=detail)
 
     def _summary(self, b: _Bucket) -> str:
         if b.kind is EventKind.WINDOW_FOCUS:
-            return f"focused {b.where}"
+            # "focused code — voice.py" beats "focused code". The app alone tells you he is in an
+            # editor; the title tells you what he is editing, which is the thing worth knowing.
+            title = str((b.extra or {}).get("title") or "").strip()
+            return f"focused {b.where}" + (f" — {title}" if title else "")
         verb = {
             EventKind.FILE_CREATED: "created", EventKind.FILE_MODIFIED: "modified",
             EventKind.FILE_DELETED: "deleted", EventKind.FILE_MOVED: "moved",

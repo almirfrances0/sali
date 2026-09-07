@@ -22,14 +22,22 @@ class WindowInfo:
 
 @dataclass(slots=True)
 class UiNode:
-    """One node of the accessibility tree: its role and label — never a field's *contents* (§27)."""
+    """One node of the accessibility tree: its role, label, and — for text-bearing roles — contents.
+
+    `text` is empty for everything except genuine text surfaces (a terminal buffer, a document, an
+    entry), and is NEVER populated for a password field. It arrives already scrubbed by
+    security/redact, which masks credential shapes and leaves ordinary text alone.
+    """
 
     role: str
     name: str
+    text: str = ""
     children: list[UiNode] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"role": self.role, "name": self.name}
+        if self.text:
+            out["text"] = self.text
         if self.children:
             out["children"] = [c.to_dict() for c in self.children]
         return out

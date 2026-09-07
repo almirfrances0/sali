@@ -48,6 +48,55 @@ class SystemState:
     disk_pressure: set[str] = field(default_factory=set)    # mounts at/above the threshold
 
 
+# Linux hands out 32768-60999 for ephemeral sockets. Nobody CHOSE those numbers, so a change in
+# them describes normal process churn and never a service appearing.
+_EPHEMERAL_FROM = 32768
+_LOOPBACK = ("127.", "::1", "[::1]", "localhost")
+
+
+# Ports the operating system opens for its own housekeeping. Announcing these as "a new service …
+# I haven't touched it" is not a security signal, it is the machine breathing.
+_ROUTINE_PORTS = frozenset({
+    5353,   # mDNS / avahi
+    5355,   # LLMNR
+    546, 547,  # DHCPv6 client/server
+    67, 68,    # DHCP
+    1900,   # SSDP / UPnP discovery
+    123,    # NTP
+})
+
+
+def _is_link_local(host: str) -> bool:
+    """IPv6 link-local (fe80::/10), including the %iface suffix. These addresses are per-interface
+    autoconfiguration and their exact text changes, so each reappearance reads as a brand-new
+    service to a baseline that stores the literal string."""
+    h = host.strip("[]").split("%", 1)[0].lower()
+    return h.startswith("fe80:") or h.startswith("169.254.")
+
+
+def _is_worth_noticing(proto: str, local: str) -> bool:
+    """A listening socket a person would want to hear about.
+
+    Sali's own psql and python processes were opening short-lived loopback sockets, and every one
+    became "a new listening socket tcp:127.0.0.1:34329" — tiered important, and eventually said out
+    loud to Almir. What makes a socket notable is that someone chose the port, or that it is
+    reachable from off this machine. An ephemeral port bound to loopback is neither.
+    """
+    host, _, port_s = local.rpartition(":")
+    try:
+        port = int(port_s)
+    except ValueError:
+        return False
+    on_loopback = host.startswith(_LOOPBACK) or host in _LOOPBACK
+    if port >= _EPHEMERAL_FROM and on_loopback:
+        return False
+    if port in _ROUTINE_PORTS:
+        return False          # mDNS, DHCP, SSDP — the OS, not a service anyone started
+    if _is_link_local(host):
+        return False          # a churning autoconfigured address, forever "new"
+    return True
+
+
 def _parse_ports(ss_out: str) -> set[str]:
     ports: set[str] = set()
     for line in ss_out.splitlines()[1:]:  # skip header
@@ -56,7 +105,7 @@ def _parse_ports(ss_out: str) -> set[str]:
             continue
         proto = cols[0].lower()
         local = cols[4]  # e.g. 0.0.0.0:8080 or [::]:443
-        if ":" in local:
+        if ":" in local and _is_worth_noticing(proto, local):
             ports.add(f"{proto}:{local}")
     return ports
 

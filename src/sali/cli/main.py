@@ -2218,18 +2218,30 @@ async def _daemon(settings: Settings, *, serve_api: bool = True,
     learning = LearningService(pool, provider)
     stop = asyncio.Event()
 
+    def _almir_is_waiting() -> bool:
+        """Whether a foreground turn wants the machine. Consolidation, research and capability
+        inference all call the model directly on this faculty — they take no execution lease, so
+        nothing else stops them, and inference is a single no-priority semaphore. Learning is
+        supposed to happen in free time; this is what makes 'free time' mean something."""
+        try:
+            return bool(runtime.coordinator.foreground_demanded)
+        except Exception:  # noqa: BLE001 — never let the guard itself break the faculty
+            return False
+
     async def on_tick(cycle: int) -> None:
         if cycle == 1 or cycle % _TOOL_INTEL_EVERY == 0:  # keep the tool picture current (§26/§74)
             from sali.twin import tool_intel
 
-            await tool_intel.run_pass(pool)
-        if cycle % _LEARN_EVERY == 0:
+            await tool_intel.run_pass(pool)   # DB + PATH scan only, no model call — safe to run
+        # Everything below calls the model. Check before each one, not just once: consolidate can
+        # take minutes, and Almir may well have started typing during it.
+        if cycle % _LEARN_EVERY == 0 and not _almir_is_waiting():
             await learning.consolidate()
-        if cycle % _RESEARCH_EVERY == 0:  # §9: research a few pending learning gaps (internet-gated)
+        if cycle % _RESEARCH_EVERY == 0 and not _almir_is_waiting():
             from sali.learning.research import research_pass
 
             await research_pass(pool, provider)
-        if cycle % _CAP_INFER_EVERY == 0:  # §8: give a few unmapped tools capabilities via the model
+        if cycle % _CAP_INFER_EVERY == 0 and not _almir_is_waiting():
             from sali.twin.capabilities import infer_unmapped
 
             async with pool.acquire() as conn:  # no outer txn — makes model + subprocess calls
@@ -2427,6 +2439,10 @@ async def _daemon(settings: Settings, *, serve_api: bool = True,
                             "redundant copies over checking the same thing again."
                             if crowded >= 2 else ""
                         )
+                        from sali.runtime.session import background_session_id as _bg_sid
+                        # THE one that produced "All cleared up. I've retired the stale belief —
+                        # bash is right here at /usr/bin/bash". Checking his own notes is housekeeping;
+                        # it is not something Almir asked for and does not belong in his chat.
                         await runtime.submit_background(
                             "You wrote this down but never checked it: "
                             f'"{row["content"]}".{crowd_note} Look on this machine now — a quick look, '
@@ -2436,7 +2452,7 @@ async def _daemon(settings: Settings, *, serve_api: bool = True,
                             "the verdict leaves the belief exactly as unsure as before and wastes the "
                             "check. Do not answer from memory. Say nothing to Almir; this is your own "
                             "housekeeping.",
-                            priority="background",
+                            session_id=_bg_sid(), priority="background",
                         )
                         # BACK OFF WHETHER OR NOT IT SETTLED. Observed on the first real run: Sali did go
                         # and look (list_directory, verified) and then simply answered without calling
@@ -2468,7 +2484,15 @@ async def _daemon(settings: Settings, *, serve_api: bool = True,
     from sali.events.investigate import InvestigateLoop
 
     bus = EventBus(pool)
-    proactive = ProactiveLoop(pool)          # §16: surface notify/investigate observations to Almir
+    # runtime= is what lets it speak into Almir's CHAT instead of a libnotify popup at
+    # DISPLAY=:0, which on this headless box reached nobody.
+    # Sali writes his own unprompted messages from here on. The DECISION to speak stays in the
+    # deterministic gates; this only hands the phrasing to the model, and declines whenever Almir is
+    # being served. Unbound (tests, one-shots) every site falls back to its old fixed wording.
+    from sali.cognitive import voice as _voice
+    _voice.bind(provider=provider, coordinator=runtime.coordinator, pool=pool)
+
+    proactive = ProactiveLoop(pool, runtime=runtime)   # §16: surface what Sali notices
     proactive_wake = bus.subscribe()
     faculties.append(("proactive", lambda: proactive.run(stop, proactive_wake)))
     # Attention → wake (§12/§17): an 'investigate' verdict drives one autonomous investigate-and-inform
@@ -2491,6 +2515,33 @@ async def _daemon(settings: Settings, *, serve_api: bool = True,
                       lambda: initiative_driver.run(stop, initiative_wake)))
     # Publish the driver to the app state so /cognitive-metrics can read status().
     kernel._initiative_driver = initiative_driver  # type: ignore[attr-defined]
+
+    # Knowledge maturity (§27): drive the dormant DAILY CONSOLIDATION — it promotes learning candidates,
+    # archives stale experiments, and reconciles the day, the maturity layer nothing else ran (0 callers
+    # before this; consolidation_run had 0 rows ever). Idempotent via the consolidation_run(ran_on)
+    # UNIQUE, so the hourly re-check is a clean skip until the UTC day rolls; it takes no execution lease
+    # and makes only background model calls, so it never contends with Almir's turns. Borrows the ONE
+    # provider handle (never a second inference path). Proven idempotent on sali_admtest before wiring.
+    from sali.learning.daily import DailyConsolidation
+    from sali.learning.service import LearningService
+
+    _daily = DailyConsolidation(pool, provider, runtime._publisher,
+                                learning_service=LearningService(pool, provider))
+    _dclog = _get_glogger("sali.consolidation")
+
+    async def _consolidation_loop() -> None:
+        while not stop.is_set():
+            with _contextlib.suppress(Exception):  # one bad cycle must never kill the faculty
+                summaries = await _daily.catch_up(max_cycles=3)  # a re-fire before the day rolls is a no-op
+                ran = [str(s.ran_on) for s in (summaries or []) if not s.skipped]
+                if ran:
+                    _dclog.info("daily_consolidation_ran", days=ran)
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=3600.0)  # re-check hourly
+            except TimeoutError:
+                pass
+
+    faculties.append(("consolidation", _consolidation_loop))
 
     # ONE mind, many windows: host the REST + WebSocket API IN THIS PROCESS, sharing the single runtime
     # above. The iPhone app and the terminal `sali agent` connect here — they are windows into the same
@@ -2556,8 +2607,23 @@ def _perception_engine(settings: Settings, pool: Any = None) -> Any:
 
     perception = build_perception(settings)
 
+    # The window read costs ~4ms and runs every 3s; the accessibility tree costs ~86ms and only
+    # means something different when the focused window CHANGES. So: cheap read always, deep read on
+    # a switch. Before this, every production caller passed ui=False and the a11y layer — 25 live
+    # applications with fully walkable trees — was never once consulted by anything continuous.
+    _last_focus: dict[str, tuple[str, str]] = {"key": ("", "")}
+
     async def snapshot() -> dict[str, Any]:
-        return await perception.snapshot(ui=False)
+        snap = await perception.snapshot(ui=False)
+        win = (snap or {}).get("window") or {}
+        key = (str(win.get("app") or ""), str(win.get("title") or ""))
+        if key[0] and key != _last_focus["key"]:
+            _last_focus["key"] = key
+            try:
+                snap = await perception.snapshot(ui=True)
+            except Exception:  # noqa: BLE001 - a slow/absent a11y bus must never stall perception
+                pass
+        return snap
 
     p = settings.perception
     sink = DbObservationSink(pool) if pool is not None else None  # None → engine's default LoggingSink

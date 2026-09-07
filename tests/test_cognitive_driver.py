@@ -100,9 +100,14 @@ async def test_initiative_driver_resource_gate_defers(live_pool, monkeypatch) ->
 
     monkeypatch.setattr(init_mod.InitiativeEngine, "generate_candidates", _fake_generate)
 
+    # The REAL contract. This previously mocked {"gpu_vram_percent", "cpu_load_1m",
+    # "disk_used_percent"} — a shape ResourceMonitor.snapshot() never returns (it returns
+    # {"preserve", "reading", "state"}). So the gate read three keys that were always None,
+    # every threshold compared against 0.0, and the branch was unreachable in production while
+    # this test happily passed against the fiction. Assert the verdict the monitor actually emits.
     resources = MagicMock()
     resources.snapshot = AsyncMock(return_value={
-        "gpu_vram_percent": 95, "cpu_load_1m": 1.0, "disk_used_percent": 40})
+        "state": "critical", "preserve": True, "reading": None})
     driver = InitiativeDriver(live_pool, resource_monitor=resources)
     touched = await driver.tick()
 
@@ -128,7 +133,7 @@ async def test_initiative_driver_skips_when_nothing_due(live_pool, monkeypatch) 
         called["n"] += 1
         return []
 
-    async def _fake_next_wake(self, now=None):  # noqa: ARG001
+    async def _fake_next_wake(self, now=None, **kwargs):  # noqa: ARG001
         return datetime.now(UTC) + timedelta(hours=6)
 
     monkeypatch.setattr(init_mod.InitiativeEngine, "generate_candidates", _fake_generate)
@@ -139,6 +144,60 @@ async def test_initiative_driver_skips_when_nothing_due(live_pool, monkeypatch) 
 
     assert touched == []
     assert called["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_driver_gate_ignores_its_own_curiosity_backoff(live_pool, monkeypatch) -> None:
+    """A dispatched learning session must NOT switch the whole scanner off.
+
+    _dispatch_curiosity reserves a topic by pushing that initiative row's `next_attempt` six hours
+    out. next_wake() takes the MIN over routines/obligations/commitments AND initiative.next_attempt,
+    and the driver skipped its whole cycle when that min was far away — so one curiosity dispatch
+    blacked out every other source (commitments, obligations, goals, open loops) for six hours.
+    Observed live before the fix: zero initiative cycles across six daemon restarts.
+
+    The gate must therefore ask next_wake to EXCLUDE initiative back-offs. Per-topic pacing still
+    happens, in the `next_attempt <= now()` predicate inside _dispatch_curiosity's own query."""
+    from sali.runtime import initiative as init_mod
+
+    called = {"n": 0}
+    asked_with = {}
+
+    async def _fake_generate(self, now=None):  # noqa: ARG001
+        called["n"] += 1
+        return []
+
+    async def _fake_next_wake(self, now=None, include_initiative=True):  # noqa: ARG001
+        asked_with["include_initiative"] = include_initiative
+        # Nothing else is scheduled; the ONLY far-future wake is a curiosity back-off, which is
+        # exactly what the gate must not honour.
+        return (datetime.now(UTC) + timedelta(hours=6)) if include_initiative else None
+
+    monkeypatch.setattr(init_mod.InitiativeEngine, "generate_candidates", _fake_generate)
+    monkeypatch.setattr(init_mod.InitiativeEngine, "next_wake", _fake_next_wake)
+
+    driver = InitiativeDriver(live_pool, interval_s=60.0)
+    await driver.tick()
+
+    assert asked_with["include_initiative"] is False, "the gate must exclude initiative back-offs"
+    assert called["n"] == 1, "the scanner must still run after a curiosity was dispatched"
+
+
+@pytest.mark.asyncio
+async def test_next_wake_can_exclude_initiative_backoffs(live_pool) -> None:
+    """The engine-level contract behind that gate: a pending initiative retry is visible to the
+    general query (the status rollup wants it) and invisible to the driver's gate."""
+    from sali.runtime.initiative import InitiativeEngine
+
+    async with live_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO initiative (source, subject_ref, title, status, next_attempt) "
+            "VALUES ('curiosity', 'probe-subject', 'probe', 'candidate', now() + interval '6 hours')")
+
+    engine = InitiativeEngine(live_pool)
+    assert await engine.next_wake() is not None, "the back-off is real and must stay visible"
+    assert await engine.next_wake(include_initiative=False) is None, \
+        "but the driver's gate must not see its own back-off"
 
 
 @pytest.mark.asyncio

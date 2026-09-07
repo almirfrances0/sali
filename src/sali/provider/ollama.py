@@ -247,14 +247,19 @@ class OllamaProvider:
         a pull may ignore the first request. Called on every switch and at startup after restoring a
         saved choice, so exactly one large model is ever resident — the active one. Never raises.
         """
-        from sali.provider.residency import invalidate, survey
+        from sali.provider.residency import invalidate, normalize_ref, survey
 
-        keep_base = (keep or "").split(":", 1)[0]
-        embed_base = (self.s.embed_model or "").split(":", 1)[0]
+        # COMPARE THE TAG. This was a base-name comparison, which made every `sali:*` tag look like
+        # the model being kept — so switching sali:latest -> sali:pro evicted NOTHING and left the
+        # previous 30B pinned (keep_alive=24h) beside the new one: precisely the two-large-runners
+        # state this method exists to prevent, and which browned the host out twice on 2026-09-01.
+        # Tags are quantisations here (Q2_K_P / IQ2_M / IQ4_XS), not aliases.
+        keep_ref = normalize_ref(keep or "")
+        embed_ref = normalize_ref(self.s.embed_model or "")
 
         def _foreign(runners: Any) -> list[str]:
             return [r.model for r in runners
-                    if r.model.split(":", 1)[0] not in (keep_base, embed_base)]
+                    if normalize_ref(r.model) not in (keep_ref, embed_ref)]
 
         # BOUND every ollama call here. This is best-effort eviction (the switch path and vram-janitor
         # also evict later), but it is awaited at STARTUP — and the shared client's timeout is sized for
@@ -283,7 +288,7 @@ class OllamaProvider:
                 still = {r.model for r in _resurvey.runners}
                 confirmed = [m for m in targets if m not in still]
                 still_foreign = [m for m in still
-                                 if m.split(":", 1)[0] not in (keep_base, embed_base)]
+                                 if normalize_ref(m) not in (keep_ref, embed_ref)]
                 if not still_foreign:
                     return confirmed  # nothing foreign left — done
         return confirmed

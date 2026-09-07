@@ -9,7 +9,9 @@ execution/artifact evidence; the reviewer still decides completion.
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
+from urllib.parse import urlparse
 
 from sali.core.enums import Capability, RiskLevel
 from sali.tools.base import Tool, ToolResult
@@ -93,6 +95,93 @@ class RecordLesson(Tool):
             display="recorded a candidate lesson (promotes to memory only after the task is verified)")
 
 
+class LearnCuriosity(Tool):
+    name = "learn_curiosity"
+    description = (
+        "During a background learning session, record ONE thing you just learned about the topic you "
+        "are studying. It is appended to that topic's discovery log and saved as a cited, web-sourced "
+        "memory you can recall later. A finding REQUIRES the source url you actually read it from. "
+        "If you found nothing new this session, call it with found=false and record nothing."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "subject": {"type": "string", "description": "The topic you are studying."},
+            "finding": {"type": "string", "description": "What you learned, in one or two sentences."},
+            "source_url": {"type": "string", "description": "The page you read it from. Required for a finding."},
+            "understanding": {"type": "string",
+                              "description": "Optional: your updated overall understanding of the topic."},
+            "found": {"type": "boolean", "description": "false if you found nothing new this session."},
+        },
+        "required": ["subject"],
+    }
+    risk_level = RiskLevel.R1
+    capabilities = frozenset({Capability.WRITE})
+    idempotent = False
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        subject = str(args.get("subject", "")).strip()
+        if not subject:
+            return ToolResult(ok=False, display="need a subject",
+                              error="which topic were you studying?")
+        raw_found = args.get("found")
+        found = True if raw_found is None else bool(raw_found)
+        finding = str(args.get("finding", "")).strip()
+        url = str(args.get("source_url", "")).strip()
+
+        # An honest empty session is a valid outcome and must stay cheap to report — otherwise the
+        # only way to end a session is to invent something.
+        if not found:
+            return ToolResult(ok=True, output={"subject": subject, "recorded": False},
+                              display=f"nothing new found about {subject} this session")
+
+        # THE ANTI-FABRICATION GATE. A finding without the page it came from would become a memory
+        # Sali could later state as fact with nothing behind it. Refusing here is the whole reason
+        # this tool is safe to run unattended, thousands of times, while nobody is watching.
+        if not finding:
+            return ToolResult(ok=False, display="need the finding",
+                              error="say what you actually learned, or pass found=false")
+        if not url.lower().startswith(("http://", "https://")):
+            return ToolResult(
+                ok=False, display="a finding needs its source",
+                error=("learn_curiosity refuses a finding without the source_url you read it from — "
+                       "an uncited claim would become a memory Sali could later assert as fact."))
+        if ctx.pool is None:
+            return ToolResult(ok=False, display="unavailable",
+                              error="no datastore available in this context")
+
+        from sali.learning.curiosity import CuriosityStore
+
+        store = CuriosityStore(ctx.pool)
+        # encounter() dedups by subject slug, so a session on an existing topic reinforces it rather
+        # than forking a second row; a topic studied without a prior curiosity simply opens one.
+        cid = await store.encounter(subject=subject,
+                                    statement=f"Studying {subject}.", priority=0.5)
+        await store.learn(cid, note=f"{finding} [{url}]",
+                          new_understanding=str(args.get("understanding") or "").strip() or None)
+
+        # The durable half. EXTERNAL_SOURCE is load-bearing: it forces needs_grounding, renders as
+        # "from the web — unverified", is excluded from confidence promotion, and is excluded from the
+        # grounding re-scan. A web claim can therefore never be laundered into a confident fact by
+        # repetition — which is exactly what unattended learning must never be able to do.
+        with contextlib.suppress(Exception):
+            if ctx.memory is not None:
+                from sali.core.enums import MemorySource
+
+                await ctx.memory.remember(
+                    f"{subject}: {finding}",
+                    source=MemorySource.EXTERNAL_SOURCE,
+                    note=f"reported by {urlparse(url).netloc} — {url}",
+                    kind="fact", importance=0.5, needs_grounding=True,
+                    structured={"source_url": url, "source_domain": urlparse(url).netloc,
+                                "kind": "researched", "curiosity_id": str(cid)})
+
+        return ToolResult(
+            ok=True,
+            output={"subject": subject, "curiosity_id": str(cid), "source": url},
+            display=f"learned something new about {subject} (cited {urlparse(url).netloc})")
+
+
 def register_builtins(registry: ToolRegistry) -> None:
-    for tool in (ResearchTask(), RecordLesson()):
+    for tool in (ResearchTask(), RecordLesson(), LearnCuriosity()):
         registry.register(tool)

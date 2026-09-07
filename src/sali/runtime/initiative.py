@@ -166,18 +166,30 @@ class InitiativeEngine:
                 touched.append(str(iid))
         return touched
 
-    async def next_wake(self, *, now: datetime | None = None) -> datetime | None:
+    async def next_wake(self, *, now: datetime | None = None,
+                        include_initiative: bool = True) -> datetime | None:
         """The earliest time Sali should wake to do something — the min of the next due routine,
         obligation check, commitment deadline, and deferred-initiative retry (§37). None = nothing
-        scheduled → Sali can stay asleep until an external event arrives."""
+        scheduled → Sali can stay asleep until an external event arrives.
+
+        include_initiative=False omits initiative.next_attempt. That exists for ONE caller:
+        the InitiativeDriver's own skip gate. The driver reserves a dispatched curiosity by pushing
+        that row's next_attempt six hours out — correct per-topic pacing — but feeding its own
+        back-off back into its own gate made a single learning session switch the WHOLE scanner off
+        for six hours (every source: commitments, obligations, goals, open loops, curiosities), which
+        is the opposite of what a per-topic back-off means. Per-topic pacing stays where it belongs:
+        the next_attempt <= now() predicate inside _dispatch_curiosity's own SELECT."""
+        initiative_leg = (
+            " UNION ALL SELECT min(next_attempt) FROM initiative "
+            "   WHERE status NOT IN ('completed','dismissed','expired') "
+        ) if include_initiative else ""
         async with self._pool.acquire() as conn:
             candidates = await conn.fetch(
                 "SELECT min(t) AS t FROM ("
                 "  SELECT min(next_execution) AS t FROM routine WHERE enabled "
                 "  UNION ALL SELECT min(next_check) FROM obligation WHERE status IN ('open','in_progress','blocked') "
                 "  UNION ALL SELECT min(deadline) FROM commitment WHERE status IN ('open','in_progress','blocked') "
-                "  UNION ALL SELECT min(next_attempt) FROM initiative "
-                "    WHERE status NOT IN ('completed','dismissed','expired')"
+                + initiative_leg +
                 ") u")
         val: datetime | None = candidates[0]["t"] if candidates else None
         return val

@@ -692,6 +692,22 @@ class TaskStore:
                 row = await conn.fetchrow("SELECT objective, result FROM task WHERE id = $1", task_id)
             objective = (row["objective"] if row else "") or "the task"
             body = result or (row["result"] if row else None)
+
+            # What the review could NOT confirm. The reviewer records every requirement the objective
+            # stated that no step named and no probe checked; without carrying them here, the only
+            # thing Almir hears is "Finished", and the caveat sits in a table he never opens.
+            unverified: list[str] = []
+            with contextlib.suppress(Exception):
+                async with self.pool.acquire() as conn:
+                    reqs = await conn.fetchval(
+                        "SELECT requirements_checked FROM task_review WHERE task_id = $1 "
+                        "ORDER BY attempt DESC LIMIT 1", task_id)
+                for r in (reqs or []):
+                    if isinstance(r, dict) and r.get("kind") == "objective" \
+                            and r.get("status") == "unknown":
+                        clause = str(r.get("requirement", ""))
+                        unverified.append(clause.split(":", 1)[-1].strip()[:80])
+
             if status == "done":
                 text = f"Finished: {objective}."
                 importance = "completion"
@@ -700,8 +716,41 @@ class TaskStore:
                 importance = "failure" if status == "failed" else "update"
             if body:
                 text += f"\n\n{str(body)[:600]}"
+            if status == "done" and unverified:
+                text += ("\n\nI did not verify: " + "; ".join(unverified[:4])
+                         + ". Worth a look before you rely on it.")
+
+            # The most common thing Sali ever says on his own, and it read like a build server.
+            from sali.cognitive import voice
+            text = await voice.compose(
+                situation=("You've just finished a job Almir gave you — he isn't watching, so this "
+                           "is you telling him it's done. Say how it went in a sentence."),
+                facts={"the job": objective,
+                       "how it ended": {"done": "you finished it",
+                                        "failed": "it failed",
+                                        "abandoned": "it was stopped before finishing"}.get(
+                                            status, status),
+                       "what came of it": (str(body)[:600] if body else None),
+                       # Say this out loud if it is set. Claiming a clean finish over an unchecked
+                       # requirement is the failure mode this whole path exists to prevent.
+                       "what you did NOT check": ("; ".join(unverified[:4]) if unverified else None)},
+                fallback=text)
+
+            sid = persistent_session_id()
+            # PERSIST IT. This emitted the event and never wrote a message row, while the phone reads
+            # the transcript from `message` — so the one line telling Almir his job was finished was
+            # gone the next time he opened the app. A thing Sali says that vanishes on reopen is the
+            # exact failure Almir named: that is not a person, that is a notification.
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO conversation (id, channel) VALUES ($1, 'agent') "
+                    "ON CONFLICT (id) DO NOTHING", sid)
+                await conn.execute(
+                    "INSERT INTO message (conversation_id, seq, role, content) "
+                    "SELECT $1, coalesce(max(seq), 0) + 1, 'agent', $2 "
+                    "FROM message WHERE conversation_id = $1", sid, text[:2000])
             await self._publisher.emit(
-                event_type="agent.message", session_id=persistent_session_id(),
+                event_type="agent.message", session_id=sid,
                 task_id=task_id, origin="agent",
                 data={"text": text[:2000], "importance": importance, "channel": "agent_message"})
 
@@ -1099,14 +1148,21 @@ class TaskStore:
     async def complete_execution(
         self, exec_record_id: UUID, *, status: str = "completed",
         result_summary: str | None = None, error: str | None = None,
+        execution_id: UUID | None = None,
     ) -> None:
-        """Mark an execution record as completed/failed."""
+        """Mark an execution record as completed/failed.
+
+        ``execution_id`` back-fills the link to the `tool_execution` row, which only exists once the
+        tool has actually run. Without it the column stayed NULL in production forever and every
+        "which step did this failure block?" lookup returned nothing — coalesce, so a caller that
+        does not know it can never blank a link that is already there."""
         async with self.pool.acquire() as conn:
             await conn.execute(
                 "UPDATE task_execution SET "
-                "  status = $1, result_summary = $2, error = $3, finished_at = now() "
+                "  status = $1, result_summary = $2, error = $3, finished_at = now(), "
+                "  execution_id = coalesce($5, execution_id) "
                 "WHERE id = $4",
-                status, result_summary, error, exec_record_id)
+                status, result_summary, error, exec_record_id, execution_id)
 
     async def get_execution_history(self, task_id: UUID, step_seq: int) -> list[dict[str, Any]]:
         """Get execution history for a task step, for idempotency checks."""

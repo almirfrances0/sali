@@ -33,8 +33,17 @@ _TASKS_DIR = "tasks"
 
 
 def _tasks_base() -> Path:
-    """The root tasks directory: ~/Desktop/sali-works/tasks/."""
-    return Path.home() / "Desktop" / "sali-works" / _TASKS_DIR
+    """The root tasks directory: ~/Desktop/sali-works/tasks/.
+
+    ``SALI_WORKS_ROOT`` overrides the parent. It exists so a TEST RUN cannot write task folders into
+    Almir's real archive — which it had been doing since there was a test suite: of 980 archived tasks
+    on this machine, the great majority are fixtures ("ship the metrics dashboard" appears 91 times),
+    they are the newest folders by mtime, and they are indistinguishable from real work on the Work ->
+    History screen. Production sets nothing and keeps the original path."""
+    import os
+    root = os.environ.get("SALI_WORKS_ROOT")
+    base = Path(root) if root else Path.home() / "Desktop" / "sali-works"
+    return base / _TASKS_DIR
 
 
 def _task_dir(task_id: UUID, workspace: str | None = None) -> Path:

@@ -505,13 +505,13 @@ async def test_loop_retries_transient_provider_error(live_pool: Any) -> None:
 
         async def chat_stream(
             self, messages: list[ChatMessage], *, tools: list[ToolSpec] | None = None,
-            options: Any = None, think: bool = False,
+            options: Any = None, think: bool = False, **kwargs: Any,
         ) -> AsyncIterator[ChatChunk]:
             if not self._failed:
                 self._failed = True
                 raise ProviderError("XML syntax error: malformed tool call")
                 yield  # pragma: no cover - makes this an async generator
-            async for chunk in super().chat_stream(messages, tools=tools, options=options):
+            async for chunk in super().chat_stream(messages, tools=tools, options=options, **kwargs):
                 yield chunk
 
     result = await _loop(live_pool, FlakyProvider()).run("do the thing", session_id=new_id())

@@ -63,17 +63,26 @@ class SaliEvent:
         }
 
     def to_live_dict(self) -> dict[str, Any]:
-        """Convert to the dict sent to live subscribers (WebSocket, terminal)."""
+        """Convert to the dict sent to live subscribers (WebSocket, terminal).
+
+        Identity (run_id/session_id/task_id) falls back to `data` because several producers — notably
+        the loop's `_emit` — smuggle those ids INSIDE `data` rather than on the object. Without this
+        fallback the LIVE frame ships top-level nulls while the REPLAY frame (built from the persisted
+        payload via replay_since) carries them: that live!=replay divergence is what made iOS lose a
+        file card's turn binding on reconnect and forced the fragile nil escape hatch. We also emit
+        subject_type/subject_id so the live shape is byte-for-byte the shape the client gets on replay."""
         return {
             "type": "event",
             "event_type": self.event_type,
             "event_id": str(self.event_id),
             "sequence": self.sequence,
             "timestamp": self.timestamp.isoformat(),
-            "run_id": str(self.run_id) if self.run_id else None,
-            "task_id": str(self.task_id) if self.task_id else None,
-            "session_id": str(self.session_id) if self.session_id else None,
+            "run_id": str(self.run_id) if self.run_id else self.data.get("run_id"),
+            "task_id": str(self.task_id) if self.task_id else self.data.get("task_id"),
+            "session_id": str(self.session_id) if self.session_id else self.data.get("session_id"),
             "origin": self.origin,
+            "subject_type": self.subject_type or _infer_subject_type(self),
+            "subject_id": str(self.subject_id) if self.subject_id else None,
             "data": self.data,
         }
 

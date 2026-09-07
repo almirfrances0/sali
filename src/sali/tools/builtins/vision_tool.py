@@ -4,6 +4,12 @@ Vision is the second perception layer: used on demand ("what am I looking at?") 
 info isn't enough. A screenshot is captured (the active window by default — not the whole 34" screen,
 §34), reasoned over by the LOCAL vision model, and the RAW frame is discarded immediately (§30) —
 only the text observation comes back. The image never leaves the machine (§24-25): no upload, no log.
+
+On the ultrawide the frame reaches the model at NATIVE 3440x1440 with no downscale — measured, and
+worth protecting: a "resize to 1024" optimisation would be the one change that destroys small text.
+What it costs instead is TIME and CONTEXT: ~27s of image encoding and ~4,400 tokens, 18% of the
+working window, for a single whole-screen look. Hence `region`: take one wide look to find the thing,
+then crop to read it. A window-target look is ~2.2s and ~200 tokens, which is why it stays the default.
 """
 
 from __future__ import annotations
@@ -31,9 +37,10 @@ def _desktop_env() -> dict[str, str]:
     return env
 
 
-def _capture(target: str) -> bytes | None:
+def _capture(target: str, region: Any = None) -> bytes | None:
     """Grab a screenshot to a temp file, read it, then DELETE the file (never keep the raw frame).
-    Returns PNG bytes, or None if there's no display / screenshot tool."""
+    Returns PNG bytes, or None if there's no display / screenshot tool. `region` crops to
+    [x, y, w, h] before the frame is read, so only the part worth looking at is ever loaded."""
     fd, path = tempfile.mkstemp(prefix="sali-shot-", suffix=".png")
     os.close(fd)
     try:
@@ -42,6 +49,8 @@ def _capture(target: str) -> bytes | None:
             return None
         subprocess.run(  # noqa: S603 - fixed argv, Sali's own machine
             argv, env=_desktop_env(), timeout=15, check=True, capture_output=True)
+        if region:
+            _crop(path, region)   # best-effort: an unusable region just means the full frame
         data = Path(path).read_bytes()
         return data or None
     except (OSError, subprocess.SubprocessError):
@@ -57,7 +66,39 @@ def _capture_argv(target: str, path: str) -> list[str] | None:
         return ["spectacle", "-b", "-n", "-a" if target == "window" else "-m", "-o", path]
     if shutil.which("xfce4-screenshooter"):
         return ["xfce4-screenshooter", "-w" if target == "window" else "-f", "-s", path]
+    # ImageMagick is the floor: no desktop-environment dependency, present on any X install, and the
+    # same binary used for cropping below. Without it, a box with neither KDE nor XFCE tooling could
+    # not look at its own screen at all.
+    if shutil.which("import"):
+        return ["import", "-silent", "-window", "root", path]
     return None
+
+
+def _crop(path: str, region: Any) -> bool:
+    """Crop in place to (x, y, w, h). True if the frame now shows only that region.
+
+    Almir's monitor is 3440x1440 — 2.4x wider than tall. A full frame costs ~27s of encoding and
+    4,400 tokens (18% of the working context) to look at ONCE, and the thing worth reading is
+    usually a few hundred pixels of it. Cropping first is ~0.3s and turns an expensive glance into
+    a cheap one that can actually be repeated.
+    """
+    if not isinstance(region, (list, tuple)) or len(region) != 4:
+        return False
+    try:
+        x, y, w, h = (int(v) for v in region)
+    except (TypeError, ValueError):
+        return False
+    if w <= 0 or h <= 0:
+        return False
+    tool = shutil.which("magick") or shutil.which("convert")
+    if tool is None:
+        return False
+    try:
+        subprocess.run([tool, path, "-crop", f"{w}x{h}+{x}+{y}", "+repage", path],  # noqa: S603
+                       check=True, capture_output=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
 
 
 class SeeScreen(Tool):
@@ -74,6 +115,13 @@ class SeeScreen(Tool):
             "prompt": {"type": "string", "description": "What to look for / the question about the screen."},
             "target": {"type": "string", "enum": ["window", "screen"],
                        "description": "Active window (default) or the current monitor."},
+            "region": {
+                "type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems": 4,
+                "description": ("Optional [x, y, width, height] to look at just part of the screen. "
+                                "The monitor is 3440x1440, so a whole-screen look is slow and "
+                                "coarse — take one to find where something is, then use region to "
+                                "read it closely."),
+            },
         },
         "required": [],
     }
@@ -85,7 +133,8 @@ class SeeScreen(Tool):
         if ctx.vision is None:
             return ToolResult(ok=False, display="no vision", error="the vision model isn't available")
         target = str(args.get("target") or "window")
-        image = _capture(target)
+        region = args.get("region")
+        image = _capture(target, region)
         if image is None:
             return ToolResult(ok=False, display="couldn't capture",
                               error="couldn't take a screenshot — no desktop session or screenshot "
@@ -96,7 +145,8 @@ class SeeScreen(Tool):
         observation = await ctx.vision.look(prompt, image)  # image → LOCAL model only; then dropped
         return ToolResult(
             ok=True,
-            output={"observation": observation[:_MAX], "target": target},
+            output={"observation": observation[:_MAX], "target": target,
+                    **({"region": list(region)} if region else {})},
             display="looked at the screen",
         )
 

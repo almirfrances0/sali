@@ -126,11 +126,15 @@ class ConnectionManager:
         """
         payload = json.dumps(message, default=str)
         seq = message.get("sequence")
+        # An ephemeral streaming frame (token/thinking) is recoverable from the durable agent.final,
+        # so a slow send of one must NOT cost the client the rest of the turn (final + file card).
+        ephemeral = message.get("event_type") in ("agent.token", "agent.thinking")
         snapshot = list(self._connections.items())
         if not snapshot:
             return
         results = await asyncio.gather(
-            *(self._send_one_with_timeout(cid, ws, payload, seq) for cid, ws in snapshot),
+            *(self._send_one_with_timeout(cid, ws, payload, seq, ephemeral=ephemeral)
+              for cid, ws in snapshot),
             return_exceptions=True,
         )
         for (cid, _), outcome in zip(snapshot, results, strict=False):
@@ -138,13 +142,23 @@ class ConnectionManager:
                 self.disconnect(cid)
 
     async def _send_one_with_timeout(
-        self, client_id: UUID, ws: Any, payload: str, seq: Any, timeout: float = 5.0,
+        self, client_id: UUID, ws: Any, payload: str, seq: Any, *, ephemeral: bool = False,
+        timeout: float = 5.0,
     ) -> bool:
-        """Send to one client with a bounded wait. Returns True on success, False on failure/timeout.
-        A slow socket that would otherwise back-pressure the caller loses its slot after `timeout`."""
+        """Send to one client with a bounded wait. Returns True to KEEP the socket, False to drop it.
+
+        A send timeout is transient (a momentarily full TCP buffer on flaky cellular), NOT a dead socket.
+        For an EPHEMERAL frame (agent.token/agent.thinking) a timeout is non-fatal: skip that one frame
+        and keep the connection — the durable agent.final carries the complete text, and a genuinely dead
+        socket is removed by the staleness reaper. Tearing the socket down on one slow token was the bug
+        that dropped the rest of the stream (final + file card) mid-turn and forced a lossy reconnect.
+        For a DURABLE frame a timeout DOES drop the socket, so the client reconnects and REPLAYS the event
+        rather than losing it silently. A genuine transport/closed error always drops."""
         try:
             await asyncio.wait_for(ws.send_text(payload), timeout=timeout)
-        except (TimeoutError, Exception):  # noqa: BLE001
+        except TimeoutError:
+            return True if ephemeral else False
+        except Exception:  # noqa: BLE001 - a genuine transport/closed error: the socket is gone
             return False
         self._last_activity[client_id] = time.time()
         if isinstance(seq, int) and seq > self._last_event_seq.get(client_id, 0):

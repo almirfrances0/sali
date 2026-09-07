@@ -13,6 +13,11 @@ from sali.events.base import DesktopEvent, EventKind
 
 # Directory names whose contents are churn, not intent — anywhere in the path.
 _NOISE_DIRS = frozenset({
+    # Sali's OWN workspace. 344 of 421 observations (82%) were his own task files moving around, and
+    # the single proactive desktop message he has ever sent Almir was "moved 5 files in
+    # 2e7fd9e2-9c08-4019-911f-18983254bb81" — himself, narrating his own filing, as a UUID. Watching
+    # yourself work is not perception.
+    "sali-works",
     ".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv", ".cache",
     ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox", "target", "dist", "build",
     ".next", ".gradle", ".idea", ".DS_Store", "site-packages", ".cargo", ".rustup",
@@ -43,7 +48,15 @@ def is_noise(event: DesktopEvent) -> bool:
 def score(event: DesktopEvent) -> float:
     """Importance in [0, 1] — deterministic, from kind + path shape. Higher = more worth surfacing."""
     if event.kind is EventKind.WINDOW_FOCUS:
-        return 0.5  # a focus change is a moderate, always-relevant signal of what Almir is doing
+        # 0.6, and the exact value is the whole point. This returned 0.5 while attention's INTERESTING
+        # tier begins at 0.55, so EVERY window focus was tiered `routine` -> `ignore` and dropped
+        # before it was ever written: 421 desktop observations in the log, not one of them about what
+        # Almir had on screen. The comment above claimed "always-relevant" while the number said
+        # otherwise. Knowing which app he is in is the cheapest true thing Sali can know about him.
+        #
+        # RECORD, deliberately not NOTIFY: this makes him AWARE, it must never make him talk. Speaking
+        # is still gated by attention's tier plus the five communication gates downstream.
+        return 0.6
     name = event.target.rsplit(os.sep, 1)[-1].lower()
     base = {
         EventKind.FILE_CREATED: 0.5,

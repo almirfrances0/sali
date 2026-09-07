@@ -34,6 +34,7 @@ from sali.tools.probe import (
     package_installed,
     path_exists,
     port_listening,
+    process_running,
     service_active,
     service_loaded,
 )
@@ -103,6 +104,51 @@ _INSTALLED_RE = re.compile(
     re.IGNORECASE,
 )
 
+# CLOSED / KILLED an app or process. This is the fabrication class Almir hit: Sali says it closed a GUI
+# app ("Thunar's closed", "I killed Firefox", "Thunar's gone now") that it could not actually close — a
+# root-owned window (launched via pkexec) needs sudo — and even confabulates proof. Emitted as a 'process'
+# claim asserting NOT-running; the pgrep probe strikes it ONLY when the named process is verifiably still
+# running, so a non-process word ("closed the issue") can never cause a false strike.
+_CLOSED_RE = re.compile(
+    r"\b(?:"
+    r"(?:i\s+(?:'ve\s+|have\s+|just\s+)?)?"
+    r"(?:closed|killed|quit|stopped|terminated|ended|shut(?:\s+down)?|force[-\s]?quit(?:ted)?)\s+"
+    r"(?:the\s+|your\s+)?(?P<name>[A-Za-z][A-Za-z0-9._+-]{2,})"
+    r"|(?P<name2>[A-Za-z][A-Za-z0-9._+-]{2,})(?:'s|\s+is|\s+are|\s+was|\s+were)\s+(?:now\s+|already\s+)?"
+    r"(?:closed|gone|killed|dead|terminated|shut\s+down|no\s+longer\s+(?:running|open|there))"
+    r")\b",
+    re.IGNORECASE)
+
+# Words that can follow a close verb but never denote a running process — never probe these.
+_NOT_A_PROCESS = frozenset({"it", "the", "that", "this", "them", "everything", "all", "down", "up",
+                            "off", "out", "session", "tab", "window", "file", "connection", "app",
+                            "one", "thing", "task", "job", "process", "issue", "ticket"})
+
+# What ALMIR asked to close/kill this turn — an imperative ("close thunar", "kill firefox"). Used to
+# verify the OUTCOME against the target HE named, so a "done"/"it's gone"/"🔒" reply is checked against
+# reality even when Sali phrases it with a pronoun the reply-side _CLOSED_RE can't attach to a name.
+_CLOSE_REQUEST_RE = re.compile(
+    r"\b(?:close|kill|quit|stop|terminate|end|shut(?:\s+down)?|exit|force[-\s]?quit)\s+"
+    r"(?:the\s+|my\s+|that\s+)?(?P<name>[A-Za-z][A-Za-z0-9._+-]{2,})",
+    re.IGNORECASE)
+
+
+def extract_close_targets(text: str) -> list[str]:
+    """App/process names ALMIR asked to close/kill this turn (deduped, ≤5). Empty when he asked nothing of
+    the sort. The caller verifies each against live process state after the reply settles."""
+    out: list[str] = []
+    for match in _CLOSE_REQUEST_RE.finditer(text or ""):
+        name = match.group("name")
+        if not name:
+            continue
+        low = _clean(name)
+        if low in _NOT_A_PROCESS or low in _GENERIC_SUBJECT or name in out:
+            continue
+        out.append(name)
+        if len(out) >= 5:
+            break
+    return out
+
 # A SERVICE, by systemd unit name. "the sali service is running", "nginx is not active".
 _SERVICE_RE = re.compile(
     rf"\b(?:the\s+)?(?P<unit>[\w@.\-]{{2,40}})(?:\.service)?\s+(?:service\s+|daemon\s+)?"
@@ -123,7 +169,14 @@ _PATH_RE = re.compile(
     rf"(?P<path>(?:/|~/)[\w./@+\-]{{2,120}})\s+(?:is\s+)?(?P<neg>{_NEG})?"
     rf"(?:exists?|is\s+there|is\s+present|is\s+missing|is\s+gone)\b"
     rf"|\bthere\s+(?:is|'s)\s+(?:a\s+|the\s+)?(?:file|folder|directory|script)\s+(?:at|in)\s+"
-    rf"(?P<path2>(?:/|~/)[\w./@+\-]{{2,120}})",
+    rf"(?P<path2>(?:/|~/)[\w./@+\-]{{2,120}})"
+    # VERB FIRST. The two forms above both need the path BEFORE the verb, so the most natural way to
+    # say it went unchecked: Sali told Almir "The Nexus page already exists at
+    # /home/almir/Desktop/sali/tests/nexus/contact-us.html" — a directory that does not exist — and
+    # nothing looked, because the sentence reads "exists at <path>", not "<path> exists".
+    rf"|\b(?P<neg2>{_NEG})?(?:exists?|lives?|sits?|sitting|located|stored|saved)"
+    rf"(?:\s+\w+){{0,2}}\s+(?:at|in|under)\s+[`'\"]?"
+    rf"(?P<path3>(?:/|~/)[\w./@+\-]{{2,120}})",
     re.IGNORECASE,
 )
 
@@ -183,8 +236,11 @@ async def _check_program(name: str, asserted: bool | None, claim: str) -> ClaimC
     return ClaimCheck(claim, asserted, False, result.detail)
 
 
-def _sentences(text: str) -> list[tuple[str, bool]]:
-    """(sentence, is_question) — questions are worth probing too, they just aren't claims."""
+def sentences(text: str) -> list[tuple[str, bool]]:
+    """(sentence, is_question) — questions are worth probing too, they just aren't claims.
+
+    Public because `verify.work_record` splits the same way and reaching into a private name would
+    hide that dependency from anyone editing this."""
     out: list[tuple[str, bool]] = []
     for raw in re.split(r"(?<=[.!?\n])\s+", text):
         sentence = raw.strip()
@@ -193,6 +249,9 @@ def _sentences(text: str) -> list[tuple[str, bool]]:
         first = re.sub(r"^\W+", "", sentence).split(" ", 1)[0].strip(",.?!'\"").lower()
         out.append((sentence, first in _QUESTION_OPENERS))
     return out
+
+
+_sentences = sentences   # internal alias, kept so existing call sites read unchanged
 
 
 def _extract(text: str) -> list[tuple[str, bool | None, str, str]]:
@@ -250,14 +309,28 @@ def _extract_one(text: str, question: bool) -> list[tuple[str, bool | None, str,
             continue
         found.append(("service", polarity(bool(match.group("neg"))), unit, quote(match)))
 
+    for match in _CLOSED_RE.finditer(text):
+        # A "closed/killed X" claim negates the RUNNING predicate, so polarity(True) → asserted running is
+        # False for a statement, None for a question. The pgrep probe settles whether it is actually gone.
+        name = match.group("name") or match.group("name2")
+        if not name or _clean(name) in _NOT_A_PROCESS or _clean(name) in _GENERIC_SUBJECT:
+            continue
+        found.append(("process", polarity(True), name, quote(match)))
+
     for match in _PORT_RE.finditer(text):
         found.append(("port", polarity(bool(match.group("neg"))), match.group("port"), quote(match)))
 
     for match in _PATH_RE.finditer(text):
-        path = match.group("path") or match.group("path2")
+        path = match.group("path") or match.group("path2") or match.group("path3")
+        # The character class includes '.', so a path at the END of a sentence swallows the full
+        # stop: "the site lives at /home/almir/Desktop/sali-works/nexus." was checked as
+        # ".../nexus." — which does not exist — and a TRUE statement was struck as a fabrication.
+        # A false strike is worse than a missed one: it makes Sali retract things that were right.
+        path = (path or "").strip("`'\"").rstrip(".,;:!?)").strip("`'\"")
         if not path:
             continue
-        negated = bool(match.group("neg")) or bool(_ABSENCE_WORDS.search(match.group(0)))
+        negated = (bool(match.group("neg")) or bool(match.group("neg2"))
+                   or bool(_ABSENCE_WORDS.search(match.group(0))))
         found.append(("path", polarity(negated), path, quote(match)))
 
     return found
@@ -284,6 +357,11 @@ async def check_claims(text: str) -> list[ClaimCheck]:
             return None if result is None else ClaimCheck(claim, asserted, result.success, result.detail)
         if kind == "port":
             result = await port_listening(int(subject))
+            return None if result is None else ClaimCheck(claim, asserted, result.success, result.detail)
+        if kind == "process":
+            # observed = the process IS running. A "closed" claim asserts running=False, so a still-running
+            # process disproves it (asserted != observed) and the state family strikes the false claim.
+            result = await process_running(subject)
             return None if result is None else ClaimCheck(claim, asserted, result.success, result.detail)
         result = path_exists(subject)
         return None if result is None else ClaimCheck(claim, asserted, result.success, result.detail)

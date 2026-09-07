@@ -112,7 +112,7 @@ async def test_ui_tree_parses_and_redacts(monkeypatch: pytest.MonkeyPatch) -> No
         "role": "frame", "name": "Compose",
         "children": [{"role": "text", "name": "my password: hunter2"},
                      {"role": "password text", "name": ""}]}}
-    monkeypatch.setattr("sali.perception.atspi._run_probe", lambda py, d, n: canned)
+    monkeypatch.setattr("sali.perception.atspi._run_probe", lambda py, d, n, pid=0: canned)
     node, detail = await atspi.ui_tree("/usr/bin/python3", max_depth=8, max_nodes=100)
     assert detail == "ok" and node is not None
     assert node.role == "frame"
@@ -123,14 +123,14 @@ async def test_ui_tree_parses_and_redacts(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 async def test_ui_tree_degrades_when_probe_absent(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("sali.perception.atspi._run_probe", lambda py, d, n: None)
+    monkeypatch.setattr("sali.perception.atspi._run_probe", lambda py, d, n, pid=0: None)
     node, detail = await atspi.ui_tree("/usr/bin/python3", max_depth=8, max_nodes=100)
     assert node is None and "probe" in detail
 
 
 async def test_ui_tree_degrades_when_a11y_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sali.perception.atspi._run_probe",
-                        lambda py, d, n: {"ok": False, "detail": "toolkit-accessibility disabled"})
+                        lambda py, d, n, pid=0: {"ok": False, "detail": "toolkit-accessibility disabled"})
     node, detail = await atspi.ui_tree("/usr/bin/python3", max_depth=8, max_nodes=100)
     assert node is None and "accessibility" in detail
 

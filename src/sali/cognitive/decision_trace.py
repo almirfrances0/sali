@@ -101,6 +101,13 @@ class DecisionTraceStore:
                         "  count(*) FILTER (WHERE actual_outcome IS NULL) AS pending, "
                         "  count(*) FILTER (WHERE policy_result = 'refused') AS refused "
                         "FROM sali.decision_trace WHERE decided_at >= $1", since)
+                    pred_rows = await conn.fetch(
+                        "SELECT count(*) AS total, "
+                        "  count(*) FILTER (WHERE actual_outcome='success') AS succeeded, "
+                        "  count(*) FILTER (WHERE actual_outcome='failure') AS failed, "
+                        "  count(*) FILTER (WHERE (evidence->>'surprise')::float >= 0.5) AS surprises, "
+                        "  round(avg((evidence->>'surprise')::float)::numeric, 3) AS mean_surprise "
+                        "FROM sali.decision_trace WHERE origin='tool_dispatch' AND decided_at >= $1", since)
                 else:
                     mode_rows = await conn.fetch(
                         "SELECT mode, count(*) AS n FROM sali.decision_trace "
@@ -111,9 +118,29 @@ class DecisionTraceStore:
                         "  count(*) FILTER (WHERE actual_outcome IS NULL) AS pending, "
                         "  count(*) FILTER (WHERE policy_result = 'refused') AS refused "
                         "FROM sali.decision_trace")
+                    pred_rows = await conn.fetch(
+                        "SELECT count(*) AS total, "
+                        "  count(*) FILTER (WHERE actual_outcome='success') AS succeeded, "
+                        "  count(*) FILTER (WHERE actual_outcome='failure') AS failed, "
+                        "  count(*) FILTER (WHERE (evidence->>'surprise')::float >= 0.5) AS surprises, "
+                        "  round(avg((evidence->>'surprise')::float)::numeric, 3) AS mean_surprise "
+                        "FROM sali.decision_trace WHERE origin='tool_dispatch'")
         except Exception:
-            return {"by_mode": {}, "outcomes": {}}
+            return {"by_mode": {}, "outcomes": {}, "predictions": {}}
         by_mode = {r["mode"]: int(r["n"]) for r in mode_rows}
         outcomes = dict(outcome_rows[0]) if outcome_rows else {}
+        # PREDICTION signal (the real "is Sali improving?" number): of the effectful tool ACTIONS Sali
+        # took, how many succeeded as expected, and how often a confident expectation was surprised.
+        # Rising accuracy + falling mean_surprise = better-calibrated, more reliable action over time.
+        preds = dict(pred_rows[0]) if pred_rows else {}
+        total_p = int(preds.get("total") or 0)
+        succeeded_p = int(preds.get("succeeded") or 0)
+        predictions = {
+            "total": total_p, "succeeded": succeeded_p, "failed": int(preds.get("failed") or 0),
+            "surprises": int(preds.get("surprises") or 0),
+            "mean_surprise": float(preds["mean_surprise"]) if preds.get("mean_surprise") is not None else None,
+            "accuracy": round(succeeded_p / total_p, 3) if total_p else None,
+        }
         return {"by_mode": by_mode,
-                "outcomes": {k: int(v or 0) for k, v in outcomes.items()}}
+                "outcomes": {k: int(v or 0) for k, v in outcomes.items()},
+                "predictions": predictions}

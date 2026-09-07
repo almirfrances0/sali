@@ -15,7 +15,7 @@ from typing import Any
 from uuid import UUID
 
 from sali.core.enums import MemorySource
-from sali.graph.writer import ensure_node, refresh_props, relate
+from sali.graph.writer import ensure_node, refresh_props, relate, set_fact
 
 # Canonical aliases for the agent (§5) — the surface forms that mean Sali-the-agent (NOT the repo,
 # a model variant, or a path). So "my AI"/"you" resolve to agent:sali, and the reported bare-"Sali"
@@ -41,7 +41,9 @@ async def link_self(
 
     model = await ensure_node(
         conn, node_type="model", name=model_name, canonical_key=f"model:{model_name}", source=source)
-    await relate(conn, src_id=sali.id, dst_id=model.id, rel_type="thinks_with", source=source)
+    # thinks_with is SINGLE-VALUED (Sali thinks with ONE model): set_fact supersedes a stale edge
+    # on a model swap instead of leaving two currents, so the self-model never drifts.
+    await set_fact(conn, src_id=sali.id, rel_type="thinks_with", dst_id=model.id, source=source)
 
     person = await conn.fetchrow(
         "SELECT id FROM graph_node WHERE canonical_key='person:almir' AND valid_until IS NULL")

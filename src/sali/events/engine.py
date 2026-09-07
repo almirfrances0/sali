@@ -35,6 +35,69 @@ class LoggingSink:
         log.info("observed", summary=obs.summary, importance=round(obs.importance, 2), count=obs.count)
 
 
+def _ui_labels(tree: Any, limit: int = 8) -> list[str]:
+    """The few named things in the focused app's accessibility tree, breadth-first.
+
+    Roles and labels only — never a field's contents (§27). Breadth-first because the useful names
+    (document title, panel, tab) sit near the top; a depth-first walk would spend the whole budget in
+    the first branch it fell into.
+    """
+    if not isinstance(tree, dict):
+        return []
+    out: list[str] = []
+    queue: list[Any] = [tree]
+    seen = 0
+    while queue and len(out) < limit and seen < 200:
+        node = queue.pop(0)
+        seen += 1
+        if not isinstance(node, dict):
+            continue
+        name = str(node.get("name") or "").strip()
+        if name and name not in out:
+            out.append(name)
+        kids = node.get("children")
+        if isinstance(kids, list):
+            queue.extend(kids)
+    return out
+
+
+_TEXT_IN_OBSERVATION = 2000
+
+
+def _ui_text(tree: Any, limit: int = _TEXT_IN_OBSERVATION) -> str:
+    """The visible text of the focused app, flattened, bounded.
+
+    Depth-first in document order so a terminal buffer or a document reads in the order it appears
+    on screen rather than breadth-first scrambled. Deduplicated because accessibility trees routinely
+    expose the same string on a container and again on its child.
+    """
+    if not isinstance(tree, dict):
+        return ""
+    parts: list[str] = []
+    seen: set[str] = set()
+    total = 0
+
+    def walk(node: Any, depth: int = 0) -> None:
+        nonlocal total
+        if not isinstance(node, dict) or depth > 12 or total >= limit:
+            return
+        body = str(node.get("text") or "").strip()
+        if body and body not in seen:
+            seen.add(body)
+            body = body[: max(0, limit - total)]
+            parts.append(body)
+            total += len(body)
+        kids = node.get("children")
+        if isinstance(kids, list):
+            for child in kids:
+                if total >= limit:
+                    return
+                walk(child, depth + 1)
+
+    walk(tree)
+    return "\n".join(parts).strip()
+
+
 class PerceptionEngine:
     def __init__(
         self, *, sink: ObservationSink | None = None, snapshot: Snapshot | None = None,
@@ -79,8 +142,23 @@ class PerceptionEngine:
         if key == self._last_window:
             return None
         self._last_window = key
+        extra: dict[str, Any] = {"title": title}
+        # What the app is showing, when accessibility can tell us — role+label only, already redacted
+        # upstream. "focused code — voice.py" says where he is; the labels say what is on screen with
+        # him, which is the difference between knowing the app and knowing the work.
+        ui = (snapshot or {}).get("ui")
+        labels = _ui_labels(ui)
+        if labels:
+            extra["ui"] = labels
+        # WHAT IS ON SCREEN, kept. Almir asked for this explicitly: not just so Sali can catch a
+        # mistake in the moment, but so he can look back over a stretch of work and see a pattern in
+        # it. Already redacted upstream; a password field was never read at all. Bounded hard,
+        # because this row is written on every window switch and the event log is append-only.
+        body = _ui_text(ui)
+        if body:
+            extra["text"] = body
         return DesktopEvent(kind=EventKind.WINDOW_FOCUS, target=app, at=now,
-                            source="window", extra={"title": title})
+                            source="window", extra=extra)
 
     def recent(self) -> list[Observation]:
         """The bounded buffer of recent observations — what a later query / the twin can read."""

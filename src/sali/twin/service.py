@@ -52,9 +52,13 @@ class TwinService:
                 from sali.twin.self_link import link_self
 
                 perms = self.settings.permissions
+                # Use the LIVE active model (a swap updates sali_state), falling back to config, so a
+                # re-sync affirms the model Sali runs NOW and never clobbers a swap with the config value.
+                active_model = await conn.fetchval(
+                    "SELECT active_chat_model FROM sali_state WHERE id = true")
                 await link_self(
                     conn, machine_id=result.machine_id,
-                    model_name=self.settings.model.chat_model,
+                    model_name=(active_model or self.settings.model.chat_model),
                     workspace=perms.workspace,
                     source_dir=(perms.fs_readonly[0] if perms.fs_readonly else ""))
         if self.memory is not None:

@@ -219,6 +219,7 @@ class ContextEngine:
         skills_note: str | None = None,
         system_query: bool = False,
         checked_note: str | None = None,
+        record_note: str | None = None,
         agenda_note: str | None = None,
         temporal_note: str | None = None,
         # A function that turns an instant into 3 days ago. Injected rather than imported so
@@ -317,6 +318,14 @@ class ContextEngine:
             sections.append(
                 Section("checked", Priority.P1, checked_note, self._count(checked_note), score=1.0)
             )
+        if record_note:
+            # THE RECORD OF WORK ALREADY DONE, because Almir asked about it. Scored just under
+            # `checked` (1.0): what the machine says RIGHT NOW outranks history. Like `checked`, it is
+            # only ever present when a real record was found — so its absence can never be read as
+            # "nothing went wrong".
+            sections.append(
+                Section("record", Priority.P1, record_note, self._count(record_note), score=0.995)
+            )
         if live_note:
             sections.append(Section("live", Priority.P1, live_note, self._count(live_note)))
         if machine_changes:
@@ -373,8 +382,15 @@ class ContextEngine:
                         bits.append(epistemic_status(_kt, hit.effective_confidence))
                 except Exception:  # noqa: BLE001 - framing is best-effort; never break the memory line
                     pass
+                # WHERE it came from. A web-learned memory stores its source url, but nothing ever
+                # RENDERED it — so Sali was told a claim was "unverified" while never being told where
+                # it came from. It could neither cite the source to Almir nor go back and re-check it,
+                # which made a researched memory a hedge-shaped blob instead of knowledge.
+                _struct = hit.memory.structured if isinstance(hit.memory.structured, dict) else {}
+                _src_domain = str(_struct.get("source_domain") or "").strip()
                 bits += [
-                    _SOURCE_LABEL.get(hit.memory.source, hit.memory.source.value),
+                    (_SOURCE_LABEL.get(hit.memory.source, hit.memory.source.value)
+                     + (f" — {_src_domain}" if _src_domain else "")),
                     f"confidence {hit.effective_confidence:.2f}",
                 ]
                 if hit.memory.needs_grounding:

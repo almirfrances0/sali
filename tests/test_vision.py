@@ -36,6 +36,15 @@ def test_capture_argv_prefers_active_window_then_monitor(monkeypatch: pytest.Mon
     assert _capture_argv("screen", "/tmp/x.png")[3] == "-m"  # type: ignore[index]
 
 
+def test_capture_argv_falls_back_to_imagemagick(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`import` ships with X and needs no desktop environment — without this fallback a machine
+    lacking spectacle AND xfce4-screenshooter could not see its own screen at all."""
+    monkeypatch.setattr(vision_tool.shutil, "which",
+                        lambda b: "/usr/bin/import" if b == "import" else None)
+    argv = _capture_argv("screen", "/tmp/x.png")
+    assert argv is not None and argv[0] == "import" and "root" in argv
+
+
 def test_capture_argv_none_without_a_screenshot_tool(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sali.tools.builtins.vision_tool.shutil.which", lambda name: None)
     assert _capture_argv("window", "/tmp/x.png") is None
@@ -47,13 +56,14 @@ async def test_see_screen_needs_vision() -> None:
 
 
 async def test_see_screen_reports_when_capture_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(vision_tool, "_capture", lambda target: None)
+    monkeypatch.setattr(vision_tool, "_capture", lambda target, region=None: None)
     res = await SeeScreen().run({}, _ctx(vision=_Vision()))
     assert not res.ok and "screenshot" in (res.error or "")
 
 
 async def test_see_screen_describes_locally_and_drops_the_frame(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(vision_tool, "_capture", lambda target: b"\x89PNG fake-bytes")
+    monkeypatch.setattr(vision_tool, "_capture",
+                        lambda target, region=None: b"\x89PNG fake-bytes")
     vis = _Vision()
     res = await SeeScreen().run({"prompt": "what am I running?"}, _ctx(vision=vis))
     assert res.ok

@@ -169,10 +169,18 @@ async def test_ephemeral_workspace_deleted_but_memory_survives(live_pool: Any, t
     await store.complete_execution(ex, status="completed", result_summary="deployed")
     await _complete_steps(live_pool, t.id)
     assert await store.finish(t.id, status="done") is None
-    assert not ws.exists()                                     # ephemeral workspace cleaned up (§24)
+    # CONTRACT CHANGED (2026-09-07). This used to assert `not ws.exists()` — an ephemeral workspace was
+    # deleted wholesale on completion. That directory is ALSO the task's archive (`_task_dir()` returns
+    # the same path), so the rmtree destroyed the artifact copies `_preserve_artifacts` had just written
+    # into it, along with any file the task produced but never registered. Live evidence on task
+    # 9a2b4eb8: both task_artifact rows point at paths that no longer exist, and 95 of 430 task
+    # directories are empty husks. Almir's website survived only because Sali built it OUTSIDE the
+    # workspace. `artifact.txt` here has no preserved copy, so keeping it is now the correct outcome.
+    assert ws.exists() and (ws / "artifact.txt").is_file()     # unpreserved output is never destroyed
     assert any("Deploy the app to staging" in r["content"] for r in await exp.recent())  # memory survives (§27)
     cu = await WorkspaceCleanupStore(live_pool).for_task(t.id)
-    assert cu is not None and cu["status"] == "completed" and cu["workspace_type"] == "ephemeral"
+    assert cu is not None and cu["workspace_type"] == "ephemeral"
+    assert cu["status"] == "skipped" and "no preserved copy" in (cu["reason"] or "")
 
 
 async def test_user_owned_workspace_is_not_deleted(live_pool: Any, tmp_path: Path) -> None:
