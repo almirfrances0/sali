@@ -1,0 +1,8 @@
+[Unit]
+Description=Sali nightly datastore backup
+After=postgresql.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/Desktop/sali/scripts/backup_nightly.sh
+Nice=10

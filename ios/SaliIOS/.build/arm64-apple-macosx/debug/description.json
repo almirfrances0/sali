@@ -1,0 +1,658 @@
+{
+  "builtTestProducts" : [
+
+  ],
+  "copyCommands" : {
+
+  },
+  "explicitTargetDependencyImportCheckingMode" : {
+    "none" : {
+
+    }
+  },
+  "generatedSourceTargetSet" : [
+
+  ],
+  "pluginDescriptions" : [
+
+  ],
+  "swiftCommands" : {
+    "C.SaliIOS-arm64-apple-macosx-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/sources",
+      "importPath" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/App/AppState.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/App/RootView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/App/SaliApp.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Core/Auth/AuthService.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Core/Auth/Keychain.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Core/Auth/TokenStore.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Core/Config/APIEnvironment.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Core/Networking/APIClient.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Core/Networking/APIError.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Core/Realtime/SaliEvent.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Core/WebSocket/WebSocketClient.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/DesignSystem/Components.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/DesignSystem/Theme.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Activity/ActivityView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Chat/ChatView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Chat/ChatViewModel.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Chat/CodeBlockView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Chat/MarkdownText.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Learning/LearningView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Life/LifeView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Memory/MemoryView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Notifications/NotificationsView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Notifications/PushManager.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Onboarding/OnboardingView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Settings/DevicesView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Settings/SettingsView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/System/SystemView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Tasks/TaskDetailView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Tasks/TasksView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Models/DomainModels.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "SaliIOS",
+      "moduleOutputPath" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/Modules/SaliIOS.swiftmodule",
+      "objects" : [
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/AppState.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/RootView.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SaliApp.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/AuthService.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/Keychain.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/TokenStore.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/APIEnvironment.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/APIClient.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/APIError.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SaliEvent.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/WebSocketClient.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/Components.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/Theme.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/ActivityView.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/ChatView.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/ChatViewModel.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/CodeBlockView.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/MarkdownText.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/LearningView.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/LifeView.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/MemoryView.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/NotificationsView.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/PushManager.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/OnboardingView.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/DevicesView.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SettingsView.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SystemView.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/TaskDetailView.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/TasksView.swift.o",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/DomainModels.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx14.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-j8",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/include/SaliIOS-Swift.h",
+        "-swift-version",
+        "5",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "saliios"
+      ],
+      "outputFileMapPath" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/AppState.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/RootView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SaliApp.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/AuthService.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/Keychain.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/TokenStore.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/APIEnvironment.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/APIClient.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/APIError.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SaliEvent.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/WebSocketClient.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/Components.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/Theme.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/ActivityView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/ChatView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/ChatViewModel.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/CodeBlockView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/MarkdownText.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/LearningView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/LifeView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/MemoryView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/NotificationsView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/PushManager.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/OnboardingView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/DevicesView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SettingsView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/SystemView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/TaskDetailView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/TasksView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/DomainModels.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/Modules/SaliIOS.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/almir/Desktop/ios/SaliIOS/App/AppState.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/App/RootView.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/App/SaliApp.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Core/Auth/AuthService.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Core/Auth/Keychain.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Core/Auth/TokenStore.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Core/Config/APIEnvironment.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Core/Networking/APIClient.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Core/Networking/APIError.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Core/Realtime/SaliEvent.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Core/WebSocket/WebSocketClient.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/DesignSystem/Components.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/DesignSystem/Theme.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Features/Activity/ActivityView.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Features/Chat/ChatView.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Features/Chat/ChatViewModel.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Features/Chat/CodeBlockView.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Features/Chat/MarkdownText.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Features/Learning/LearningView.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Features/Life/LifeView.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Features/Memory/MemoryView.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Features/Notifications/NotificationsView.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Features/Notifications/PushManager.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Features/Onboarding/OnboardingView.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Features/Settings/DevicesView.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Features/Settings/SettingsView.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Features/System/SystemView.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Features/Tasks/TaskDetailView.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Features/Tasks/TasksView.swift",
+        "/Users/almir/Desktop/ios/SaliIOS/Models/DomainModels.swift"
+      ],
+      "tempsPath" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build",
+      "wholeModuleOptimization" : false
+    }
+  },
+  "swiftFrontendCommands" : {
+
+  },
+  "swiftTargetScanArgs" : {
+    "SaliIOS" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "SaliIOS",
+      "-package-name",
+      "saliios",
+      "-c",
+      "/Users/almir/Desktop/ios/SaliIOS/App/AppState.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/App/RootView.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/App/SaliApp.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Core/Auth/AuthService.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Core/Auth/Keychain.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Core/Auth/TokenStore.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Core/Config/APIEnvironment.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Core/Networking/APIClient.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Core/Networking/APIError.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Core/Realtime/SaliEvent.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Core/WebSocket/WebSocketClient.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/DesignSystem/Components.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/DesignSystem/Theme.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Features/Activity/ActivityView.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Features/Chat/ChatView.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Features/Chat/ChatViewModel.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Features/Chat/CodeBlockView.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Features/Chat/MarkdownText.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Features/Learning/LearningView.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Features/Life/LifeView.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Features/Memory/MemoryView.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Features/Notifications/NotificationsView.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Features/Notifications/PushManager.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Features/Onboarding/OnboardingView.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Features/Settings/DevicesView.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Features/Settings/SettingsView.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Features/System/SystemView.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Features/Tasks/TaskDetailView.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Features/Tasks/TasksView.swift",
+      "/Users/almir/Desktop/ios/SaliIOS/Models/DomainModels.swift",
+      "-I",
+      "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx14.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-j8",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/include/SaliIOS-Swift.h",
+      "-swift-version",
+      "5",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "saliios",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ]
+  },
+  "targetDependencyMap" : {
+    "SaliIOS" : [
+
+    ]
+  },
+  "testDiscoveryCommands" : {
+
+  },
+  "testEntryPointCommands" : {
+
+  },
+  "traitConfiguration" : {
+    "default" : {
+
+    }
+  },
+  "writeCommands" : {
+    "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/App/AppState.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/App/RootView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/App/SaliApp.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Core/Auth/AuthService.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Core/Auth/Keychain.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Core/Auth/TokenStore.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Core/Config/APIEnvironment.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Core/Networking/APIClient.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Core/Networking/APIError.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Core/Realtime/SaliEvent.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Core/WebSocket/WebSocketClient.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/DesignSystem/Components.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/DesignSystem/Theme.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Activity/ActivityView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Chat/ChatView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Chat/ChatViewModel.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Chat/CodeBlockView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Chat/MarkdownText.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Learning/LearningView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Life/LifeView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Memory/MemoryView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Notifications/NotificationsView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Notifications/PushManager.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Onboarding/OnboardingView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Settings/DevicesView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Settings/SettingsView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/System/SystemView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Tasks/TaskDetailView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Features/Tasks/TasksView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/almir/Desktop/ios/SaliIOS/Models/DomainModels.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/SaliIOS.build/sources"
+    },
+    "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt" : {
+      "alwaysOutOfDate" : true,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<swift-get-version>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+        }
+      ],
+      "outputFilePath" : "/Users/almir/Desktop/ios/SaliIOS/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+    }
+  }
+}

@@ -1,0 +1,165 @@
+"""Procedure acquisition (spec §17): a recurring command sequence becomes a procedural memory.
+
+The evidence bar is the whole point: a procedure is NEVER created from a single observation — it
+must have run in at least ``threshold`` distinct runs (repeated evidence). The deterministic
+mining finds the candidate; the model does one small INTERPRET step — naming it — because a good
+name ("Docker deploy") is a judgement, unlike detecting the repeat. Learned as an INFERENCE-
+sourced memory (confidence below a direct observation, per the confidence model) so it stays
+honestly weaker than something Sali saw first-hand, and grows as the evidence does.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+from uuid import UUID
+
+from sali.core.enums import MemoryLayer, MemorySource
+from sali.core.toolvocab import binary_of
+from sali.learning.mining import normalize_tool_step, sequences_by_run, signature
+from sali.learning.model import LearnedProcedure
+from sali.memory import writer as memory_writer
+from sali.provider.base import ChatMessage, ModelProvider
+from sali.provider.presets import BALANCED
+
+# Brain-audit Turn 6: _NAME_OPTS deleted; preset=BALANCED used at call site.
+_NAME_SYSTEM = (
+    "Name this recurring sequence of shell commands as a short procedure — 2 to 5 words, like a "
+    "label Almir would recognise (e.g. 'Docker deploy', 'DB backup'). Reply with ONLY the name."
+)
+
+
+async def _name_procedure(provider: ModelProvider, steps: list[str]) -> str:
+    try:
+        res = await provider.chat(
+            [ChatMessage(role="system", content=_NAME_SYSTEM),
+             ChatMessage(role="user", content="\n".join(steps))],
+            preset=BALANCED,
+        )
+        name = res.content.strip().splitlines()[0].strip(" .\"'`") if res.content.strip() else ""
+    except Exception:  # noqa: BLE001 - naming is best-effort; fall back to the steps
+        name = ""
+    return name or " → ".join(steps)[:60]
+
+
+async def _failure_modes(conn: Any, tools: list[str]) -> list[str]:
+    """The common failure modes of a procedure's tools, from their learned tool:<binary> experiences —
+    so a recalled procedure knows 'what usually breaks' (§4/§6). Deduped, capped."""
+    if not tools:
+        return []
+    rows = await conn.fetch(
+        "SELECT structured->'failure_modes' AS fm FROM memory "
+        "WHERE claim_key = ANY($1) AND valid_until IS NULL",
+        [f"tool:{t}" for t in tools])
+    modes: list[str] = []
+    for r in rows:
+        for m in (r["fm"] or []):
+            if m and m not in modes:
+                modes.append(str(m))
+    return modes[:5]
+
+
+async def learn_procedures(
+    conn: Any, provider: ModelProvider, *, threshold: int = 2, limit: int = 500
+) -> list[LearnedProcedure]:
+    """Mine successful tool executions into procedures that cleared the evidence bar.
+
+    Covers ALL tools (not just execute_command), so repeated patterns like
+    "read file → modify file → run tests" become learned procedures.
+    Caller owns the txn.
+    """
+    rows = await conn.fetch(
+        "SELECT run_id, tool_name, plan->'args' AS tool_args FROM tool_execution "
+        "WHERE success IS TRUE ORDER BY run_id, started_at LIMIT $1",
+        limit,
+    )
+    learned: list[LearnedProcedure] = []
+    for steps, runs in sequences_by_run([dict(r) for r in rows]).items():
+        if len(runs) < threshold:
+            continue  # not enough evidence yet — never learn from one observation (§17)
+        sig = signature(steps)
+        # Reuse the name we already gave this procedure. The model name is non-deterministic, so
+        # re-naming on every pass would rewrite the content under a stable claim_key — churning the
+        # memory and logging false contradictions. Same name → same content → a clean corroboration.
+        existing = await conn.fetchrow(
+            "SELECT structured FROM memory WHERE claim_key=$1 AND valid_until IS NULL",
+            f"procedure:{sig}",
+        )
+        name = (existing["structured"] or {}).get("name") if existing else None
+        if not name:
+            name = await _name_procedure(provider, list(steps))
+        # Enrich the shape (§36/§4) by JOINING data already on hand — no new mechanism: the tools the
+        # steps use, what usually goes wrong with them (from their learned tool experiences), and a
+        # verification hint (the last step is typically the confirming one). So a recalled procedure
+        # guides the next turn on "what breaks" and "how to confirm", not just the raw sequence.
+        tools = sorted({b for s in steps if (b := binary_of(s))})
+        await memory_writer.remember(
+            conn, layer=MemoryLayer.PROCEDURAL,
+            content=f"{name} — Almir's usual steps: " + " → ".join(steps),
+            source=MemorySource.INFERENCE, functional=True, claim_key=f"procedure:{sig}",
+            importance=0.7, obs_conf=min(0.9, 0.5 + 0.1 * len(runs)),
+            # certainty hierarchy (§23): a mined-and-repeated sequence is 'learned' (past 'observed');
+            # 'preferred' is reserved for one Almir has explicitly confirmed.
+            structured={"steps": list(steps), "evidence": len(runs), "name": name,
+                        "certainty": "learned", "tools": tools,
+                        "requires_tools": tools,  # a precondition: these must be installed
+                        "known_failure_modes": await _failure_modes(conn, tools),
+                        "verification": steps[-1] if steps else None},
+        )
+        learned.append(LearnedProcedure(name=name, steps=list(steps), evidence=len(runs)))
+    return learned
+
+
+async def record_procedure_outcomes(conn: Any, *, days: int = 7, limit: int = 1000) -> int:
+    """Close the learning loop (§43): when a run executed a KNOWN procedure's exact sequence, reinforce
+    the procedure if the run was clean and penalize it if the run hit a failure — so a procedure that
+    keeps working grows trusted and one that keeps failing loses confidence. Each (procedure, run)
+    outcome is counted once (deduped via memory_evidence.source_ref). Returns outcomes recorded."""
+    procs = {
+        r["claim_key"]: r for r in await conn.fetch(
+            "SELECT id, claim_key, confidence FROM memory "
+            "WHERE layer='procedural'::memory_layer AND valid_until IS NULL AND claim_key LIKE 'procedure:%'")
+    }
+    if not procs:
+        return 0
+    rows = await conn.fetch(
+        "SELECT run_id, tool_name, plan->'args' AS tool_args, success FROM tool_execution "
+        "WHERE success IS NOT NULL "
+        "  AND started_at > now() - make_interval(days => $1) ORDER BY run_id, started_at LIMIT $2",
+        days, limit)
+
+    per_run: dict[UUID, dict[str, Any]] = {}
+    for r in rows:
+        state = per_run.setdefault(r["run_id"], {"steps": [], "failed": False})
+        if r["success"] is False:
+            state["failed"] = True
+        norm = normalize_tool_step(r["tool_name"], r["tool_args"])
+        if norm and (not state["steps"] or state["steps"][-1] != norm):
+            state["steps"].append(norm)
+
+    recorded = 0
+    for run_id, state in per_run.items():
+        if len(state["steps"]) < 2:
+            continue
+        proc = procs.get(f"procedure:{signature(tuple(state['steps']))}")
+        if proc is None:
+            continue  # this run's sequence isn't a known procedure
+        if await conn.fetchval(
+            "SELECT 1 FROM memory_evidence WHERE memory_id=$1 AND source_ref=$2", proc["id"], run_id):
+            continue  # this application was already scored
+        success = not state["failed"]
+        if success:
+            await conn.execute(
+                "UPDATE memory SET confidence=least(0.95, confidence + 0.03), updated_at=now() WHERE id=$1",
+                proc["id"])
+            ev_conf, note = 0.9, "procedure applied successfully"
+        else:
+            await conn.execute(
+                "UPDATE memory SET confidence=greatest(0.2, confidence - 0.1), updated_at=now() WHERE id=$1",
+                proc["id"])
+            ev_conf, note = 0.2, "procedure application hit a failure"
+        await conn.execute(
+            "INSERT INTO memory_evidence (memory_id, source, source_ref, confidence, note) "
+            "VALUES ($1,'procedure_execution'::memory_source,$2,$3,$4)",
+            proc["id"], run_id, ev_conf, note)
+        recorded += 1
+    return recorded

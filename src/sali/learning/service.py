@@ -1,0 +1,112 @@
+"""LearningService — consolidate raw activity into knowledge (spec §17-19).
+
+``consolidate`` is the periodic "organise the messy room" pass: it mines successful commands into
+evidence-backed procedures, records failures as retrievable episodes, and embeds the new memories
+so they're usable. It reads the durable record (tool_execution / agent_runs) rather than hooking
+the hot loop, so learning is decoupled and can run on its own schedule.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from sali.learning.episodes import consolidate_stm, prune_stm
+from sali.learning.failures import record_failures
+from sali.learning.model import ConsolidationResult
+from sali.learning.overclaims import learn_from_overclaims
+from sali.learning.procedures import learn_procedures, record_procedure_outcomes
+from sali.learning.queue import queue_gaps
+from sali.learning.reflection import reflect_on_recent
+from sali.learning.tool_experience import learn_tool_experiences
+from sali.memory import embed_worker, retention
+from sali.obs.log import get_logger
+from sali.provider.base import ModelProvider
+
+log = get_logger("sali.learning")
+
+# One consolidation at a time, cluster-wide: the `sali agent` loop and the `sali observe` daemon can
+# both fire a pass, and two passes distilling the same short-term memory produce the same episode →
+# a duplicate-key race. A transaction advisory lock serialises them; a pass that can't get it skips.
+_CONSOLIDATE_LOCK = 0x5A11_C0DE
+
+
+class LearningService:
+    def __init__(self, pool: Any, provider: ModelProvider) -> None:
+        self.pool = pool
+        self.provider = provider
+
+    async def consolidate(self, *, threshold: int = 2) -> ConsolidationResult:
+        """One consolidation pass (§17-19): learn procedures (evidence-gated), record failures +
+        their fixes, fold short-term observations into an episode, prune stale raw — then embed.
+        Skipped (no-op) if another consolidation is already running — never a duplicate-key crash."""
+        # A SESSION advisory lock (not a transaction-scoped one) serializes consolidation WITHOUT
+        # keeping a transaction open — so the model calls below (naming a procedure, distilling an
+        # episode) never run inside an open transaction holding a pooled connection idle. Each
+        # sub-step is individually atomic + idempotent (dedup by key), so no outer transaction is
+        # needed for correctness; a partial pass is safely re-done next time. asyncpg releases the
+        # lock on connection return too, so a crash mid-pass can't leak it.
+        async with self.pool.acquire() as conn:
+            if not await conn.fetchval("SELECT pg_try_advisory_lock($1)", _CONSOLIDATE_LOCK):
+                return ConsolidationResult()  # another pass holds the lock — skip cleanly
+            try:
+                procedures = await learn_procedures(conn, self.provider, threshold=threshold)
+                outcomes = await record_procedure_outcomes(conn)  # §43: reinforce/penalize by how they ran
+                experiences = await learn_tool_experiences(conn)  # §16/§67: per-binary reliability/latency
+                failures = await record_failures(conn)
+                # §44: recurring over-claims the response validator struck become ONE durable lesson per
+                # family (deduped, fail-open) so retrieval teaches the model to stop — closing
+                # detection→learning→prevention instead of re-catching the same lie forever.
+                overclaims = await learn_from_overclaims(conn)
+                episodes = await consolidate_stm(conn, self.provider)
+                pruned = await prune_stm(conn)
+                gaps = await queue_gaps(conn)  # §45/§46: notice new learning gaps, bounded by budget
+                reflected = await reflect_on_recent(conn, self.provider)  # §57: one lesson per pass
+                reclaimed = await retention.gc(conn)  # §51: bound the event log's routine bookkeeping
+                if gaps:
+                    await _emit(conn, "learning.queued", {"count": gaps})
+                if reflected:
+                    await _emit(conn, "learning.reflection", {"count": reflected})
+                if reclaimed:
+                    await _emit(conn, "learning.gc", {"events_pruned": reclaimed})
+                for proc in procedures:
+                    await _emit(conn, "learning.procedure",
+                                {"name": proc.name, "evidence": proc.evidence})
+                if failures:
+                    await _emit(conn, "learning.failure", {"count": failures})
+                if overclaims:
+                    await _emit(conn, "learning.overclaim", {"count": overclaims})
+                if episodes:
+                    await _emit(conn, "learning.episode", {"count": episodes})
+                if outcomes:
+                    await _emit(conn, "learning.procedure_outcome", {"count": outcomes})
+                if experiences:
+                    await _emit(conn, "learning.tool_experience", {"count": len(experiences)})
+            finally:
+                await conn.execute("SELECT pg_advisory_unlock($1)", _CONSOLIDATE_LOCK)
+        await embed_worker.embed_pending(self.pool, self.provider)  # make the new memories usable
+        log.debug("consolidated", procedures=len(procedures), outcomes=outcomes, failures=failures,
+                  episodes=episodes, pruned=pruned, tool_experiences=len(experiences))
+        return ConsolidationResult(procedures=procedures, failures_recorded=failures,
+                                   episodes_created=episodes, stm_pruned=pruned,
+                                   tool_experiences=len(experiences), overclaims_recorded=overclaims)
+
+    async def procedures(self) -> list[dict[str, Any]]:
+        """The procedures Sali has learned so far (most-evidenced first)."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT content, structured, confidence FROM memory "
+                "WHERE layer='procedural' AND valid_until IS NULL "
+                "ORDER BY (structured->>'evidence')::int DESC NULLS LAST, confidence DESC"
+            )
+        return [
+            {"content": r["content"], "steps": (r["structured"] or {}).get("steps", []),
+             "evidence": (r["structured"] or {}).get("evidence"), "confidence": r["confidence"]}
+            for r in rows
+        ]
+
+
+async def _emit(conn: Any, event_type: str, payload: dict[str, Any]) -> None:
+    await conn.execute(
+        "INSERT INTO event (event_type, subject_type, payload) VALUES ($1,'learning',$2)",
+        event_type, payload,
+    )

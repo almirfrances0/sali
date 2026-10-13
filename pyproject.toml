@@ -1,0 +1,155 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sali"
+version = "0.0.0"
+description = "Sali — a local-first, long-lived personal AI agent that lives on the machine."
+requires-python = ">=3.14"
+readme = "README.md"
+authors = [{ name = "Almir" }]
+dependencies = [
+    "asyncpg>=0.30",
+    "pydantic>=2.11",
+    "pydantic-settings>=2.6",
+    "structlog>=25.0",
+    "typer>=0.15",
+    "rich>=14.0",
+    "prompt_toolkit>=3.0",
+    "tenacity>=9.0",
+    "httpx>=0.28",
+    "ollama>=0.5",
+    "jsonschema>=4.20",
+    "cryptography>=44",  # encrypted secret vault (sali3 §27-29)
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "websockets>=15.0",
+    "zeroconf>=0.140",  # mDNS/Bonjour — advertise Sali on the LAN so the iPhone finds him
+    "trafilatura>=1.12",  # web-page text extraction — hard top-level import in tools/builtins/web.py
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5",
+    "ruff>=0.7",
+    "mypy>=1.13",
+    "import-linter>=2.0",
+]
+# §44 extensions that need an extra package. All import-guarded: absent → the feature reports
+# what to install; present → it works. Email over IMAP/SMTP needs nothing (stdlib).
+pdf = ["pypdf>=6"]           # document ingestion of PDFs
+cal = ["icalendar>=6,<8"]   # robust CalDAV event parsing (a minimal parser works without it)
+browser = ["playwright>=1.55"]  # browser automation (also: playwright install firefox)
+watch = ["watchdog>=4"]     # continuous filesystem perception (the event engine still runs without it)
+push = ["h2>=4"]           # APNs speaks HTTP/2 only; httpx needs h2 to talk it (§11 iPhone banners)
+
+[project.scripts]
+sali = "sali.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sali"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
+ignore = ["E501"]  # line length handled by formatter; long SQL/strings tolerated
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection markers are called in argument defaults by design (§22 API layer).
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path", "fastapi.Body", "fastapi.Header", "fastapi.Form", "fastapi.File"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "db: test requires a reachable Postgres (auto-skipped if unavailable)",
+    "live: test hits real Ollama (opt-in, excluded from `make ci`)",
+]
+filterwarnings = ["error::DeprecationWarning"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+warn_unused_configs = true
+plugins = ["pydantic.mypy"]
+files = ["src", "tests"]
+# The AT-SPI probe is a standalone script run by the SYSTEM python (PyGObject), not Sali's runtime —
+# type-checking it against our venv (no `gi`) is meaningless.
+exclude = "src/sali/perception/_atspi_probe\\.py"
+
+[[tool.mypy.overrides]]
+# Third-party without type info, and the OPTIONAL §44 extras (pypdf/icalendar/playwright/keyring):
+# treated as untyped so type-checking passes whether or not the extra is installed.
+module = [
+    "asyncpg.*", "ollama.*", "jsonschema.*",
+    "pypdf.*", "icalendar.*", "playwright.*", "keyring.*", "cryptography.*", "watchdog.*",
+]
+ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["sali"]
+branch = true
+
+[tool.coverage.report]
+exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError", "\\.\\.\\."]
+
+# Enforce the layered architecture (§A): higher layers may import lower, never the reverse,
+# and concrete model backends are wired only at the edges (model-agnosticism, rule 10).
+[tool.importlinter]
+root_package = "sali"
+
+[[tool.importlinter.contracts]]
+name = "Layered architecture (inward dependencies only)"
+type = "layers"
+layers = [
+    "sali.cli",
+    "sali.api",
+    "sali.runtime",
+    "sali.context",
+    "sali.retrieval",
+    "sali.twin | sali.learning | sali.ingest",
+    "sali.memory | sali.graph | sali.tasks | sali.scheduler | sali.comms | sali.browser | sali.perception | sali.events | sali.skills",
+    "sali.security | sali.verify",
+    "sali.tools",
+    "sali.provider",
+    "sali.db",
+    "sali.obs",
+    "sali.config",
+    "sali.core",
+]
+
+[[tool.importlinter.contracts]]
+name = "Concrete model backends are wired only at the edges"
+type = "forbidden"
+source_modules = [
+    "sali.memory", "sali.graph", "sali.retrieval", "sali.context",
+    "sali.runtime", "sali.tools", "sali.security", "sali.verify", "sali.ingest", "sali.comms",
+]
+forbidden_modules = ["sali.provider.ollama", "sali.provider.llamacpp", "sali.provider.fake"]
+
+# ONE PC · ONE SALI · ONE MIND. `sali.kernel` is the only place a Kernel — and through it the one
+# AgentRuntime, AgentLoop, coordinator and inference path — is built, and `sali.cli` is the only
+# place allowed to reach for it, because CLI commands are the machine's process entry points.
+#
+# The API is deliberately absent from that list: it receives the mind's runtime by injection
+# (app.state.runtime) and has no way to construct one. That is what makes `sali serve` beside
+# `sali daemon` impossible rather than merely discouraged — see docs/ONE-MIND.md.
+[[tool.importlinter.contracts]]
+name = "Only the CLI may reach the composition root (one Kernel per machine)"
+type = "forbidden"
+source_modules = [
+    "sali.api", "sali.runtime", "sali.context", "sali.retrieval",
+    "sali.twin", "sali.learning", "sali.ingest",
+    "sali.memory", "sali.graph", "sali.tasks", "sali.scheduler", "sali.comms", "sali.browser",
+    "sali.perception", "sali.events", "sali.skills",
+    "sali.security", "sali.verify", "sali.tools", "sali.provider", "sali.db", "sali.obs",
+    "sali.config", "sali.core",
+]
+forbidden_modules = ["sali.kernel"]

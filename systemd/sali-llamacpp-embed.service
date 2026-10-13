@@ -1,0 +1,31 @@
+# Sali's embedding engine — a second, deliberately CPU-ONLY llama-server.
+#
+# Same separation as the Ollama-era design: the embedder (nomic-embed-text-v1.5, 768-dim) never
+# contends with the reasoning model for VRAM (-ngl 0) and is thread-capped so an embedding batch
+# cannot add an all-core spike on top of a generation. Loopback only (127.0.0.1:8084).
+#
+#   sudo cp systemd/sali-llamacpp-embed.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now sali-llamacpp-embed
+[Unit]
+Description=Sali llama.cpp embeddings server — CPU-only nomic-embed-text-v1.5 (768-dim)
+After=sali-llamacpp.service
+
+[Service]
+Type=simple
+User=almir
+Environment=LD_LIBRARY_PATH=/home/almir/.local/opt/llama.cpp
+# CPU-only HONESTLY: without this, llama.cpp still opens a CUDA context (~184 MiB of VRAM and a
+# phantom entry on the GPU process list — which the vram guard then reads as a second model
+# server). An empty CUDA_VISIBLE_DEVICES means no CUDA device exists for this process at all.
+Environment=CUDA_VISIBLE_DEVICES=
+ExecStart=/home/almir/.local/opt/llama.cpp/llama-server \
+  -m /home/almir/.local/share/sali/models/nomic-embed-text-v1.5.Q8_0.gguf \
+  --alias nomic-embed-text \
+  --host 127.0.0.1 --port 8084 \
+  --embeddings -ngl 0 -t 4 -c 8192 --parallel 1
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

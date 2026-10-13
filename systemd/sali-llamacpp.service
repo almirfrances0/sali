@@ -1,0 +1,41 @@
+# Sali's reasoning engine — the llama.cpp server that holds the ONE model.
+#
+# Replaces the Ollama service in Sali's stack. Design invariants, enforced here at the unit level:
+#   * ONE model (Qwen3.5-35B-A3B, UD-IQ4_XS GGUF) loaded at startup and held permanently —
+#     no keep_alive, no runner fingerprinting, no silent substitution (the runtime probe in
+#     sali.provider.llamacpp checks the served id against --alias sali on every cognition call).
+#   * ONE slot (--parallel 1) — no server-side concurrency that Sali's machine-wide lease
+#     could never see. Cross-process serialization stays with the lease (sali.provider.lease).
+#   * Loopback only (127.0.0.1:8083) — the inference API is never exposed off the machine.
+#   * GPU-resident (-ngl 99), KV cache q8_0, flash attention on, batch 2048 (the measured
+#     prefill knee on this host), 8 CPU threads (never all-core — the 2026-09-01 power post-mortem).
+#
+#   sudo cp systemd/sali-llamacpp.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now sali-llamacpp
+#   journalctl -u sali-llamacpp -f
+[Unit]
+Description=Sali llama.cpp reasoning server — Qwen3.5-35B-A3B, one model, one slot
+# Never load the model onto an uncapped machine: same power-envelope ordering as sali.service.
+After=sali-power-envelope.service
+Requires=sali-power-envelope.service
+
+[Service]
+Type=simple
+User=almir
+Environment=LD_LIBRARY_PATH=/home/almir/.local/opt/llama.cpp
+ExecStart=/home/almir/.local/opt/llama.cpp/llama-server \
+  -m /home/almir/.local/share/sali/models/Qwen3.5-35B-A3B-UD-IQ4_XS.gguf \
+  --mmproj /home/almir/.local/share/sali/models/mmproj-BF16.gguf \
+  --alias Qwen3.5-35B-A3B \
+  --host 127.0.0.1 --port 8083 \
+  -c 49152 -ngl 99 -fa on -b 2048 -t 8 \
+  --parallel 1 \
+  --cache-type-k q8_0 --cache-type-v q8_0 \
+  --jinja
+Restart=on-failure
+RestartSec=5
+# A 16.3 GiB model load + graph build takes ~35s on this NVMe before /health goes 200.
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

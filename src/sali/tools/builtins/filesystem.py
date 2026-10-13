@@ -1,0 +1,403 @@
+"""Filesystem tools, every path confined by the PathGuard (fix H2).
+
+Reads (R0) are bounded to the read roots; writes (R1) to the write roots; both are hard-denied
+inside protected prefixes (~/.ssh, the config, the off-limits salix project, …). Nothing here
+can escape those roots because every path is realpath-resolved before the check.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from sali.core.enums import Capability, RiskLevel
+from sali.tools.base import Tool, ToolResult, VerifyResult
+from sali.tools.context import ToolContext
+from sali.tools.pathguard import PathViolation
+from sali.tools.registry import ToolRegistry
+
+_MAX_BYTES = 256 * 1024
+_PATH_ARG = {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
+
+
+def _verify_write(args: dict[str, Any], result: ToolResult, ctx: ToolContext) -> VerifyResult:
+    """Independent post-condition for a write: re-stat the file on disk and confirm it exists with
+    the byte length we meant to write — instead of trusting the tool's own ok flag (spec §23)."""
+    if not result.ok:
+        return VerifyResult(False, result.error or "write failed")
+    try:
+        path = ctx.paths.check_write(args["path"])
+    except PathViolation as exc:
+        return VerifyResult(False, str(exc))
+    # Workspace boundary check
+    if ctx.workspace is not None and not ctx.workspace.contains(path):
+        return VerifyResult(False, f"write outside workspace: {path}")
+    expected = len(str(args.get("content", "")).encode("utf-8"))
+    if path.is_file() and path.stat().st_size == expected:
+        return VerifyResult(True, f"file present on disk, {expected} bytes")
+    return VerifyResult(False, "file missing or wrong size after write")
+
+
+def _in_free_zone(raw: Any) -> bool:
+    """Writing inside Sali's own home (or scratch) is ordinary work and runs freely; writing out
+    in the wider system is where it should pause and think first. One rule, not a blessed-folder
+    list — so Sali can create a file anywhere, and only stops to confirm when it's off in /etc,
+    /opt, and the like."""
+    try:
+        target = Path(str(raw)).expanduser().resolve()
+    except (OSError, ValueError, RuntimeError):
+        return False
+    zones = [Path.home().resolve(), Path("/tmp"), Path("/var/tmp")]
+    return any(target == z or z in target.parents for z in zones)
+
+
+def _check_workspace(path: Path, ctx: ToolContext) -> str | None:
+    """If a workspace is active, verify the path is inside it. Returns error string or None."""
+    if ctx.workspace is None:
+        return None
+    if not ctx.workspace.contains(path):
+        return (
+            f"write denied: {path} is outside the task workspace "
+            f"({ctx.workspace.workspace_root}). All project files must be created inside "
+            f"the declared workspace."
+        )
+    return None
+
+
+class ListDir(Tool):
+    name = "list_directory"
+    description = "List the entries of a directory (name, type, size)."
+    parameters = _PATH_ARG
+    risk_level = RiskLevel.R0
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        try:
+            path = ctx.paths.check_read(args["path"])
+        except PathViolation as exc:
+            return ToolResult(ok=False, display="denied", error=str(exc))
+        if not path.is_dir():
+            return ToolResult(ok=False, display="not a directory", error=f"{path} is not a directory")
+        entries = []
+        for child in sorted(path.iterdir(), key=lambda p: p.name)[:500]:
+            kind = "dir" if child.is_dir() else "file"
+            size = child.stat().st_size if child.is_file() else None
+            entries.append({"name": child.name, "type": kind, "size": size})
+        return ToolResult(ok=True, output={"path": str(path), "entries": entries},
+                          display=f"{len(entries)} entries in {path}")
+
+
+class ReadFile(Tool):
+    name = "read_file"
+    description = "Read a text file (up to 64 KiB)."
+    parameters = {
+        "type": "object",
+        "properties": {"path": {"type": "string"}, "max_bytes": {"type": "integer"}},
+        "required": ["path"],
+    }
+    risk_level = RiskLevel.R0
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        try:
+            path = ctx.paths.check_read(args["path"])
+        except PathViolation as exc:
+            return ToolResult(ok=False, display="denied", error=str(exc))
+        if not path.is_file():
+            return ToolResult(ok=False, display="not a file", error=f"{path} is not a file")
+        # BINARY FILE GATE: PDFs, images, and other binary formats produce garbage when decoded
+        # as UTF-8. Sali would then fabricate content from the gibberish. Detect known binary
+        # signatures and refuse, pointing to the ingest tool for documents or vision for images.
+        _head = b""
+        try:
+            with open(path, "rb") as f:
+                _head = f.read(16)
+        except OSError:
+            pass
+        _BINARY_SIGNATURES = (
+            (b"%PDF", "PDF document — use the ingest_document tool to read it"),
+            (b"\x89PNG", "PNG image — use the vision tool to see it"),
+            (b"\xff\xd8\xff", "JPEG image — use the vision tool to see it"),
+            (b"GIF8", "GIF image — use the vision tool to see it"),
+            (b"RIFF", "RIFF container (webp/wav) — use the appropriate tool"),
+            (b"\x1f\x8b", "gzip compressed file"),
+            (b"PK\x03\x04", "ZIP archive — extract first"),
+            (b"\x00\x00\x00\x1c\x66\x74\x79\x70", "MP4 video file"),
+            (b"\x1a\x45\xdf\xa3", "MKV/WebM video file"),
+        )
+        for sig, hint in _BINARY_SIGNATURES:
+            if _head.startswith(sig):
+                return ToolResult(ok=False, display="binary file",
+                                  error=f"{path.name} is a {hint}. read_file only handles text.")
+        limit = min(int(args.get("max_bytes") or _MAX_BYTES), _MAX_BYTES)
+        raw = path.read_bytes()
+        truncated = len(raw) > limit
+        text = raw[:limit].decode("utf-8", "replace")
+        return ToolResult(
+            ok=True,
+            output={"path": str(path), "content": text, "truncated": truncated, "bytes": len(raw)},
+            display=f"read {min(len(raw), limit)} bytes from {path.name}",
+        )
+
+
+class FileMetadata(Tool):
+    name = "file_metadata"
+    description = "Stat a path: size, mode, mtime, and type."
+    parameters = _PATH_ARG
+    risk_level = RiskLevel.R0
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        try:
+            path = ctx.paths.check_read(args["path"])
+        except PathViolation as exc:
+            return ToolResult(ok=False, display="denied", error=str(exc))
+        if not path.exists():
+            return ToolResult(ok=False, display="not found", error=f"{path} does not exist")
+        st = path.stat()
+        # A RAW EPOCH IS NOT A DATE, and this tool used to return only the integer.
+        #
+        # Asked when a photo was taken, Sali was handed `"mtime": 1788774842` and answered "It's from
+        # mid-June — exactly three months ago". That number is 05:54 THIS MORNING. A Q2_K model cannot
+        # do epoch arithmetic and will not say so; it produces a confident month. Worse, the wrong
+        # date was then written to durable memory by `remember`, and re-anchored a turn later into
+        # "today marks exactly three months since we met" — one unreadable integer became a fabricated
+        # relationship milestone. The epoch stays (callers may want to sort on it); the readable form
+        # sits beside it so nothing has to be derived, and `age` removes the last subtraction.
+        _mt = datetime.fromtimestamp(st.st_mtime, tz=UTC)
+        _age = datetime.now(UTC) - _mt
+        _days = _age.days
+        out = {
+            "path": str(path), "size": st.st_size, "mode": oct(st.st_mode & 0o777),
+            "mtime": int(st.st_mtime),
+            "modified": _mt.strftime("%Y-%m-%d %H:%M UTC"),
+            "age": (f"{_days} days ago" if _days >= 1
+                    else f"{int(_age.total_seconds() // 3600)} hours ago" if _age.total_seconds() >= 3600
+                    else "less than an hour ago"),
+            "is_dir": path.is_dir(), "is_file": path.is_file(),
+            "is_symlink": path.is_symlink(),
+        }
+        return ToolResult(ok=True, output=out,
+                          display=f"{out['size']} bytes, modified {out['modified']}")
+
+
+class SearchFiles(Tool):
+    name = "search_files"
+    description = "Find files under a root matching a glob pattern."
+    parameters = {
+        "type": "object",
+        "properties": {
+            "root": {"type": "string"},
+            "pattern": {"type": "string"},
+            "max_results": {"type": "integer"},
+        },
+        "required": ["root", "pattern"],
+    }
+    risk_level = RiskLevel.R0
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        try:
+            root = ctx.paths.check_read(args["root"])
+        except PathViolation as exc:
+            return ToolResult(ok=False, display="denied", error=str(exc))
+        limit = min(int(args.get("max_results") or 100), 500)
+        matches = []
+        for match in root.rglob(str(args["pattern"])):
+            matches.append(str(match))
+            if len(matches) >= limit:
+                break
+        return ToolResult(ok=True, output={"root": str(root), "matches": matches},
+                          display=f"{len(matches)} matches")
+
+
+class CreateFile(Tool):
+    name = "create_file"
+    description = (
+        "Create a new file anywhere with the given text content (makes parent folders as needed; "
+        "refuses to overwrite an existing file — use modify_file for that)."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+        "required": ["path", "content"],
+    }
+    risk_level = RiskLevel.R1  # base; assess() escalates writes outside Sali's home
+    capabilities = frozenset({Capability.WRITE})
+    idempotent = False
+
+    def assess(self, args: dict[str, Any]) -> RiskLevel:
+        return RiskLevel.R1 if _in_free_zone(args.get("path", "")) else RiskLevel.R4
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        try:
+            path = ctx.paths.check_write(args["path"])
+        except PathViolation as exc:
+            return ToolResult(ok=False, display="denied", error=str(exc))
+        ws_err = _check_workspace(path, ctx)
+        if ws_err:
+            return ToolResult(ok=False, display="outside workspace", error=ws_err)
+        if path.exists():
+            return ToolResult(ok=False, display="exists", error=f"{path} already exists (use modify_file)")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        content = str(args["content"])
+        path.write_text(content, encoding="utf-8")
+        return ToolResult(ok=True, output={"path": str(path), "bytes": len(content.encode())},
+                          display=f"created {path.name}")
+
+    async def verify(self, args: dict[str, Any], result: ToolResult, ctx: ToolContext) -> VerifyResult:
+        v = _verify_write(args, result, ctx)
+        # Record artifact only after successful deterministic verification
+        if (v.success and ctx.tasks is not None and ctx.run_id is not None
+                and hasattr(ctx.tasks, "active_task") and hasattr(ctx.tasks, "record_artifact")):
+            active = await ctx.tasks.active_task()
+            if active is not None:
+                await ctx.tasks.record_artifact(
+                    active.id, str(Path(args["path"]).resolve()), "created", tool_name="create_file")
+        return v
+
+
+class ModifyFile(Tool):
+    name = "modify_file"
+    description = "Overwrite an existing file with new text content."
+    parameters = {
+        "type": "object",
+        "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+        "required": ["path", "content"],
+    }
+    risk_level = RiskLevel.R1  # base; assess() escalates writes outside Sali's home
+    capabilities = frozenset({Capability.WRITE})
+    idempotent = False
+
+    def assess(self, args: dict[str, Any]) -> RiskLevel:
+        return RiskLevel.R1 if _in_free_zone(args.get("path", "")) else RiskLevel.R4
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        # No sha256 optimistic lock: the model can't compute a real hash of the file bytes, so it
+        # guessed one and every edit was rejected as "stale". Sali is the only writer here — it just
+        # writes. (Create makes parent dirs; modify simply replaces content.)
+        try:
+            path = ctx.paths.check_write(args["path"])
+        except PathViolation as exc:
+            return ToolResult(ok=False, display="denied", error=str(exc))
+        ws_err = _check_workspace(path, ctx)
+        if ws_err:
+            return ToolResult(ok=False, display="outside workspace", error=ws_err)
+        if not path.is_file():
+            return ToolResult(ok=False, display="not a file", error=f"{path} is not an existing file")
+        content = str(args["content"])
+        path.write_text(content, encoding="utf-8")
+        return ToolResult(ok=True, output={"path": str(path), "bytes": len(content.encode())},
+                          display=f"modified {path.name}")
+
+    async def verify(self, args: dict[str, Any], result: ToolResult, ctx: ToolContext) -> VerifyResult:
+        v = _verify_write(args, result, ctx)
+        if (v.success and ctx.tasks is not None
+                and hasattr(ctx.tasks, "active_task") and hasattr(ctx.tasks, "record_artifact")):
+            active = await ctx.tasks.active_task()
+            if active is not None:
+                await ctx.tasks.record_artifact(
+                    active.id, str(Path(args["path"]).resolve()), "modified", tool_name="modify_file")
+        return v
+
+
+class DeleteFile(Tool):
+    name = "delete_file"
+    description = "Delete a file. Deleting anything outside scratch space pauses to confirm first."
+    parameters = _PATH_ARG
+    risk_level = RiskLevel.R1  # base; assess() escalates deletions of non-scratch files
+    capabilities = frozenset({Capability.WRITE})
+    idempotent = False
+
+    def assess(self, args: dict[str, Any]) -> RiskLevel:
+        # Resolve the REAL path first (realpath, like run()'s PathGuard) — otherwise
+        # "/tmp/../home/almir/x" or a symlink under /tmp would masquerade as scratch and
+        # slip a home-file deletion past the confirm gate.
+        try:
+            target = str(Path(str(args.get("path", ""))).expanduser().resolve())
+        except (OSError, ValueError, RuntimeError):
+            return RiskLevel.R4  # can't resolve → treat as risky, pause to confirm
+        # Free-to-delete zones (no confirm): scratch dirs + Sali's own workspace (sali3 §13,17).
+        scratch = (
+            "/tmp/", "/var/tmp/",
+            str(Path.home() / ".local" / "share" / "sali" / "workspace") + "/",
+            str(Path.home() / "Desktop" / "sali-works") + "/",
+        )
+        return RiskLevel.R1 if any(target.startswith(s) for s in scratch) else RiskLevel.R4
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        try:
+            path = ctx.paths.check_write(args["path"])
+        except PathViolation as exc:
+            return ToolResult(ok=False, display="denied", error=str(exc))
+        if not path.exists():
+            return ToolResult(ok=False, display="not found", error=f"{path} does not exist")
+        if path.is_dir():
+            return ToolResult(ok=False, display="is a directory", error="refusing to delete a directory")
+        path.unlink()
+        return ToolResult(ok=True, output={"path": str(path)}, display=f"deleted {path.name}")
+
+    async def verify(self, args: dict[str, Any], result: ToolResult, ctx: ToolContext) -> VerifyResult:
+        """Independently confirm the file is actually gone, not just that unlink() didn't raise."""
+        if not result.ok:
+            return VerifyResult(False, result.error or "delete failed")
+        try:
+            path = ctx.paths.check_write(args["path"])
+        except PathViolation as exc:
+            return VerifyResult(False, str(exc))
+        return (VerifyResult(True, "confirmed gone") if not path.exists()
+                else VerifyResult(False, "file still exists after delete"))
+
+
+class SendFile(Tool):
+    name = "send_file"
+    description = (
+        "Send a file to Almir on his DEVICE so he can download it. Almir is on his iPhone / the app, "
+        "NOT sitting at this PC — a file left at a local path never reaches him, so this is the ONLY way "
+        "to actually GIVE him a file (a report, a build output, a document, a whole project folder). Set "
+        "zip=true to bundle a folder or many files into one archive first. Use this whenever Almir asks "
+        "you to send / share / give him a file. After you call this, a downloadable file card appears "
+        "right in Almir's chat automatically — so just tell him plainly it's sent (e.g. \"Sent — it's in "
+        "your chat, tap to download\"). NEVER tell him a local file path, and never say he'll get a "
+        "notification, an email, or that it's 'on the Desktop' — none of that is how he receives it."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Absolute path of the file or folder to send."},
+            "zip": {"type": "boolean", "description": "Zip it first (required to send a folder)."},
+            "name": {"type": "string", "description": "Optional name Almir should see for the file."},
+        },
+        "required": ["path"],
+    }
+    risk_level = RiskLevel.R1
+    capabilities = frozenset({Capability.READ})
+    idempotent = False
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        if ctx.pool is None:
+            return ToolResult(ok=False, display="unavailable", error="file sending isn't available here")
+        try:
+            path = ctx.paths.check_read(str(args.get("path", "")))
+        except PathViolation as exc:
+            return ToolResult(ok=False, display="denied", error=str(exc))
+        if not path.exists():
+            return ToolResult(ok=False, display="not found",
+                              error=f"{path} doesn't exist yet — create it first, then send it")
+        from sali.runtime.sent_files import SentFileStore
+        name = str(args.get("name", "")).strip() or None
+        try:
+            info = await SentFileStore(ctx.pool).register(
+                session_id=ctx.session_id, run_id=ctx.run_id, source_path=str(path),
+                root=str(ctx.settings.permissions.workspace),
+                zip_it=bool(args.get("zip")), name=name)
+        except Exception as exc:  # noqa: BLE001 — surface a soft failure, never crash the turn
+            return ToolResult(ok=False, display="send failed", error=str(exc)[:200])
+        return ToolResult(
+            ok=True,
+            output={"sent": True, "file_id": info["id"], "filename": info["filename"],
+                    "bytes": info["bytes"], "download_url": info["download_url"]},
+            display=f"sent {info['filename']} to Almir ({info['bytes']} bytes)")
+
+
+def register_builtins(registry: ToolRegistry) -> None:
+    for cls in (ListDir, ReadFile, FileMetadata, SearchFiles, CreateFile, ModifyFile, DeleteFile,
+                SendFile):
+        registry.register(cls())
