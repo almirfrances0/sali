@@ -62,8 +62,9 @@ ARCHIVE_SUBDIRS = ("tasks", "conversations", "research", "sends")
 
 # Sali's state OUTSIDE the workspace. The session id is deliberately included: a production life should
 # begin with a fresh conversation identity rather than silently inheriting the one used during testing.
-# Two entries are PRESERVED by name — `backups` (a reset must never destroy the safety net that lets you
-# recover from a reset) and `sudo-askpass` (an operational helper; deleting it would break sudo).
+# Entries are PRESERVED by name — `backups` (a reset must never destroy the safety net that lets you
+# recover from a reset), `sudo-askpass` (an operational helper; deleting it would break sudo),
+# `session` (identity, see below), and `models` (the GGUF binaries — see below).
 STATE_DIR = Path.home() / ".local" / "share" / "sali"
 # `session` is PRESERVED, and that is not a softening of the reset — the conversation table is
 # truncated either way, so the id carries no content forward. What it carries is IDENTITY, and the
@@ -74,7 +75,14 @@ STATE_DIR = Path.home() / ".local" / "share" / "sali"
 # is dropped (the app filters turn events on the session id). Observed here: the 18:09 erase orphaned
 # 14 real messages that way. A "fresh conversation identity" is a job for a restart, not for unlinking
 # a file underneath a running process.
-STATE_PRESERVE = frozenset({"backups", "sudo-askpass", "session"})
+#
+# `models` is PRESERVED and this is NOT a softening either — it is a repair. The GGUF files under
+# models/ are Sali's physical brain (17.5 GB Qwen3.5 chat + the mmproj vision projector + the
+# nomic embedder). A memory reset wipes what Sali KNOWS and DID, never the binaries he needs to
+# think at all. The 2026-10-14 reset deleted this directory; llama-server then crash-looped (restart
+# counter 175) and Sali could not answer a single message. Adding a model back is a multi-hour
+# download, and deleting it is not what "start over" means. Same reasoning as `backups` above.
+STATE_PRESERVE = frozenset({"backups", "sudo-askpass", "session", "models"})
 
 
 def _clear_state_files() -> list[str]:

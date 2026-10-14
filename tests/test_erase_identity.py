@@ -4,6 +4,11 @@ Both defects were live on this machine. The 18:09 erase orphaned conversation
 01a078a0-c67e-75b7-929a-603feaff9c00 with 14 real messages in it — replies Sali sent that the app
 could never display, because the API had already minted a new conversation id from a file the reset
 had deleted underneath the running process.
+
+The 2026-10-14 erase deleted `~/.local/share/sali/models/` along with the state files, which
+caused llama-server to crash-loop 175 times because the 17.5 GB GGUF weights were gone — the
+daemon could no longer think at all. A reset wipes memory + archives, never the binaries that
+ARE Sali's brain.
 """
 
 from __future__ import annotations
@@ -37,6 +42,39 @@ def test_the_conversation_identity_survives_an_erase(tmp_path, monkeypatch) -> N
     # cleared: everything that is actually Sali's accumulated state
     assert not (state / "history").exists(), "CLI history is state and must be cleared"
     assert not any((state / "bg").iterdir()), "background run logs are state, not identity"
+
+
+def test_the_models_never_burn(tmp_path, monkeypatch) -> None:
+    """A memory reset wipes what Sali KNOWS, never the binaries that are his brain.
+
+    Regression for the 2026-10-14 incident: `_clear_state_files` iterated every entry in
+    `~/.local/share/sali/` and `shutil.rmtree`'d anything not in STATE_PRESERVE. `models/`
+    was not preserved, so the reset deleted the 17.5 GB Qwen3.5 GGUF, the mmproj vision
+    projector, and the embedder. llama-server then crash-looped 175 times and Sali could not
+    answer a single message. A reset is allowed to erase his memories, never his mind."""
+    state = tmp_path / "sali"
+    state.mkdir()
+    (state / "session").write_text("01a078c4-99ed-7122-ba5e-e383817b1cb2")
+    (state / "history").write_text("some cli history")
+    models = state / "models"
+    models.mkdir()
+    # Stand-in for the 17.5 GB GGUF; the test asserts the DIRECTORY and its CONTENTS both survive.
+    (models / "Qwen3.5-35B-A3B-UD-IQ4_XS.gguf").write_bytes(b"fake gguf bytes")
+    (models / "mmproj-BF16.gguf").write_bytes(b"fake mmproj bytes")
+    (models / "nomic-embed-text-v1.5.Q8_0.gguf").write_bytes(b"fake embed bytes")
+
+    monkeypatch.setattr(reset_mod, "STATE_DIR", state)
+    reset_mod._clear_state_files()
+
+    # models/ and every GGUF inside it must survive — this is the actual failure mode we're hardening.
+    assert models.is_dir(), "reset must NEVER delete the model weights directory"
+    for name in ("Qwen3.5-35B-A3B-UD-IQ4_XS.gguf", "mmproj-BF16.gguf",
+                 "nomic-embed-text-v1.5.Q8_0.gguf"):
+        assert (models / name).exists(), f"reset wiped {name} — llama-server cannot load without it"
+    # unrelated state is still cleared as expected
+    assert not (state / "history").exists(), "CLI history is state and must still be cleared"
+    # belt-and-braces: the name is literally in the preserve set
+    assert "models" in reset_mod.STATE_PRESERVE
 
 
 def test_the_reset_does_not_restart_the_event_sequence() -> None:
