@@ -36,7 +36,7 @@ class ModelSettings(BaseModel):
     # transition; it is removed in Phase 7 once the final acceptance gates pass.
     provider: Literal["ollama", "fake", "llamacpp"] = "llamacpp"
     host: str = "http://localhost:11434"
-    chat_model: str = "sali:latest"  # Sali's single reasoning backend (Ollama-era name)
+    chat_model: str = "sali:latest"  # Ollama-only: model name sent to OllamaProvider; ignored when provider=llamacpp
     # ── llama.cpp backend (the Ollama replacement) ─────────────────────────────────────────────
     # Two llama-server processes, both systemd-owned: the reasoning server (GPU, one model loaded
     # at startup and held permanently — no keep_alive, no runner fingerprinting, --parallel 1) and

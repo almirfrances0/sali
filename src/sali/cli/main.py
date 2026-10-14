@@ -1529,7 +1529,9 @@ async def _agent(settings: Settings, message: str | None) -> None:
     renderer = TerminalRenderer(console)
 
     # Print header
-    renderer.print_header(__version__, settings.model.chat_model, str(runtime.session_id))
+    _engine_model = (settings.model.llamacpp_model_alias if settings.model.provider == "llamacpp"
+                     else settings.model.chat_model)
+    renderer.print_header(__version__, _engine_model, str(runtime.session_id))
 
     # Check for recovery
     try:

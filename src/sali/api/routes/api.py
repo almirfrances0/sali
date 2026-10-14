@@ -782,7 +782,7 @@ async def get_system(request: Request) -> dict[str, Any]:
         health = {"all_ok": False, "error": str(exc)[:200]}
 
     return {
-        "model": kernel.settings.model.chat_model,
+        "model": getattr(kernel.provider, "chat_model", None) or kernel.settings.model.chat_model,
         "resources": resources,
         "health": health,
         "websocket_connections": ws_manager.active_count,

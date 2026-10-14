@@ -2015,6 +2015,11 @@ class AgentLoop:
                 # his folder so easy for me to track it." Absolute paths still go where he chose.
                 body += (f" My workspace is {env['workspace']} — project files belong there by "
                          "default; an absolute path Almir names is always honoured.")
+            # Desktop ownership: the model may infer headless/SSH from kernel info; correct that
+            # explicitly when the perception backend confirms a graphical desktop is live here.
+            if self.settings.perception.backend == "desktop":
+                body += (" This is a graphical Ubuntu desktop — I am at the keyboard of my own "
+                         "machine, not on a headless server or an SSH session.")
             parts.append(body)
         # MY BODY — what these hands can and cannot do, on every turn (§5/§6/§16/§53-capability). Stated
         # as fact so Sali knows his own reach and never OFFERS a capability he lacks (Almir, on Sali
@@ -4117,7 +4122,8 @@ class AgentLoop:
                                     f"Lesson from conversation: {_lesson_text}",
                                     confidence=0.6, source="inference")
                 await self._append_message(
-                    conn, session_id, "assistant", final_text, model=self.settings.model.chat_model,
+                    conn, session_id, "assistant", final_text,
+                    model=getattr(self.provider, "chat_model", None) or self.settings.model.chat_model,
                     attachment=_reply_attachment,
                 )
                 await journal.set_state(RunState.RESPOND)

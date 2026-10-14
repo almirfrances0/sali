@@ -26,7 +26,7 @@ def _hit(content: str, *, stale: bool = False, score: float = 0.5) -> MemoryHit:
     )
 
 
-def _engine(ctx: int = 1500, reserve: int = 500) -> ContextEngine:
+def _engine(ctx: int = 3000, reserve: int = 500) -> ContextEngine:
     return ContextEngine(FakeModelProvider(), ctx_tokens=ctx, reserve=reserve)
 
 
@@ -34,7 +34,7 @@ def test_budget_is_respected_and_p0_never_cut() -> None:
     # A flood of large memories must never evict identity/security, and never exceed budget.
     big = "x " * 400  # ~800 chars → well over a small budget on its own
     bundle = RetrievalBundle(memories=[_hit(big + str(i), score=0.5) for i in range(20)])
-    engine = _engine(ctx=1500, reserve=500)  # budget = 1000
+    engine = _engine(ctx=2500, reserve=500)  # budget=2000; P0 (~1080 tokens) fits, memories get dropped
     assembled = engine.assemble("what do you know?", bundle, tool_specs=[])
 
     assert "identity" in assembled.included and "security" in assembled.included
