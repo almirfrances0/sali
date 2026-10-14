@@ -33,7 +33,10 @@ _MAX = 8 * 1024
 def _desktop_env() -> dict[str, str]:
     env = dict(os.environ)
     env.setdefault("DISPLAY", ":0")
+    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
     env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path=/run/user/{os.getuid()}/bus")
+    env.setdefault("WAYLAND_DISPLAY", "wayland-0")
+    env.setdefault("ACCESSIBILITY_ENABLED", "1")
     return env
 
 
@@ -61,14 +64,31 @@ def _capture(target: str, region: Any = None) -> bytes | None:
 
 
 def _capture_argv(target: str, path: str) -> list[str] | None:
-    # Active window by default (the primary target), or the current monitor for "screen".
+    # GNOME Wayland (Ubuntu 26.04+): org.gnome.Shell.Screenshot via gdbus. This is the native
+    # Wayland screen-capture path; it works from a PAMName=login systemd session.
+    # gnome-screenshot CLI is a close second — same backend, simpler error handling.
+    # Both require the calling process to be in the active GNOME user session.
+    #
+    # X11-era tools are the floor for older/alternate desktops.
+    if shutil.which("gnome-screenshot"):
+        # -f writes directly to `path`; --in-window grabs just the focused window.
+        # No --display flag: the tool reads DISPLAY/XDG_SESSION_TYPE from our env.
+        return ["gnome-screenshot", "-f", path] + (["--in-window"] if target == "window" else [])
+    if shutil.which("gdbus"):
+        # Direct D-Bus call: works even when gnome-screenshot CLI is absent.
+        # org.gnome.Shell.Screenshot.Screenshot(include_cursor, flash, filename) -> (success, used_path)
+        return ["gdbus", "call", "--session",
+                "--dest", "org.gnome.Shell.Screenshot",
+                "--object-path", "/org/gnome/Shell/Screenshot",
+                "--method", "org.gnome.Shell.Screenshot.Screenshot",
+                "false", "false", path]
     if shutil.which("spectacle"):
         return ["spectacle", "-b", "-n", "-a" if target == "window" else "-m", "-o", path]
     if shutil.which("xfce4-screenshooter"):
         return ["xfce4-screenshooter", "-w" if target == "window" else "-f", "-s", path]
-    # ImageMagick is the floor: no desktop-environment dependency, present on any X install, and the
-    # same binary used for cropping below. Without it, a box with neither KDE nor XFCE tooling could
-    # not look at its own screen at all.
+    # ImageMagick: no desktop-environment dependency, present on any X install, and the
+    # same binary used for cropping below. Without it, a box with none of the above
+    # could not look at its own screen at all.
     if shutil.which("import"):
         return ["import", "-silent", "-window", "root", path]
     return None
@@ -138,7 +158,8 @@ class SeeScreen(Tool):
         if image is None:
             return ToolResult(ok=False, display="couldn't capture",
                               error="couldn't take a screenshot — no desktop session or screenshot "
-                                    "tool (needs spectacle/xfce4-screenshooter + a display)")
+                                    "tool (needs gnome-screenshot/gdbus+Shell.Screenshot/spectacle "
+                                    "+ a display)")
         prompt = str(args.get("prompt") or "").strip() or (
             "Describe what's on the screen: the application, what's visible, and anything notable "
             "(errors, dialogs, warnings). Be concise and concrete.")

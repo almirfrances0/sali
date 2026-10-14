@@ -1,10 +1,15 @@
-"""DesktopPerception — composes the active-window (X11) and accessibility (AT-SPI) backends.
+"""DesktopPerception — composes active-window (X11 or AT-SPI) and accessibility (AT-SPI) backends.
 
 The window signal is cheap and (almost) always present; the UI tree is best-effort and only fetched
 when asked. `snapshot` never raises: a fully unusable desktop returns ``available=False`` with a
 human-readable ``detail``. Reused by the on-demand tool and by the continuous perception loop, which
 asks for the tree only when the focused window CHANGES — the probe costs ~86ms, which is far too much
 every 3 seconds and nothing at all once per app switch.
+
+On GNOME Wayland (Ubuntu 26.04+) xdotool is absent and DISPLAY/XWayland auth is session-specific.
+The activewindow module now has two paths: X11 (xdotool, unchanged) and AT-SPI (Wayland native,
+no X11 deps). The system_python setting is forwarded to activewindow at construction time so the
+AT-SPI subprocess knows which interpreter to call.
 """
 
 from __future__ import annotations
@@ -29,6 +34,10 @@ class DesktopPerception:
     def __init__(self, settings: Any) -> None:
         self.s = settings
         self._log = get_logger("sali.perception")
+        # Forward system_python to activewindow so the AT-SPI/Wayland fallback knows
+        # which interpreter has gi bindings (Sali's 3.14 venv does not).
+        _sp = str(getattr(settings, "system_python", "/usr/bin/python3") or "/usr/bin/python3")
+        activewindow.set_system_python(_sp)
 
     async def snapshot(self, *, ui: bool = False) -> dict[str, Any]:
         window = await activewindow.active_window()
@@ -51,7 +60,8 @@ class DesktopPerception:
                     f"isn't exporting a tree")
         available = window is not None or ui_dict is not None
         if not available and not ui:
-            detail = "no active window (no display / xdotool)"
+            detail = ("no focused window — xdotool absent and AT-SPI returned nothing "
+                      "(check XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS, ACCESSIBILITY_ENABLED)")
         return {
             "available": available,
             "window": window.to_dict() if window is not None else None,

@@ -32,8 +32,21 @@ Requires=sali-power-envelope.service
 Type=simple
 User=almir
 WorkingDirectory=/home/almir/Desktop/sali
+# Wayland/GNOME session access — required for AT-SPI (focused window, UI tree) and
+# org.gnome.Shell.Screenshot (see_screen). Without XDG_RUNTIME_DIR the D-Bus session bus
+# is unreachable and both layers are dark; ACCESSIBILITY_ENABLED=1 arms the AT-SPI bridge.
+# DISPLAY=:0 is kept for XWayland clients (xprop/xrandr); Wayland-native calls do not need it.
 Environment=DISPLAY=:0
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=XDG_SESSION_TYPE=wayland
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=ACCESSIBILITY_ENABLED=1
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+# PAMName=login was tested and hangs a non-interactive systemd service (no TTY for
+# the PAM conversation). The explicit env vars above give Sali everything he needs:
+# DBUS_SESSION_BUS_ADDRESS reaches the user's GNOME session, XDG_RUNTIME_DIR exposes
+# the Wayland socket, and ACCESSIBILITY_ENABLED arms the AT-SPI bridge.
+# Allow the daemon to reach the user's systemd instance (for systemctl --user, journalctl, etc.)
 ExecStart=/home/almir/Desktop/sali/.venv/bin/sali daemon
 Restart=on-failure
 RestartSec=5

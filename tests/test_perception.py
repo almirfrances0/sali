@@ -67,12 +67,12 @@ def test_wm_class_prefers_the_instance_name() -> None:
 
 
 def test_pid_and_geometry_parsing() -> None:
-    assert activewindow._pid("_NET_WM_PID(CARDINAL) = 4242") == 4242
+    assert activewindow._pid_from_xprop("_NET_WM_PID(CARDINAL) = 4242") == 4242
     geo = activewindow._geometry("X=10\nY=20\nWIDTH=800\nHEIGHT=600\nSCREEN=0")
     assert geo == (10, 20, 800, 600)
 
 
-def test_read_sync_assembles_window_info(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_x11_assembles_window_info(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sali.perception.activewindow.shutil.which", lambda name: f"/usr/bin/{name}")
     outputs = {
         ("xdotool", "getactivewindow"): "54525959\n",
@@ -83,17 +83,17 @@ def test_read_sync_assembles_window_info(monkeypatch: pytest.MonkeyPatch) -> Non
             "WINDOW=54525959\nX=0\nY=0\nWIDTH=1920\nHEIGHT=1080\n",
     }
     monkeypatch.setattr("sali.perception.activewindow._run", lambda argv: outputs.get(tuple(argv)))
-    win = activewindow._read_sync()
+    win = activewindow._read_x11()
     assert win == WindowInfo(app="qterminal", title="almir@kali: ~", pid=4242,
                              geometry=(0, 0, 1920, 1080))
 
 
-def test_read_sync_none_without_xdotool(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_x11_none_without_xdotool(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sali.perception.activewindow.shutil.which", lambda name: None)
-    assert activewindow._read_sync() is None
+    assert activewindow._read_x11() is None
 
 
-def test_read_sync_redacts_a_secret_in_the_title(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_x11_redacts_a_secret_in_the_title(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sali.perception.activewindow.shutil.which", lambda name: f"/usr/bin/{name}")
     outputs = {
         ("xdotool", "getactivewindow"): "1\n",
@@ -101,7 +101,7 @@ def test_read_sync_redacts_a_secret_in_the_title(monkeypatch: pytest.MonkeyPatch
         ("xprop", "-id", "1", "WM_CLASS", "_NET_WM_PID"): 'WM_CLASS(STRING) = "konsole", "Konsole"\n',
     }
     monkeypatch.setattr("sali.perception.activewindow._run", lambda argv: outputs.get(tuple(argv)))
-    win = activewindow._read_sync()
+    win = activewindow._read_x11()
     assert win is not None and "hunter2" not in win.title and "[redacted]" in win.title
 
 
@@ -196,7 +196,7 @@ async def test_fake_snapshot_shape() -> None:
 
 # ── review fixes: title redaction of CLI-credential forms (§27) ───────────────
 
-def test_read_sync_redacts_inline_cli_password(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_x11_redacts_inline_cli_password(monkeypatch: pytest.MonkeyPatch) -> None:
     # `mysql -phunter2` (attached flag) is the form the plain keyword regex misses — now covered.
     monkeypatch.setattr("sali.perception.activewindow.shutil.which", lambda name: f"/usr/bin/{name}")
     outputs = {
@@ -205,7 +205,7 @@ def test_read_sync_redacts_inline_cli_password(monkeypatch: pytest.MonkeyPatch) 
         ("xprop", "-id", "1", "WM_CLASS", "_NET_WM_PID"): 'WM_CLASS(STRING) = "konsole", "Konsole"\n',
     }
     monkeypatch.setattr("sali.perception.activewindow._run", lambda argv: outputs.get(tuple(argv)))
-    win = activewindow._read_sync()
+    win = activewindow._read_x11()
     assert win is not None and "hunter2" not in win.title
 
 
@@ -215,7 +215,7 @@ def test_wm_class_ignores_not_found_line() -> None:
     assert activewindow._wm_class("WM_CLASS:  not found.") is None
 
 
-def test_read_sync_falls_back_to_unknown_without_wm_class(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_x11_falls_back_to_unknown_without_wm_class(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sali.perception.activewindow.shutil.which", lambda name: f"/usr/bin/{name}")
     outputs = {
         ("xdotool", "getactivewindow"): "7\n",
@@ -223,7 +223,7 @@ def test_read_sync_falls_back_to_unknown_without_wm_class(monkeypatch: pytest.Mo
         ("xprop", "-id", "7", "WM_CLASS", "_NET_WM_PID"): "WM_CLASS:  not found.\n_NET_WM_PID:  not found.\n",
     }
     monkeypatch.setattr("sali.perception.activewindow._run", lambda argv: outputs.get(tuple(argv)))
-    win = activewindow._read_sync()
+    win = activewindow._read_x11()
     assert win is not None and win.app == "unknown" and win.pid is None
 
 
@@ -318,11 +318,11 @@ async def test_ui_tree_never_raises_on_bad_probe_output(monkeypatch: pytest.Monk
         assert node is None or node.role == "f"  # malformed 'children' coerced, never raises
 
 
-def test_read_sync_never_raises_on_subprocess_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_x11_never_raises_on_subprocess_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sali.perception.activewindow.shutil.which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr("sali.perception.activewindow.subprocess.run",
                         _raise(subprocess.TimeoutExpired("x", 5)))
-    assert activewindow._read_sync() is None
+    assert activewindow._read_x11() is None
 
 
 # ── review fix: the tool's byte-cap anti-flood guard ─────────────────────────
@@ -353,7 +353,7 @@ async def test_desktop_snapshot_window_only(monkeypatch: pytest.MonkeyPatch) -> 
 async def test_desktop_snapshot_no_window_degrades(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sali.perception.service.activewindow.active_window", _async_return(None))
     snap = await DesktopPerception(Settings().perception).snapshot(ui=False)
-    assert not snap["available"] and "no active window" in snap["detail"]
+    assert not snap["available"] and "no focused window" in snap["detail"]
 
 
 async def test_desktop_snapshot_window_ok_but_ui_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
